@@ -3,7 +3,7 @@ uvicorn==0.24.0
 python-dotenv==1.0.0
 anthropic==0.7.1
 psycopg2-binary==2.9.12
-sqlalchemy==1.4.46
+sqlalchemy==2.0.23
 pydantic==2.13.4
 yfinance==0.2.32
 pandas==3.0.3
