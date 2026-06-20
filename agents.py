@@ -121,10 +121,21 @@ class AgentOrchestrator:
         else:
             return {"status": "REJECT", "reason": result}
 
-    async def run_workflow(self, stocks: list = None, portfolio: dict = None):
-        """Execute complete workflow - SEQUENTIAL"""
-        if not stocks:
-            stocks = ["AAPL", "GOOGL", "MSFT", "TSLA", "AMZN"]
+    async def run_workflow(self, stocks: list = None, portfolio: dict = None, include_weekend: bool = False):
+    """Execute complete workflow - SEQUENTIAL
+    
+    Args:
+        stocks: Stock list to analyze
+        portfolio: Current portfolio
+        include_weekend: True for Monday (Sat-Sun-Mon), False for Tue-Fri (24h)
+    """
+    if not stocks:
+        stocks = ["AAPL", "GOOGL", "MSFT", "TSLA", "AMZN"]
+    
+    if include_weekend:
+        print("🔄 Monday mode: Fetching Sat-Sun-Mon news...")
+    else:
+        print("📰 Regular mode: Fetching 24-hour news...")
         
         print(f"[{datetime.now()}] Starting workflow...")
         

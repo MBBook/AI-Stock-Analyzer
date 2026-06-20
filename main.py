@@ -1,16 +1,14 @@
-import os
-from dotenv import load_dotenv
-
-# Load .env file ให้ถูกต้อง
-load_dotenv()
-
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
+import os
+from dotenv import load_dotenv
 from database import get_db, engine
 from models import Base, Stock, Trade, Portfolio
 from datetime import datetime
+from scheduler import setup_scheduler, shutdown_scheduler
+
+load_dotenv()
 
 app = FastAPI(title="AI Stock Analyzer")
 
@@ -26,21 +24,13 @@ app.add_middleware(
 # สร้าง tables
 Base.metadata.create_all(bind=engine)
 
-# Scheduler
-scheduler = BackgroundScheduler()
-
 @app.on_event("startup")
 async def startup():
-    scheduler.start()
-    scheduler.add_job(run_daily_analysis, 'cron', hour=22, minute=0)
+    setup_scheduler()  # เริ่ม scheduler
 
 @app.on_event("shutdown")
 async def shutdown():
-    scheduler.shutdown()
-
-async def run_daily_analysis():
-    from agents import orchestrator
-    await orchestrator.run_workflow()
+    shutdown_scheduler()  # ปิด scheduler
 
 # ===== ROUTES =====
 
@@ -55,7 +45,6 @@ async def health():
 # Stock Management
 @app.post("/stocks")
 async def add_stock(ticker: str, db: Session = Depends(get_db)):
-    """Add stock to tracking list"""
     existing = db.query(Stock).filter(Stock.ticker == ticker).first()
     if existing:
         return {"status": "exists", "ticker": ticker}
@@ -68,7 +57,6 @@ async def add_stock(ticker: str, db: Session = Depends(get_db)):
 
 @app.get("/stocks")
 async def get_stocks(db: Session = Depends(get_db)):
-    """Get all tracked stocks"""
     stocks = db.query(Stock).all()
     return {
         "count": len(stocks),
@@ -88,7 +76,6 @@ async def get_stocks(db: Session = Depends(get_db)):
 
 @app.delete("/stocks/{ticker}")
 async def remove_stock(ticker: str, db: Session = Depends(get_db)):
-    """Remove stock from tracking"""
     stock = db.query(Stock).filter(Stock.ticker == ticker).first()
     if not stock:
         return {"status": "not_found", "ticker": ticker}
@@ -100,7 +87,6 @@ async def remove_stock(ticker: str, db: Session = Depends(get_db)):
 # Trade Updates
 @app.post("/trade-update")
 async def update_trade(ticker: str, action: str, shares: int, price: float, db: Session = Depends(get_db)):
-    """Record a trade"""
     trade = Trade(ticker=ticker, action=action, shares=shares, price=price)
     db.add(trade)
     db.commit()
@@ -110,7 +96,6 @@ async def update_trade(ticker: str, action: str, shares: int, price: float, db: 
 # Portfolio
 @app.get("/portfolio")
 async def get_portfolio(db: Session = Depends(get_db)):
-    """Get portfolio summary"""
     holdings = db.query(Portfolio).all()
     total_value = sum(h.current_value for h in holdings) if holdings else 0
     total_cost = sum(h.avg_cost * h.shares for h in holdings) if holdings else 0
@@ -136,7 +121,6 @@ async def get_portfolio(db: Session = Depends(get_db)):
 # Analysis
 @app.get("/analysis/latest")
 async def get_latest_analysis(db: Session = Depends(get_db)):
-    """Get latest analysis results"""
     stocks = db.query(Stock).all()
     return {
         "timestamp": datetime.utcnow(),
