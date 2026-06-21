@@ -4,6 +4,7 @@ Sequential Workflow with auto-fallback to next API key if current fails
 FIXED: Removed async/await, added database validation
 """
 
+import time
 from anthropic import Anthropic
 from datetime import datetime, timedelta
 import yfinance as yf
@@ -121,7 +122,8 @@ class AgentOrchestrator:
         
         try:
             news_data = {}
-            
+            time.sleep(2)
+
             for ticker in stocks:
                 try:
                     # Fetch news from yfinance
