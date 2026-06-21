@@ -1,0 +1,55 @@
+name: Auto Rotate API Keys
+
+on:
+  schedule:
+    - cron: '0 0 1,15 * *'
+  workflow_dispatch:
+
+jobs:
+  rotate-keys:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Update Render Environment Variables
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          # Rotate keys by updating Render ENV vars
+          # This shifts: 1→2, 2→3, 3→4, 4→1
+          curl -X PATCH \
+            "https://api.render.com/v1/services/$RENDER_SERVICE_ID/environment-variables" \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "variables": [
+                {
+                  "name": "ANTHROPIC_API_KEY_1",
+                  "value": "'${{ secrets.ANTHROPIC_API_KEY_2 }}'"
+                },
+                {
+                  "name": "ANTHROPIC_API_KEY_2",
+                  "value": "'${{ secrets.ANTHROPIC_API_KEY_3 }}'"
+                },
+                {
+                  "name": "ANTHROPIC_API_KEY_3",
+                  "value": "'${{ secrets.ANTHROPIC_API_KEY_4 }}'"
+                },
+                {
+                  "name": "ANTHROPIC_API_KEY_4",
+                  "value": "'${{ secrets.ANTHROPIC_API_KEY_1 }}'"
+                }
+              ]
+            }'
+
+      - name: Trigger Render Redeploy
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          curl -X POST "$RENDER_DEPLOY_HOOK"
+
+      - name: Log rotation success
+        run: |
+          echo "✅ API Keys rotated successfully at $(date)"
