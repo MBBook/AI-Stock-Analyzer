@@ -359,15 +359,19 @@ Check if signal, confidence, and S-levels are consistent."""
         self.log_action("เจน", "Generating report...", "INFO")
         
         try:
-            system_prompt = """You are เจน (Jen), a report writer.
+            system_prompt = """You are เจน (Jen), a market report writer.
 Create a professional market report summarizing:
 1. Market overview
 2. Top signals (BUY/SELL)
 3. Portfolio recommendations
 4. Risk assessment
 
-Write in Thai. Return JSON with report_html field."""
-            
+CRITICAL RULES:
+1. Write in Thai.
+2. Return JSON with a 'report_html' field containing the complete formatted report.
+3. DO NOT embed or include ANY raw JavaScript code, scripts, dynamic templates, or tags like 'new Date()' or '.toLocaleDateString()' inside the HTML content. 
+4. All dates, times, and statistics must be rendered as plain static Thai text only. No dynamic calculations allowed inside the report."""
+
             user_message = f"""Generate report based on this data:
 Analysis Results: {json.dumps(analysis_results, ensure_ascii=False)}
 Portfolio Status: {json.dumps(portfolio_status, ensure_ascii=False)}
