@@ -69,36 +69,27 @@ class AgentOrchestrator:
         print(f"[{agent_name}] {action} ({status})")
     
     def claude_call(self, system_prompt, user_message, agent_name="Claude"):
-        """ใช้ Claude API สำหรับ Agent (with auto-fallback)"""
+        """ใช้ Claude API สำหรับ Agent (with auto-fallback)
+        ✅ FIXED: แต่ละ call เป็น single-turn อิสระ ไม่ share history ข้าม agent/ticker
+        เพื่อป้องกัน: (1) token บวมสะสมตลอด workflow (2) Claude สับสน persona ข้าม agent"""
         max_attempts = len(self.api_keys)
         attempt = 0
+        messages = [{"role": "user", "content": user_message}]
         
         while attempt < max_attempts:
             try:
-                # เพิ่ม message ไปยัง conversation history
-                self.conversation_history.append({
-                    "role": "user",
-                    "content": user_message
-                })
-                
                 # Get current client
                 client = self.get_client()
                 
-                # Call Claude API (synchronous)
+                # Call Claude API (synchronous, isolated single-turn)
                 response = client.messages.create(
                     model="claude-opus-4-6",
                     max_tokens=16000,
                     system=system_prompt,
-                    messages=self.conversation_history
+                    messages=messages
                 )
                 
                 assistant_message = response.content[0].text
-                
-                # บันทึก response ไปยัง history
-                self.conversation_history.append({
-                    "role": "assistant",
-                    "content": assistant_message
-                })
                 
                 self.log_action(agent_name, f"Claude call success (Key #{self.current_key_index + 1})", "SUCCESS")
                 return assistant_message
@@ -111,9 +102,6 @@ class AgentOrchestrator:
                 if attempt < max_attempts:
                     self.log_action(agent_name, f"Trying next API key ({attempt}/{max_attempts})...", "WARNING")
                     self.rotate_to_next_key()
-                    # Remove last user message from history for retry
-                    if self.conversation_history and self.conversation_history[-1]["role"] == "user":
-                        self.conversation_history.pop()
                 else:
                     self.log_action(agent_name, f"All {max_attempts} API keys exhausted", "ERROR")
                     raise
@@ -473,15 +461,27 @@ Check if everything is correct and consistent."""
 
             response = self.claude_call(system_prompt, user_message, "นน")
 
-            json_start = response.find('{')
-            json_end = response.rfind('}') + 1
-            json_str = response[json_start:json_end]
-            qa_result = json.loads(json_str)
-        except json.JSONDecodeError:
-            qa_result = {"status": "PASS", "approval_reason": "Auto-approved"}
+            try:
+                json_start = response.find('{')
+                json_end = response.rfind('}') + 1
+                json_str = response[json_start:json_end]
+                qa_result = json.loads(json_str)
+            except json.JSONDecodeError:
+                # ✅ ไม่ auto-PASS แบบหลอกๆ — QA จริงๆ ทำไม่สำเร็จ ต้อง REJECT เพื่อความปลอดภัย
+                self.log_action("นน", "Could not parse QA response JSON — defaulting to REJECT for safety", "WARNING")
+                qa_result = {
+                    "status": "REJECT",
+                    "issues": ["QA response could not be parsed; QA was not actually performed"],
+                    "approval_reason": "Auto-rejected: unparseable QA response"
+                }
         except Exception as e:
             self.log_action("นน", f"QA check failed: {str(e)}", "ERROR")
-            return {"status": "PASS", "approval_reason": "Error recovery"}
+            # ✅ ไม่ auto-PASS แบบหลอกๆ — error ระหว่าง QA ต้อง REJECT เพื่อความปลอดภัย
+            return {
+                "status": "REJECT",
+                "issues": [f"QA call failed: {str(e)}"],
+                "approval_reason": "Auto-rejected: QA system error"
+            }
 
         self.log_action("นน", f"QA Status: {qa_result.get('status', 'PASS')}", "INFO")
         return qa_result
@@ -516,6 +516,8 @@ Suggest retry strategy."""
     # ==================== MAIN WORKFLOW ====================
     def run_workflow(self, stocks=None, portfolio=None, include_weekend=False):
         """Execute complete workflow - SEQUENTIAL
+        ✅ FIXED: เมื่อ QA REJECT จะ re-run เจน(report) + นน(QA) จริงๆ สูงสุด max_retries ครั้ง
+        แทนที่จะแค่ log คำแนะนำแล้วถือว่า "complete" ทั้งที่ reject
         
         Args:
             stocks: Stock list to analyze
@@ -534,7 +536,7 @@ Suggest retry strategy."""
             self.log_action("SYSTEM", "📰 Regular mode: Fetching 24-hour news...", "INFO")
         
         try:
-            # ========== SEQUENTIAL EXECUTION ==========
+            # ========== SEQUENTIAL EXECUTION (runs once) ==========
             
             # Step 1: นัตตี้ Get News
             news_data = self.natty_get_news(stocks, days=3 if include_weekend else 1)
@@ -548,28 +550,42 @@ Suggest retry strategy."""
             # Step 4: แฮรี่ Monitor Portfolio
             portfolio_status = self.harry_monitor_portfolio(validated_results)
             
-            # Step 5: เจน Generate Report
-            report = self.jen_generate_report(validated_results, portfolio_status)
+            # ========== REPORT + QA LOOP (real retry up to max_retries) ==========
+            report = None
+            qa_result = None
+            qa_passed = False
             
-            # Step 6: นน QA Check
-            qa_result = self.nan_qa_check(validated_results, report)
+            for attempt in range(1, self.max_retries + 1):
+                # Step 5: เจน Generate Report
+                report = self.jen_generate_report(validated_results, portfolio_status)
+                
+                # Step 6: นน QA Check
+                qa_result = self.nan_qa_check(validated_results, report)
+                
+                if qa_result.get('status') == 'PASS':
+                    qa_passed = True
+                    break
+                
+                # ❌ REJECT — ask เก้า for guidance, then actually retry (re-run เจน + นน)
+                self.log_action("SYSTEM", f"❌ QA REJECTED (attempt {attempt}/{self.max_retries})", "ERROR")
+                self.kao_retry("เจน+นน", qa_result.get('issues', ['Unknown error'])[0], attempt)
+                
+                if attempt < self.max_retries:
+                    self.log_action("SYSTEM", f"🔄 Retrying report generation + QA (attempt {attempt + 1}/{self.max_retries})...", "INFO")
             
-            # Step 7: Decision (PASS/REJECT)
-            if qa_result.get('status') == 'PASS':
+            # Step 7: Final Decision
+            if qa_passed:
                 self.log_action("SYSTEM", "✅ Workflow PASSED - Updating database...", "SUCCESS")
                 self._update_database(validated_results)
-                
-                # ✅ เอ Record improvement
                 self.log_action("เอ", "Recording improvements and code updates", "SUCCESS")
-                
+                final_status = "COMPLETE"
             else:
-                # ❌ เก้า Retry
-                self.log_action("SYSTEM", "❌ Workflow REJECTED - Attempting retry...", "ERROR")
-                self.kao_retry("workflow", qa_result.get('issues', ['Unknown error'])[0], 1)
+                self.log_action("SYSTEM", f"❌ Workflow REJECTED after {self.max_retries} attempts - Database NOT updated", "ERROR")
+                final_status = "REJECTED"
             
-            self.log_action("SYSTEM", "✅ Workflow complete!", "SUCCESS")
+            self.log_action("SYSTEM", f"Workflow finished with status: {final_status}", "SUCCESS" if qa_passed else "ERROR")
             return {
-                "status": "COMPLETE",
+                "status": final_status,
                 "workflow_log": self.workflow_log,
                 "qa_result": qa_result,
                 "report": report
@@ -580,11 +596,20 @@ Suggest retry strategy."""
             raise
 
     def _update_database(self, analysis_results):
-        """อัพเดต Database ด้วยผลลัพธ์"""
+        """อัพเดต Database ด้วยผลลัพธ์
+        ✅ FIXED: ข้าม ticker ที่ มด flag เป็น NEEDS_REVIEW (ยังไม่ผ่านการตรวจสอบจริง)
+        เพื่อไม่ให้ signal ที่ไม่ได้ validate หลุดเข้า DB เหมือนกับ validate ผ่านแล้ว"""
         try:
             db = SessionLocal()
+            skipped = []
             
             for ticker, analysis in analysis_results.items():
+                validation = analysis.get('validation', {})
+                if validation.get('recommendation') == 'NEEDS_REVIEW':
+                    skipped.append(ticker)
+                    self.log_action("DATABASE", f"Skipped {ticker}: flagged NEEDS_REVIEW by มด, not writing unvalidated signal", "WARNING")
+                    continue
+                
                 stock = db.query(Stock).filter(Stock.ticker == ticker).first()
                 if stock:
                     stock.signal = analysis.get('signal', 'HOLD')
@@ -597,7 +622,10 @@ Suggest retry strategy."""
                     db.commit()
             
             db.close()
-            self.log_action("DATABASE", "Updated stock signals", "SUCCESS")
+            if skipped:
+                self.log_action("DATABASE", f"Updated stock signals (skipped {len(skipped)}: {', '.join(skipped)})", "SUCCESS")
+            else:
+                self.log_action("DATABASE", "Updated stock signals", "SUCCESS")
         except Exception as e:
             self.log_action("DATABASE", f"Update failed: {str(e)}", "ERROR")
 
