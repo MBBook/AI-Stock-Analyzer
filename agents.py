@@ -126,8 +126,14 @@ class AgentOrchestrator:
             for ticker in stocks:
                 try:
                     time.sleep(2)
-                    # Fetch news from yfinance
-                    stock_obj = yf.Ticker(ticker)
+
+                    import requests
+                    session = requests.Session()
+                    session.headers.update({
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                        })
+            
+                    stock_obj = yf.Ticker(ticker, session=session)
                     
                     # ดึง recent data
                     hist = stock_obj.history(period=f"{days}d")
@@ -396,8 +402,8 @@ Return JSON:
 }"""
             
             user_message = f"""QA Review:
-Analysis: {json.dumps(analysis_results, ensure_ascii=False)[:1000]}
-Report: {report.get('summary', '')[:500]}
+Analysis: {json.dumps(analysis_results, ensure_ascii=False)}
+Report: {report.get('summary', '')}
 
 Check if everything is correct and consistent."""
             
