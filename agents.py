@@ -127,6 +127,7 @@ class AgentOrchestrator:
         news_data = {}
 
         session = LimiterSession(per_second=2)
+        ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         })
@@ -150,7 +151,7 @@ class AgentOrchestrator:
             except Exception as e:
                 self.log_action("นัตตี้", f"yfinance blocked! Switching to Alpha Vantage for {ticker}...", "WARNING")
                 try:
-                    url = f"https://alphavantage.co{ticker}&apikey={ALPHA_VANTAGE_KEY}"
+                    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={ALPHA_VANTAGE_KEY}"
                     res = requests.get(url).json()
                     quote = res.get("Global Quote", {})
                     
