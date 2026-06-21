@@ -9,6 +9,7 @@ import re
 from anthropic import Anthropic
 from datetime import datetime, timedelta
 import yfinance as yf
+from requests_ratelimiter import LimiterSession
 import json
 import os
 from sqlalchemy.orm import Session
@@ -124,15 +125,14 @@ class AgentOrchestrator:
         try:
             news_data = {}
 
+            session = LimiterSession(per_second=2)
+            session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        })
+
             for ticker in stocks:
                 try:
                     time.sleep(2)
-
-                    import requests
-                    session = requests.Session()
-                    session.headers.update({
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                        })
             
                     stock_obj = yf.Ticker(ticker, session=session)
                     
