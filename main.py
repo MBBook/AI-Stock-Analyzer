@@ -7,6 +7,7 @@ from database import get_db, engine
 from models import Base, Stock, Trade, Portfolio
 from datetime import datetime
 from scheduler import setup_scheduler, shutdown_scheduler
+from agents import orchestrator
 
 load_dotenv()
 
@@ -26,11 +27,11 @@ Base.metadata.create_all(bind=engine)
 
 @app.on_event("startup")
 async def startup():
-    setup_scheduler()  # เริ่ม scheduler
+    setup_scheduler()
 
 @app.on_event("shutdown")
 async def shutdown():
-    shutdown_scheduler()  # ปิด scheduler
+    shutdown_scheduler()
 
 # ===== ROUTES =====
 
@@ -45,6 +46,9 @@ async def health():
 # Stock Management
 @app.post("/stocks")
 async def add_stock(ticker: str, db: Session = Depends(get_db)):
+    
+    ticker = ticker.upper()
+
     existing = db.query(Stock).filter(Stock.ticker == ticker).first()
     if existing:
         return {"status": "exists", "ticker": ticker}
@@ -129,6 +133,63 @@ async def get_latest_analysis(db: Session = Depends(get_db)):
         "hold_signals": len([s for s in stocks if s.signal == "HOLD"]),
         "sell_signals": len([s for s in stocks if s.signal == "SELL"]),
         "workflow_status": "pending"
+    }
+
+# ===== WORKFLOW ENDPOINT (FIXED: Removed async) =====
+
+@app.post("/workflow")
+def run_workflow(include_weekend: bool = False, db: Session = Depends(get_db)):
+    """Run complete agent workflow
+    
+    Args:
+        include_weekend: True for Monday (Sat-Sun-Mon), False for Tue-Fri (24h)
+    
+    Returns:
+        Workflow execution status with logs and results
+    """
+    try:
+        # Get all stocks from database
+        stocks_list = db.query(Stock).all()
+        
+        if not stocks_list:
+            return {
+                "status": "no_stocks",
+                "message": "Add stocks first using POST /stocks",
+                "timestamp": datetime.utcnow()
+            }
+        
+        stocks = [s.ticker for s in stocks_list]
+        
+        # Run workflow (now synchronous)
+        result = orchestrator.run_workflow(
+            stocks=stocks,
+            include_weekend=include_weekend
+        )
+        
+        return {
+            "status": "success",
+            "workflow_log": result.get("workflow_log"),
+            "qa_result": result.get("qa_result"),
+            "report": result.get("report"),
+            "timestamp": datetime.utcnow()
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "workflow_log": orchestrator.workflow_log,
+            "timestamp": datetime.utcnow()
+        }
+
+# ===== WORKFLOW LOGS ENDPOINT =====
+
+@app.get("/workflow/logs")
+async def get_workflow_logs():
+    """Get latest workflow logs"""
+    return {
+        "logs": orchestrator.workflow_log,
+        "timestamp": datetime.utcnow()
     }
 
 if __name__ == "__main__":
