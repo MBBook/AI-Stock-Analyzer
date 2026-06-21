@@ -122,10 +122,10 @@ class AgentOrchestrator:
         
         try:
             news_data = {}
-            time.sleep(2)
 
             for ticker in stocks:
                 try:
+                    time.sleep(2)
                     # Fetch news from yfinance
                     stock_obj = yf.Ticker(ticker)
                     
