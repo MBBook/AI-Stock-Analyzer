@@ -5,6 +5,7 @@ FIXED: Removed async/await, added database validation
 """
 
 import time
+import re
 from anthropic import Anthropic
 from datetime import datetime, timedelta
 import yfinance as yf
@@ -401,11 +402,18 @@ Return JSON:
     "approval_reason": "..."
 }"""
             
-            user_message = f"""QA Review:
+# สกัดเอาขยะโค้ด HTML และ CSS Style ออกทั้งหมด เพื่อเซฟ Token ให้ นน QA อ่านง่าย ข้อมูลสำคัญอยู่ครบ
+        raw_report = report.get('summary', '')
+        clean_report_text = re.sub(r'<style[^>]*>.*?</style>', '', raw_report, flags=re.DOTALL)
+        clean_report_text = re.sub(r'<[^>]+>', ' ', clean_report_text)
+        clean_report_text = re.sub(r'\s+', ' ', clean_report_text).strip()
+
+        user_message = f"""QA Review:
 Analysis: {json.dumps(analysis_results, ensure_ascii=False)}
-Report: {report.get('summary', '')}
+Report Content: {clean_report_text}
 
 Check if everything is correct and consistent."""
+
             
             response = self.claude_call(system_prompt, user_message, "นน")
             
