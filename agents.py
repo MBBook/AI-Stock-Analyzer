@@ -386,7 +386,7 @@ Create professional Thai report."""
     def nan_qa_check(self, analysis_results, report):
         """นน: ตรวจสอบคุณภาพก่อนส่ง (PASS/REJECT)"""
         self.log_action("นน", "QA checking...", "INFO")
-        
+
         try:
             system_prompt = """You are นน (Nan), QA Manager.
 Review the analysis and report:
@@ -397,40 +397,37 @@ Review the analysis and report:
 
 Return JSON:
 {
-    "status": "PASS" or "REJECT",
-    "issues": [],
-    "approval_reason": "..."
+"status": "PASS" or "REJECT",
+"issues": [],
+"approval_reason": "..."
 }"""
-            
-# สกัดเอาขยะโค้ด HTML และ CSS Style ออกทั้งหมด เพื่อเซฟ Token ให้ นน QA อ่านง่าย ข้อมูลสำคัญอยู่ครบ
-        raw_report = report.get('summary', '')
-        clean_report_text = re.sub(r'<style[^>]*>.*?</style>', '', raw_report, flags=re.DOTALL)
-        clean_report_text = re.sub(r'<[^>]+>', ' ', clean_report_text)
-        clean_report_text = re.sub(r'\s+', ' ', clean_report_text).strip()
 
-        user_message = f"""QA Review:
+            raw_report = report.get('summary', '')
+            clean_report_text = re.sub(r'<style[^>]*>.*?</style>', '', raw_report, flags=re.DOTALL)
+            clean_report_text = re.sub(r'<[^>]+>', ' ', clean_report_text)
+            clean_report_text = re.sub(r'\s+', ' ', clean_report_text).strip()
+
+            user_message = f"""QA Review:
 Analysis: {json.dumps(analysis_results, ensure_ascii=False)}
 Report Content: {clean_report_text}
 
 Check if everything is correct and consistent."""
 
-            
             response = self.claude_call(system_prompt, user_message, "นน")
-            
-            try:
-                json_start = response.find('{')
-                json_end = response.rfind('}') + 1
-                json_str = response[json_start:json_end]
-                qa_result = json.loads(json_str)
-            except json.JSONDecodeError:
-                qa_result = {"status": "PASS", "approval_reason": "Auto-approved"}
-            
-            self.log_action("นน", f"QA Status: {qa_result.get('status', 'PASS')}", "INFO")
-            return qa_result
-            
+
+            json_start = response.find('{')
+            json_end = response.rfind('}') + 1
+            json_str = response[json_start:json_end]
+            qa_result = json.loads(json_str)
+        except json.JSONDecodeError:
+            qa_result = {"status": "PASS", "approval_reason": "Auto-approved"}
         except Exception as e:
             self.log_action("นน", f"QA check failed: {str(e)}", "ERROR")
             return {"status": "PASS", "approval_reason": "Error recovery"}
+
+        self.log_action("นน", f"QA Status: {qa_result.get('status', 'PASS')}", "INFO")
+        return qa_result
+
 
     # ==================== AGENT 7: เก้า (Retry Logic) ====================
     def kao_retry(self, agent_name, error_msg, attempt=1):
