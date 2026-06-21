@@ -6,6 +6,7 @@ FIXED: Removed async/await, added database validation
 
 import time
 import re
+import requests
 from anthropic import Anthropic
 from datetime import datetime, timedelta
 import yfinance as yf
@@ -119,48 +120,56 @@ class AgentOrchestrator:
 
     # ==================== AGENT 1: นัตตี้ (Get News) ====================
     def natty_get_news(self, stocks, days=1):
-        """นัตตี้: ดึงข่าวหุ้นจาก yfinance"""
-        self.log_action("นัตตี้", "Starting news fetch...", "INFO")
+        """นัตตี้: ดึงข้อมูลและข่าวสารหุ้นพร้อมระบบ Fallback ไป Alpha Vantage เมื่อเจอ 429"""
+        self.log_action("นัตตี้", "Starting news and data fetch...", "INFO")
         
-        try:
-            news_data = {}
+        ALPHA_VANTAGE_KEY = "TW3VN3U23BREK2G"
+        news_data = {}
 
-            session = LimiterSession(per_second=2)
-            session.headers.update({
+        session = LimiterSession(per_second=2)
+        session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         })
 
-            for ticker in stocks:
+        for ticker in stocks:
+            try:
+                time.sleep(2)
+                self.log_action("นัตตี้", f"Fetching {ticker} from yfinance...", "INFO")
+                stock_obj = yf.Ticker(ticker, session=session)
+                
+                if not stock_obj.info or 'currentPrice' not in stock_obj.info:
+                    raise Exception("Trigger Fallback: yfinance rate limited.")
+                
+                news_data[ticker] = {
+                    "symbol": ticker,
+                    "price": stock_obj.info.get('currentPrice', 0),
+                    "52week_high": stock_obj.info.get('fiftyTwoWeekHigh', 0),
+                    "52week_low": stock_obj.info.get('fiftyTwoWeekLow', 0)
+                }
+                
+            except Exception as e:
+                self.log_action("นัตตี้", f"yfinance blocked! Switching to Alpha Vantage for {ticker}...", "WARNING")
                 try:
-                    time.sleep(2)
-            
-                    stock_obj = yf.Ticker(ticker, session=session)
+                    url = f"https://alphavantage.co{ticker}&apikey={ALPHA_VANTAGE_KEY}"
+                    res = requests.get(url).json()
+                    quote = res.get("Global Quote", {})
                     
-                    # ดึง recent data
-                    hist = stock_obj.history(period=f"{days}d")
-                    info = stock_obj.info if hasattr(stock_obj, 'info') else {}
-                    
-                    news_data[ticker] = {
-                        "symbol": ticker,
-                        "price": info.get('currentPrice', 0),
-                        "52week_high": info.get('fiftyTwoWeekHigh', 0),
-                        "52week_low": info.get('fiftyTwoWeekLow', 0),
-                        "pe_ratio": info.get('trailingPE', 0),
-                        "market_cap": info.get('marketCap', 0),
-                        "days_fetched": days,
-                        "data_points": len(hist)
-                    }
-                except Exception as e:
-                    self.log_action("นัตตี้", f"Failed to fetch {ticker}: {str(e)}", "WARNING")
-                    continue
-            
-            self.log_action("นัตตี้", f"Fetched {len(news_data)} stocks", "SUCCESS")
-            return news_data
-            
-        except Exception as e:
-            self.log_action("นัตตี้", f"News fetch failed: {str(e)}", "ERROR")
-            raise
+                    if quote:
+                        news_data[ticker] = {
+                            "symbol": ticker,
+                            "price": float(quote.get("05. price", 0)),
+                            "52week_high": float(quote.get("03. high", 0)),
+                            "52week_low": float(quote.get("04. low", 0))
+                        }
+                    else:
+                        news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0}
+                except Exception as av_err:
+                    self.log_action("นัตตี้", f"Alpha Vantage fail: {str(av_err)}", "ERROR")
+                    news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0}
 
+        self.log_action("นัตตี้", f"Fetched {len(news_data)} stocks data successfully.", "INFO")
+        return news_data
+    
     # ==================== AGENT 2: หนุ่ม (Analyze Stocks) ====================
     def num_analyze_stocks(self, news_data, stocks):
         """หนุ่ม: วิเคราะห์หุ้นด้วย Claude + yfinance"""
