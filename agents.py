@@ -119,15 +119,33 @@ class AgentOrchestrator:
                     raise
 
     # ==================== AGENT 1: นัตตี้ (Get News) ====================
+    def _fetch_alpha_vantage_overview(self, ticker, api_key):
+        """ดึง P/E ratio และ Market Cap จาก Alpha Vantage OVERVIEW endpoint
+        คืนค่า dict {'pe_ratio': float|None, 'market_cap': float|None}
+        คืนค่า None (ไม่ใช่ 0) เมื่อหาไม่เจอ เพื่อไม่ให้ปนกับค่า P/E=0 จริง"""
+        try:
+            url = f"https://www.alphavantage.co/query?function=OVERVIEW&symbol={ticker}&apikey={api_key}"
+            res = requests.get(url, timeout=10).json()
+            pe = res.get("PERatio")
+            mcap = res.get("MarketCapitalization")
+            return {
+                "pe_ratio": float(pe) if pe not in (None, "None", "") else None,
+                "market_cap": float(mcap) if mcap not in (None, "None", "") else None
+            }
+        except Exception as e:
+            self.log_action("นัตตี้", f"Alpha Vantage OVERVIEW fail for {ticker}: {str(e)}", "WARNING")
+            return {"pe_ratio": None, "market_cap": None}
+
     def natty_get_news(self, stocks, days=1):
-        """นัตตี้: ดึงข้อมูลและข่าวสารหุ้นพร้อมระบบ Fallback ไป Alpha Vantage เมื่อเจอ 429"""
+        """นัตตี้: ดึงข้อมูลและข่าวสารหุ้นพร้อมระบบ Fallback ไป Alpha Vantage เมื่อเจอ 429
+        ดึง P/E ratio และ Market Cap เสมอ (ทั้ง yfinance path และ Alpha Vantage path)
+        เพื่อให้หนุ่มวิเคราะห์ได้ครบ ไม่ขาดข้อมูลสำคัญ"""
         self.log_action("นัตตี้", "Starting news and data fetch...", "INFO")
         
-        ALPHA_VANTAGE_KEY = "TW3VN3U23BREK2G"
+        ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
         news_data = {}
 
         session = LimiterSession(per_second=2)
-        ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         })
@@ -141,32 +159,39 @@ class AgentOrchestrator:
                 if not stock_obj.info or 'currentPrice' not in stock_obj.info:
                     raise Exception("Trigger Fallback: yfinance rate limited.")
                 
+                info = stock_obj.info
                 news_data[ticker] = {
                     "symbol": ticker,
-                    "price": stock_obj.info.get('currentPrice', 0),
-                    "52week_high": stock_obj.info.get('fiftyTwoWeekHigh', 0),
-                    "52week_low": stock_obj.info.get('fiftyTwoWeekLow', 0)
+                    "price": info.get('currentPrice', 0),
+                    "52week_high": info.get('fiftyTwoWeekHigh', 0),
+                    "52week_low": info.get('fiftyTwoWeekLow', 0),
+                    "pe_ratio": info.get('trailingPE'),
+                    "market_cap": info.get('marketCap')
                 }
                 
             except Exception as e:
                 self.log_action("นัตตี้", f"yfinance blocked! Switching to Alpha Vantage for {ticker}...", "WARNING")
                 try:
                     url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={ALPHA_VANTAGE_KEY}"
-                    res = requests.get(url).json()
+                    res = requests.get(url, timeout=10).json()
                     quote = res.get("Global Quote", {})
                     
                     if quote:
+                        # ✅ ดึง P/E + Market Cap เพิ่มจาก OVERVIEW endpoint (Alpha Vantage แยก endpoint)
+                        overview = self._fetch_alpha_vantage_overview(ticker, ALPHA_VANTAGE_KEY)
                         news_data[ticker] = {
                             "symbol": ticker,
                             "price": float(quote.get("05. price", 0)),
                             "52week_high": float(quote.get("03. high", 0)),
-                            "52week_low": float(quote.get("04. low", 0))
+                            "52week_low": float(quote.get("04. low", 0)),
+                            "pe_ratio": overview["pe_ratio"],
+                            "market_cap": overview["market_cap"]
                         }
                     else:
-                        news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0}
+                        news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
                 except Exception as av_err:
                     self.log_action("นัตตี้", f"Alpha Vantage fail: {str(av_err)}", "ERROR")
-                    news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0}
+                    news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
 
         self.log_action("นัตตี้", f"Fetched {len(news_data)} stocks data successfully.", "INFO")
         return news_data
@@ -198,13 +223,21 @@ Return ONLY JSON format:
             analysis_results = {}
             
             for ticker, data in news_data.items():
+                pe_display = data.get('pe_ratio')
+                pe_text = f"{pe_display}" if pe_display is not None else "N/A (ไม่มีข้อมูล)"
+                
+                mcap_display = data.get('market_cap')
+                mcap_text = f"${mcap_display:,.0f}" if mcap_display is not None else "N/A (ไม่มีข้อมูล)"
+                
                 user_message = f"""Analyze this stock:
 Symbol: {ticker}
 Current Price: ${data.get('price', 0)}
 52-week High: ${data.get('52week_high', 0)}
 52-week Low: ${data.get('52week_low', 0)}
-P/E Ratio: {data.get('pe_ratio', 0)}
-Market Cap: ${data.get('market_cap', 0)}
+P/E Ratio: {pe_text}
+Market Cap: {mcap_text}
+
+Note: If P/E Ratio or Market Cap is marked N/A, base your analysis primarily on price levels and the 52-week range, and lower your confidence score accordingly since fundamental data is incomplete.
 
 Provide analysis in JSON format."""
                 
@@ -282,16 +315,27 @@ Check if signal, confidence, and S-levels are consistent."""
                             "validation": result
                         }
                     except json.JSONDecodeError:
+                        # ✅ ไม่ auto-PASS แบบหลอกๆ — flag ตามจริงว่า "ยังไม่ได้ตรวจสอบ"
+                        self.log_action("มด", f"Could not parse validation JSON for {ticker} — flagging for review", "WARNING")
                         validated_results[ticker] = {
                             **analysis,
-                            "validation": {"is_valid": True, "recommendation": "PASS"}
+                            "validation": {
+                                "is_valid": None,
+                                "recommendation": "NEEDS_REVIEW",
+                                "issues": ["Validation response could not be parsed; not actually validated"]
+                            }
                         }
                     
                 except Exception as e:
                     self.log_action("มด", f"Validation failed for {ticker}: {str(e)}", "WARNING")
+                    # ✅ ไม่ auto-PASS แบบหลอกๆ — flag ตามจริงว่า "ยังไม่ได้ตรวจสอบ"
                     validated_results[ticker] = {
                         **analysis,
-                        "validation": {"is_valid": True, "recommendation": "PASS"}
+                        "validation": {
+                            "is_valid": None,
+                            "recommendation": "NEEDS_REVIEW",
+                            "issues": [f"Validation call failed: {str(e)}"]
+                        }
                     }
             
             self.log_action("มด", f"Validated {len(validated_results)} stocks", "SUCCESS")
