@@ -7,6 +7,7 @@ FIXED: Removed async/await, added database validation
 import time
 import re
 import requests
+from requests.adapters import HTTPAdapter  # ✅ FIX #I: ย้ายมา top-level
 from anthropic import Anthropic
 from datetime import datetime, timedelta
 import yfinance as yf
@@ -16,6 +17,13 @@ import os
 from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Stock, Trade, Portfolio
+
+# ✅ FIX #I: define TimeoutAdapter ที่ top-level ไม่ redefine ในลูปทุกครั้งที่เรียก natty
+class TimeoutAdapter(HTTPAdapter):
+    """Force 10-second timeout on all requests — ป้องกัน workflow ค้างถ้า server รับแต่ไม่ตอบ"""
+    def send(self, request, **kwargs):
+        kwargs.setdefault('timeout', 10)
+        return super().send(request, **kwargs)
 
 class AgentOrchestrator:
     def __init__(self):
@@ -115,13 +123,26 @@ class AgentOrchestrator:
 
     @staticmethod
     def _safe_float(val):
-        """แปลงค่าเป็น float อย่างปลอดภัย
-        ✅ FIX #3: รองรับ edge cases ทั้งหมดที่ Alpha Vantage / Finnhub อาจส่งมา
-        คืน None เมื่อค่าว่าง, placeholder, หรือแปลงไม่ได้ — ไม่ crash ด้วย ValueError"""
+        """แปลงค่าเป็น float อย่างปลอดภัย — ใช้กับ fundamental data (P/E, Market Cap, 52-week)
+        ✅ FIX #F: รองรับค่าลบ (เช่น P/E ติดลบกรณีบริษัทขาดทุน) — คืน None เฉพาะ placeholder
+        ต่างจาก _safe_positive_float ที่ใช้กับ price ซึ่งต้องเป็นบวกเสมอ"""
         if val is None:
             return None
         cleaned = str(val).strip()
-        # placeholder strings ที่ API มักส่งมาเมื่อไม่มีข้อมูล
+        if cleaned in ("", "None", "N/A", "-", "0", "0.0", "nan", "NaN"):
+            return None
+        try:
+            return float(cleaned)  # ✅ รับค่าลบได้ — P/E ติดลบ = บริษัทขาดทุน ≠ "ไม่มีข้อมูล"
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _safe_positive_float(val):
+        """แปลงค่าเป็น float บวกอย่างปลอดภัย — ใช้กับ price เท่านั้น
+        ✅ FIX #F: price ต้องเป็นบวกเสมอ ค่าลบหรือ 0 = ข้อมูลเสีย"""
+        if val is None:
+            return None
+        cleaned = str(val).strip()
         if cleaned in ("", "None", "N/A", "-", "0", "0.0", "nan", "NaN"):
             return None
         try:
@@ -138,22 +159,21 @@ class AgentOrchestrator:
             # Call 1: ราคาปัจจุบัน real-time
             quote_url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={api_key}"
             quote = requests.get(quote_url, timeout=10).json()
-            price = self._safe_float(quote.get("c"))  # c = current price
+            price = self._safe_positive_float(quote.get("c"))  # price ต้องบวกเสมอ
 
             if not price:
-                return None  # ถ้าไม่มีราคาเลย → ไม่มีประโยชน์วิเคราะห์
+                return None
 
-            # Call 2: fundamental + 52-week range (แยก endpoint)
             metric_url = f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={api_key}"
             metric = requests.get(metric_url, timeout=10).json().get("metric", {})
 
             return {
                 "symbol":      ticker,
                 "price":       price,
-                "52week_high": self._safe_float(metric.get("52WeekHigh")),
-                "52week_low":  self._safe_float(metric.get("52WeekLow")),
-                "pe_ratio":    self._safe_float(metric.get("peNormalizedAnnual")),
-                "market_cap":  self._safe_float(metric.get("marketCapitalization")),
+                "52week_high": self._safe_positive_float(metric.get("52WeekHigh")),
+                "52week_low":  self._safe_positive_float(metric.get("52WeekLow")),
+                "pe_ratio":    self._safe_float(metric.get("peNormalizedAnnual")),        # ✅ ลบได้
+                "market_cap":  self._safe_positive_float(metric.get("marketCapitalization")),
                 "source":      "finnhub"
             }
         except Exception as e:
@@ -169,12 +189,11 @@ class AgentOrchestrator:
             res = requests.get(url, timeout=10).json()
 
             return {
-                "pe_ratio":       self._safe_float(res.get("PERatio")),
-                "market_cap":     self._safe_float(res.get("MarketCapitalization")),
-                "52week_high":    self._safe_float(res.get("52WeekHigh")),
-                "52week_low":     self._safe_float(res.get("52WeekLow")),
-                # 200DMA เป็น fallback price (ไม่ real-time แต่ดีกว่าส่ง 0 ให้หนุ่ม)
-                "price_fallback": self._safe_float(res.get("200DayMovingAverage")),
+                "pe_ratio":       self._safe_float(res.get("PERatio")),                         # ✅ ลบได้
+                "market_cap":     self._safe_positive_float(res.get("MarketCapitalization")),
+                "52week_high":    self._safe_positive_float(res.get("52WeekHigh")),
+                "52week_low":     self._safe_positive_float(res.get("52WeekLow")),
+                "price_fallback": self._safe_positive_float(res.get("200DayMovingAverage")),    # price ต้องบวก
             }
         except Exception as e:
             self.log_action("นัตตี้", f"Alpha Vantage OVERVIEW fail for {ticker}: {str(e)}", "WARNING")
@@ -203,11 +222,7 @@ class AgentOrchestrator:
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         })
-        from requests.adapters import HTTPAdapter
-        class TimeoutAdapter(HTTPAdapter):
-            def send(self, request, **kwargs):
-                kwargs.setdefault('timeout', 10)
-                return super().send(request, **kwargs)
+        # ✅ FIX #I: TimeoutAdapter ย้ายไป top-level แล้ว ใช้ได้เลยไม่ต้อง redefine
         session.mount('https://', TimeoutAdapter())
         session.mount('http://', TimeoutAdapter())
 
@@ -224,17 +239,17 @@ class AgentOrchestrator:
                     raise Exception("yfinance: no currentPrice returned")
 
                 info  = stock_obj.info
-                price = self._safe_float(info.get('currentPrice'))
+                price = self._safe_positive_float(info.get('currentPrice'))
                 if not price:
                     raise Exception("yfinance: currentPrice is 0 or None")
 
                 data = {
                     "symbol":      ticker,
                     "price":       price,
-                    "52week_high": self._safe_float(info.get('fiftyTwoWeekHigh')),
-                    "52week_low":  self._safe_float(info.get('fiftyTwoWeekLow')),
-                    "pe_ratio":    self._safe_float(info.get('trailingPE')),
-                    "market_cap":  self._safe_float(info.get('marketCap')),
+                    "52week_high": self._safe_positive_float(info.get('fiftyTwoWeekHigh')),
+                    "52week_low":  self._safe_positive_float(info.get('fiftyTwoWeekLow')),
+                    "pe_ratio":    self._safe_float(info.get('trailingPE')),         # ✅ ลบได้
+                    "market_cap":  self._safe_positive_float(info.get('marketCap')),
                     "source":      "yfinance"
                 }
                 self.log_action("นัตตี้", f"[Tier 1] ✅ {ticker} OK (price={price})", "SUCCESS")
@@ -318,21 +333,37 @@ Return ONLY JSON format:
                 self.log_action("หนุ่ม", f"Skipping {skipped_no_data} — no data received from นัตตี้ (all tiers failed)", "WARNING")
 
             for ticker, data in news_data.items():
-                pe_display = data.get('pe_ratio')
-                pe_text = f"{pe_display}" if pe_display is not None else "N/A (ไม่มีข้อมูล)"
-                
+                pe_display  = data.get('pe_ratio')
+                # ✅ FIX #F: แสดง P/E ลบได้ (บริษัทขาดทุน) ≠ N/A
+                if pe_display is not None:
+                    pe_text = f"{pe_display:.2f}" + (" (ขาดทุน — P/E ติดลบ)" if pe_display < 0 else "")
+                else:
+                    pe_text = "N/A (ไม่มีข้อมูล)"
+
                 mcap_display = data.get('market_cap')
                 mcap_text = f"${mcap_display:,.0f}" if mcap_display is not None else "N/A (ไม่มีข้อมูล)"
-                
+
+                # ✅ FIX #G: บอก Claude ว่าราคามาจาก source ไหน เพื่อปรับ confidence ตาม data quality
+                source = data.get('source', 'unknown')
+                source_note = {
+                    'yfinance':      "Real-time price (high reliability)",
+                    'finnhub':       "Real-time price via Finnhub (high reliability)",
+                    'alpha_vantage': "200-day moving average used as price proxy (lower reliability — not real-time)",
+                }.get(source, f"Unknown source: {source} (treat with caution)")
+
                 user_message = f"""Analyze this stock:
 Symbol: {ticker}
 Current Price: ${data.get('price', 0)}
-52-week High: ${data.get('52week_high', 0)}
-52-week Low: ${data.get('52week_low', 0)}
+52-week High: ${data.get('52week_high', 0) or 'N/A'}
+52-week Low: ${data.get('52week_low', 0) or 'N/A'}
 P/E Ratio: {pe_text}
 Market Cap: {mcap_text}
+Data Source: {source_note}
 
-Note: If P/E Ratio or Market Cap is marked N/A, base your analysis primarily on price levels and the 52-week range, and lower your confidence score accordingly since fundamental data is incomplete.
+Note:
+- If P/E or Market Cap is N/A, base analysis on price and 52-week range, lower confidence accordingly.
+- If P/E is negative, the company is currently loss-making — factor this into your signal.
+- If Data Source mentions 'lower reliability', reduce confidence score by at least 0.15.
 
 Provide analysis in JSON format."""
                 
@@ -750,6 +781,17 @@ Reply in Thai, 2-3 sentences only."""
 
             # Step 2: หนุ่ม Analyze
             analysis_results = self.num_analyze_stocks(news_data, stocks)
+
+            # ✅ FIX #H: early exit ถ้า Claude วิเคราะห์ไม่ได้เลย ไม่ให้เจน/นน เสีย token โดยเปล่าประโยชน์
+            if not analysis_results:
+                self.log_action("SYSTEM", "❌ No analysis results from หนุ่ม — aborting workflow", "ERROR")
+                return {
+                    "status": "ABORTED",
+                    "reason": "หนุ่ม could not analyze any stocks — all Claude calls failed",
+                    "workflow_log": self.workflow_log,
+                    "qa_result": None,
+                    "report": None
+                }
 
             # Step 3: มด Cross-Validate
             validated_results = self.mud_cross_validate(analysis_results)
