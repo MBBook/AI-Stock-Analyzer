@@ -20,7 +20,6 @@ from models import Stock, Trade, Portfolio
 class AgentOrchestrator:
     def __init__(self):
         self.workflow_log = []
-        self.conversation_history = []
         self.error_count = {}
         self.max_retries = 3
         
@@ -108,21 +107,24 @@ class AgentOrchestrator:
 
     # ==================== AGENT 1: นัตตี้ (Get News) ====================
     def _fetch_alpha_vantage_overview(self, ticker, api_key):
-        """ดึง P/E ratio และ Market Cap จาก Alpha Vantage OVERVIEW endpoint
-        คืนค่า dict {'pe_ratio': float|None, 'market_cap': float|None}
-        คืนค่า None (ไม่ใช่ 0) เมื่อหาไม่เจอ เพื่อไม่ให้ปนกับค่า P/E=0 จริง"""
+        """ดึง P/E ratio, Market Cap และ 52-week range จาก Alpha Vantage OVERVIEW endpoint
+        คืนค่า None (ไม่ใช่ 0) เมื่อหาไม่เจอ เพื่อไม่ให้ปนกับค่าจริง"""
         try:
             url = f"https://www.alphavantage.co/query?function=OVERVIEW&symbol={ticker}&apikey={api_key}"
             res = requests.get(url, timeout=10).json()
-            pe = res.get("PERatio")
-            mcap = res.get("MarketCapitalization")
+            
+            def safe_float(val):
+                return float(val) if val not in (None, "None", "") else None
+            
             return {
-                "pe_ratio": float(pe) if pe not in (None, "None", "") else None,
-                "market_cap": float(mcap) if mcap not in (None, "None", "") else None
+                "pe_ratio":    safe_float(res.get("PERatio")),
+                "market_cap":  safe_float(res.get("MarketCapitalization")),
+                "52week_high": safe_float(res.get("52WeekHigh")),
+                "52week_low":  safe_float(res.get("52WeekLow")),
             }
         except Exception as e:
             self.log_action("นัตตี้", f"Alpha Vantage OVERVIEW fail for {ticker}: {str(e)}", "WARNING")
-            return {"pe_ratio": None, "market_cap": None}
+            return {"pe_ratio": None, "market_cap": None, "52week_high": None, "52week_low": None}
 
     def natty_get_news(self, stocks, days=1):
         """นัตตี้: ดึงข้อมูลและข่าวสารหุ้นพร้อมระบบ Fallback ไป Alpha Vantage เมื่อเจอ 429
@@ -181,13 +183,15 @@ class AgentOrchestrator:
                     quote = res.get("Global Quote", {})
                     
                     if quote:
-                        # ✅ ดึง P/E + Market Cap เพิ่มจาก OVERVIEW endpoint (Alpha Vantage แยก endpoint)
+                        # ✅ ดึง P/E + Market Cap + 52-week range จาก OVERVIEW endpoint
+                        # หมายเหตุ: GLOBAL_QUOTE มีแค่ intraday high/low ไม่ใช่ 52-week
+                        # ต้องใช้ OVERVIEW ซึ่งมี 52WeekHigh / 52WeekLow จริง ๆ
                         overview = self._fetch_alpha_vantage_overview(ticker, ALPHA_VANTAGE_KEY)
                         news_data[ticker] = {
                             "symbol": ticker,
                             "price": float(quote.get("05. price", 0)),
-                            "52week_high": float(quote.get("03. high", 0)),
-                            "52week_low": float(quote.get("04. low", 0)),
+                            "52week_high": overview.get("52week_high"),
+                            "52week_low": overview.get("52week_low"),
                             "pe_ratio": overview["pe_ratio"],
                             "market_cap": overview["market_cap"]
                         }
@@ -493,9 +497,24 @@ Return JSON:
             clean_report_text = re.sub(r'<[^>]+>', ' ', clean_report_text)
             clean_report_text = re.sub(r'\s+', ' ', clean_report_text).strip()
 
+            # ✅ ส่งเฉพาะ field ที่ นน ต้องการจริง ๆ (ไม่ส่ง full object รวม HTML ด้วย)
+            # เพื่อลด token ที่ใช้และป้องกัน context overflow
+            qa_summary = {
+                ticker: {
+                    "signal": data.get("signal"),
+                    "confidence": data.get("confidence"),
+                    "s1": data.get("s1"),
+                    "s2": data.get("s2"),
+                    "s3": data.get("s3"),
+                    "reasoning": data.get("reasoning"),
+                    "validation": data.get("validation", {}).get("recommendation")
+                }
+                for ticker, data in analysis_results.items()
+            }
+
             user_message = f"""QA Review:
-Analysis: {json.dumps(analysis_results, ensure_ascii=False)}
-Report Content: {clean_report_text}
+Analysis Summary: {json.dumps(qa_summary, ensure_ascii=False)}
+Report Content: {clean_report_text[:3000]}
 
 Check if everything is correct and consistent."""
 
@@ -568,7 +587,6 @@ Suggest retry strategy."""
             stocks = ["AAPL", "GOOGL", "MSFT", "TSLA", "AMZN"]
         
         self.workflow_log = []
-        self.conversation_history = []
         
         if include_weekend:
             self.log_action("SYSTEM", "🔄 Monday mode: Fetching Sat-Sun-Mon news...", "INFO")
