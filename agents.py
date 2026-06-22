@@ -44,6 +44,12 @@ class AgentOrchestrator:
         
         self.log_action("SYSTEM", f"Loaded {len(self.api_keys)} API keys", "INFO")
         self.log_action("SYSTEM", "Database URL validated", "INFO")
+
+        # ✅ FIX #D: validate API keys ตั้งแต่ boot ไม่รอให้ workflow fail ก่อนค่อยรู้
+        if not os.getenv("FINNHUB_API_KEY"):
+            self.log_action("SYSTEM", "⚠️ FINNHUB_API_KEY not set — Tier 2 (Finnhub) will be unavailable", "WARNING")
+        if not os.getenv("ALPHA_VANTAGE_API_KEY"):
+            self.log_action("SYSTEM", "⚠️ ALPHA_VANTAGE_API_KEY not set — Tier 3 (Alpha Vantage) will be unavailable", "WARNING")
     
     def get_client(self):
         """Get Anthropic client with current API key"""
@@ -305,7 +311,12 @@ Return ONLY JSON format:
 }"""
             
             analysis_results = {}
-            
+
+            # ✅ FIX #B: log tickers ที่ข้ามไปเพราะ นัตตี้ ไม่มีข้อมูล
+            skipped_no_data = [t for t in stocks if t not in news_data]
+            if skipped_no_data:
+                self.log_action("หนุ่ม", f"Skipping {skipped_no_data} — no data received from นัตตี้ (all tiers failed)", "WARNING")
+
             for ticker, data in news_data.items():
                 pe_display = data.get('pe_ratio')
                 pe_text = f"{pe_display}" if pe_display is not None else "N/A (ไม่มีข้อมูล)"
@@ -507,11 +518,11 @@ Check if signal, confidence, and S-levels are consistent."""
         return "HOLD"
 
     # ==================== AGENT 5: เจน (Generate Report) ====================
-    def jen_generate_report(self, analysis_results, portfolio_status):
+    def jen_generate_report(self, analysis_results, portfolio_status, retry_hint=None):
         """เจน: สร้าง Report สรุปจากการวิเคราะห์
         ✅ FIX #6: ส่งแค่ field ที่จำเป็นให้เจน ไม่ส่ง nested validation object ทั้งก้อน
-        ลด token ต่อ call และป้องกัน context overflow เมื่อมีหุ้น 30-40 ตัว"""
-        self.log_action("เจน", "Generating report...", "INFO")
+        ✅ FIX #C: รับ retry_hint จากเก้า เพื่อปรับปรุง report ในรอบ retry"""
+        self.log_action("เจน", f"Generating report{'  (retry with hint)' if retry_hint else ''}...", "INFO")
         
         try:
             system_prompt = """You are เจน (Jen), a market report writer.
@@ -543,10 +554,13 @@ CRITICAL RULES:
                 for ticker, data in analysis_results.items()
             }
 
+            # เพิ่ม retry hint จากเก้า ถ้ามี (รอบ retry เท่านั้น)
+            retry_section = f"\n\nFEEDBACK FROM PREVIOUS ATTEMPT:\n{retry_hint}\nPlease address the above issues in this report." if retry_hint else ""
+
             user_message = f"""Generate report based on this data:
 Analysis Results: {json.dumps(jen_summary, ensure_ascii=False)}
 Portfolio Status: {json.dumps(portfolio_status, ensure_ascii=False)}
-
+{retry_section}
 Create professional Thai report."""
             
             response = self.claude_call(system_prompt, user_message, "เจน")
@@ -666,31 +680,35 @@ Check if everything is correct and consistent."""
         return qa_result
 
 
-    # ==================== AGENT 7: เก้า (Retry Logic) ====================
     def kao_retry(self, agent_name, error_msg, attempt=1):
-        """เก้า: Retry Assistant (max 3 times)"""
+        """เก้า: Retry Assistant (max 3 times)
+        ✅ FIX #C: คืน retry_hint กลับไปให้ run_workflow ส่งต่อให้เจน
+        เพื่อให้เจนรู้ว่าต้องแก้อะไรในรอบถัดไป ไม่ใช่แค่เสีย token แต่ไม่ได้ประโยชน์"""
         if attempt > self.max_retries:
             self.log_action("เก้า", f"Max retries exceeded for {agent_name}", "ERROR")
-            return False
-        
-        self.log_action("เก้า", f"Retrying {agent_name} (Attempt {attempt})", "INFO")
-        
+            return None
+
+        self.log_action("เก้า", f"Analyzing failure for {agent_name} (Attempt {attempt})", "INFO")
+
         try:
             system_prompt = """You are เก้า (Kao), Retry Assistant.
-Suggest how to fix the error and retry."""
-            
-            user_message = f"""Agent {agent_name} failed with error:
+Analyze the QA failure and provide specific, actionable guidance for the report writer.
+Be concise — 2-3 sentences max.
+Focus on what the report writer should fix or avoid in the next attempt."""
+
+            user_message = f"""The report was REJECTED by QA with this issue:
 {error_msg}
 
-Suggest retry strategy."""
-            
+What specific changes should the report writer make in the next attempt?
+Reply in Thai, 2-3 sentences only."""
+
             response = self.claude_call(system_prompt, user_message, "เก้า")
-            self.log_action("เก้า", f"Retry suggestion provided", "SUCCESS")
-            return True
-            
+            self.log_action("เก้า", f"Retry hint generated: {response[:100]}...", "SUCCESS")
+            return response  # ✅ คืน hint กลับไปให้ run_workflow
+
         except Exception as e:
-            self.log_action("เก้า", f"Retry failed: {str(e)}", "ERROR")
-            return False
+            self.log_action("เก้า", f"Retry hint generation failed: {str(e)}", "ERROR")
+            return None
 
     # ==================== MAIN WORKFLOW ====================
     def run_workflow(self, stocks=None, portfolio=None, include_weekend=False):
@@ -718,36 +736,51 @@ Suggest retry strategy."""
             
             # Step 1: นัตตี้ Get News
             news_data = self.natty_get_news(stocks, days=3 if include_weekend else 1)
-            
+
+            # ✅ FIX #A: early exit ถ้าไม่มีข้อมูลหุ้นเลย ไม่ให้ workflow รันต่อแบบ COMPLETE ปลอม
+            if not news_data:
+                self.log_action("SYSTEM", "❌ No stock data fetched from any source — aborting workflow", "ERROR")
+                return {
+                    "status": "ABORTED",
+                    "reason": "All data sources failed — yfinance, Finnhub, and Alpha Vantage all returned no data",
+                    "workflow_log": self.workflow_log,
+                    "qa_result": None,
+                    "report": None
+                }
+
             # Step 2: หนุ่ม Analyze
             analysis_results = self.num_analyze_stocks(news_data, stocks)
-            
+
             # Step 3: มด Cross-Validate
             validated_results = self.mud_cross_validate(analysis_results)
-            
+
             # Step 4: แฮรี่ Monitor Portfolio
             portfolio_status = self.harry_monitor_portfolio(validated_results)
-            
+
             # ========== REPORT + QA LOOP (real retry up to max_retries) ==========
             report = None
             qa_result = None
             qa_passed = False
-            
+            retry_hint = None  # ✅ FIX #C: เก็บ hint จากเก้าเพื่อส่งให้เจนในรอบถัดไป
+
             for attempt in range(1, self.max_retries + 1):
-                # Step 5: เจน Generate Report
-                report = self.jen_generate_report(validated_results, portfolio_status)
-                
+                # Step 5: เจน Generate Report (ส่ง retry_hint ถ้ามี)
+                report = self.jen_generate_report(validated_results, portfolio_status, retry_hint=retry_hint)
+
                 # Step 6: นน QA Check
                 qa_result = self.nan_qa_check(validated_results, report)
-                
+
                 if qa_result.get('status') == 'PASS':
                     qa_passed = True
                     break
-                
-                # ❌ REJECT — ask เก้า for guidance, then actually retry (re-run เจน + นน)
+
+                # ❌ REJECT — เก้า วิเคราะห์ failure และคืน hint ให้เจนรอบถัดไป
                 self.log_action("SYSTEM", f"❌ QA REJECTED (attempt {attempt}/{self.max_retries})", "ERROR")
-                self.kao_retry("เจน+นน", qa_result.get('issues', ['Unknown error'])[0], attempt)
-                
+                issue_msg = qa_result.get('issues', ['Unknown error'])[0] if qa_result.get('issues') else 'Unknown error'
+
+                # ✅ FIX #C: เก็บ hint จากเก้าเพื่อส่งต่อให้เจน (ไม่เสีย token เปล่า)
+                retry_hint = self.kao_retry("เจน+นน", issue_msg, attempt)
+
                 if attempt < self.max_retries:
                     self.log_action("SYSTEM", f"🔄 Retrying report generation + QA (attempt {attempt + 1}/{self.max_retries})...", "INFO")
             
@@ -781,34 +814,39 @@ Suggest retry strategy."""
         try:
             db = SessionLocal()
             skipped = []
-            
+            updated = []
+
             for ticker, analysis in analysis_results.items():
                 validation = analysis.get('validation', {})
                 if validation.get('recommendation') == 'NEEDS_REVIEW':
                     skipped.append(ticker)
-                    self.log_action("DATABASE", f"Skipped {ticker}: flagged NEEDS_REVIEW by มด, not writing unvalidated signal", "WARNING")
+                    self.log_action("DATABASE", f"Skipped {ticker}: flagged NEEDS_REVIEW by มด", "WARNING")
                     continue
-                
+
                 if analysis.get('s1') is None or analysis.get('confidence', 0) == 0.0:
                     skipped.append(ticker)
-                    self.log_action("DATABASE", f"Skipped {ticker}: no real price data available, not writing placeholder signal", "WARNING")
+                    self.log_action("DATABASE", f"Skipped {ticker}: no real price data, not writing placeholder signal", "WARNING")
                     continue
-                
+
                 stock = db.query(Stock).filter(Stock.ticker == ticker).first()
                 if stock:
-                    stock.signal = analysis.get('signal', 'HOLD')
+                    stock.signal     = analysis.get('signal', 'HOLD')
                     stock.confidence = analysis.get('confidence', 0.5)
                     stock.fair_price = analysis.get('fair_price', stock.current_price)
-                    stock.s1 = analysis.get('s1', stock.current_price)
-                    stock.s2 = analysis.get('s2', stock.current_price)
-                    stock.s3 = analysis.get('s3', stock.current_price)
+                    stock.s1         = analysis.get('s1', stock.current_price)
+                    stock.s2         = analysis.get('s2', stock.current_price)
+                    stock.s3         = analysis.get('s3', stock.current_price)
                     stock.updated_at = datetime.now()
-                    db.commit()
-            
+                    updated.append(ticker)
+
+            # ✅ FIX #E: commit ครั้งเดียวหลัง loop จบ (แทน N commits แยก)
+            # ลด DB round trips จาก N → 1 ประหยัดเวลาเมื่อมีหุ้น 30-40 ตัว
+            db.commit()
+
+            summary = f"Updated: {updated}" if updated else "No stocks updated"
             if skipped:
-                self.log_action("DATABASE", f"Updated stock signals (skipped {len(skipped)}: {', '.join(skipped)})", "SUCCESS")
-            else:
-                self.log_action("DATABASE", "Updated stock signals", "SUCCESS")
+                summary += f" | Skipped: {skipped}"
+            self.log_action("DATABASE", summary, "SUCCESS")
         except Exception as e:
             self.log_action("DATABASE", f"Update failed: {str(e)}", "ERROR")
         finally:
