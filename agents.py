@@ -529,7 +529,7 @@ Return JSON:
 
             user_message = f"""QA Review:
 Analysis Summary: {json.dumps(qa_summary, ensure_ascii=False)}
-Report Content: {clean_report_text[:3000]}
+Report Content: {clean_report_text}
 
 Check if everything is correct and consistent."""
 
