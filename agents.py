@@ -106,39 +106,97 @@ class AgentOrchestrator:
                     raise
 
     # ==================== AGENT 1: นัตตี้ (Get News) ====================
+
+    @staticmethod
+    def _safe_float(val):
+        """แปลงค่าเป็น float อย่างปลอดภัย
+        ✅ FIX #3: รองรับ edge cases ทั้งหมดที่ Alpha Vantage / Finnhub อาจส่งมา
+        คืน None เมื่อค่าว่าง, placeholder, หรือแปลงไม่ได้ — ไม่ crash ด้วย ValueError"""
+        if val is None:
+            return None
+        cleaned = str(val).strip()
+        # placeholder strings ที่ API มักส่งมาเมื่อไม่มีข้อมูล
+        if cleaned in ("", "None", "N/A", "-", "0", "0.0", "nan", "NaN"):
+            return None
+        try:
+            result = float(cleaned)
+            return result if result > 0 else None
+        except (ValueError, TypeError):
+            return None
+
+    def _fetch_finnhub_full(self, ticker, api_key):
+        """ดึงข้อมูลครบจาก Finnhub: ราคา + 52-week + P/E + Market Cap
+        ✅ FIX #2: ใช้ /stock/metric แทน /quote เพื่อได้ 52WeekHigh/Low จริง (ไม่ใช่ intraday)
+        Finnhub free tier: 60 req/min — รองรับพอร์ต 30-40 ตัวได้สบาย"""
+        try:
+            # Call 1: ราคาปัจจุบัน real-time
+            quote_url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={api_key}"
+            quote = requests.get(quote_url, timeout=10).json()
+            price = self._safe_float(quote.get("c"))  # c = current price
+
+            if not price:
+                return None  # ถ้าไม่มีราคาเลย → ไม่มีประโยชน์วิเคราะห์
+
+            # Call 2: fundamental + 52-week range (แยก endpoint)
+            metric_url = f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={api_key}"
+            metric = requests.get(metric_url, timeout=10).json().get("metric", {})
+
+            return {
+                "symbol":      ticker,
+                "price":       price,
+                "52week_high": self._safe_float(metric.get("52WeekHigh")),
+                "52week_low":  self._safe_float(metric.get("52WeekLow")),
+                "pe_ratio":    self._safe_float(metric.get("peNormalizedAnnual")),
+                "market_cap":  self._safe_float(metric.get("marketCapitalization")),
+                "source":      "finnhub"
+            }
+        except Exception as e:
+            self.log_action("นัตตี้", f"Finnhub full fetch fail for {ticker}: {str(e)}", "WARNING")
+            return None
+
     def _fetch_alpha_vantage_overview(self, ticker, api_key):
-        """ดึง P/E ratio, Market Cap และ 52-week range จาก Alpha Vantage OVERVIEW endpoint
-        คืนค่า None (ไม่ใช่ 0) เมื่อหาไม่เจอ เพื่อไม่ให้ปนกับค่าจริง"""
+        """ดึงข้อมูลจาก Alpha Vantage OVERVIEW endpoint (Tier 3 - last resort)
+        ✅ FIX #3: safe_float อัปเดตรองรับ edge cases ครบ ("-", "N/A", " " ฯลฯ)
+        ⚠️  Rate limit: 5 req/min, 25 req/day — ใช้เฉพาะกรณี Tier 1+2 ล้มเหลว"""
         try:
             url = f"https://www.alphavantage.co/query?function=OVERVIEW&symbol={ticker}&apikey={api_key}"
             res = requests.get(url, timeout=10).json()
-            
-            def safe_float(val):
-                return float(val) if val not in (None, "None", "") else None
-            
+
             return {
-                "pe_ratio":    safe_float(res.get("PERatio")),
-                "market_cap":  safe_float(res.get("MarketCapitalization")),
-                "52week_high": safe_float(res.get("52WeekHigh")),
-                "52week_low":  safe_float(res.get("52WeekLow")),
+                "pe_ratio":       self._safe_float(res.get("PERatio")),
+                "market_cap":     self._safe_float(res.get("MarketCapitalization")),
+                "52week_high":    self._safe_float(res.get("52WeekHigh")),
+                "52week_low":     self._safe_float(res.get("52WeekLow")),
+                # 200DMA เป็น fallback price (ไม่ real-time แต่ดีกว่าส่ง 0 ให้หนุ่ม)
+                "price_fallback": self._safe_float(res.get("200DayMovingAverage")),
             }
         except Exception as e:
             self.log_action("นัตตี้", f"Alpha Vantage OVERVIEW fail for {ticker}: {str(e)}", "WARNING")
-            return {"pe_ratio": None, "market_cap": None, "52week_high": None, "52week_low": None}
+            return {"pe_ratio": None, "market_cap": None, "52week_high": None, "52week_low": None, "price_fallback": None}
 
     def natty_get_news(self, stocks, days=1):
-        """นัตตี้: ระบบสายสำรอง 3 ชั้น (yfinance -> Finnhub -> Alpha Vantage) รองรับพอร์ตใหญ่ไร้บั๊ก 429"""
-        self.log_action("นัตตี้", "Starting news and data fetch...", "INFO")
+        """นัตตี้: ระบบสายสำรอง 3 ชั้น รองรับพอร์ต 30-40 ตัวได้สบาย
+        Tier 1 (yfinance):      ฟรี ครบ แต่ติด 429 บน cloud IP
+        Tier 2 (Finnhub):       60 req/min ไม่จำกัด daily ✅ ข้อมูลครบ P/E + 52-week จริง
+        Tier 3 (Alpha Vantage): 5 req/min 25/day ⚠️  สำรองสุดท้ายเท่านั้น
+        ✅ FIX #1: API keys โหลดจาก environment variables ไม่ hardcode ใน code"""
+        self.log_action("นัตตี้", "Starting news and data fetch (3-tier fallback)...", "INFO")
 
-        FINNHUB_KEY = "d8sh0gpr01qq7apvkbbgd8sh0gpr01qq7apvkbc0"
-        ALPHA_VANTAGE_KEY = "TW3VN3U23BREK2G"
+        # ✅ FIX #1: ดึง keys จาก Render ENV ไม่ hardcode ใน source code
+        FINNHUB_KEY       = os.getenv("FINNHUB_API_KEY")
+        ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+
+        if not FINNHUB_KEY:
+            self.log_action("นัตตี้", "⚠️  FINNHUB_API_KEY not set — Tier 2 disabled", "WARNING")
+        if not ALPHA_VANTAGE_KEY:
+            self.log_action("นัตตี้", "⚠️  ALPHA_VANTAGE_API_KEY not set — Tier 3 disabled", "WARNING")
+
         news_data = {}
 
         session = LimiterSession(per_second=2)
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         })
-
         from requests.adapters import HTTPAdapter
         class TimeoutAdapter(HTTPAdapter):
             def send(self, request, **kwargs):
@@ -148,67 +206,77 @@ class AgentOrchestrator:
         session.mount('http://', TimeoutAdapter())
 
         for ticker in stocks:
+            data = None
+
+            # ===== TIER 1: yfinance =====
             try:
-                time.sleep(1.2) # ชะลอความเร็วปลอดภัยต่อโควตา Finnhub 60 req/min
-                self.log_action("นัตตี้", f"Fetching {ticker} from yfinance...", "INFO")
+                time.sleep(1.2)
+                self.log_action("นัตตี้", f"[Tier 1] Fetching {ticker} via yfinance...", "INFO")
                 stock_obj = yf.Ticker(ticker, session=session)
 
                 if not stock_obj.info or 'currentPrice' not in stock_obj.info:
-                    raise Exception("Trigger Fallback: yfinance rate limited.")
+                    raise Exception("yfinance: no currentPrice returned")
 
-                info = stock_obj.info
-                news_data[ticker] = {
-                    "symbol": ticker,
-                    "price": info.get('currentPrice', 0),
-                    "52week_high": info.get('fiftyTwoWeekHigh', 0),
-                    "52week_low": info.get('fiftyTwoWeekLow', 0),
-                    "pe_ratio": info.get('trailingPE'),
-                    "market_cap": info.get('marketCap')
+                info  = stock_obj.info
+                price = self._safe_float(info.get('currentPrice'))
+                if not price:
+                    raise Exception("yfinance: currentPrice is 0 or None")
+
+                data = {
+                    "symbol":      ticker,
+                    "price":       price,
+                    "52week_high": self._safe_float(info.get('fiftyTwoWeekHigh')),
+                    "52week_low":  self._safe_float(info.get('fiftyTwoWeekLow')),
+                    "pe_ratio":    self._safe_float(info.get('trailingPE')),
+                    "market_cap":  self._safe_float(info.get('marketCap')),
+                    "source":      "yfinance"
                 }
+                self.log_action("นัตตี้", f"[Tier 1] ✅ {ticker} OK (price={price})", "SUCCESS")
 
             except Exception as e:
-                # 🔵 สายสำรองชั้นที่ 1: ดีดตัวเข้าหา Finnhub ดึงราคา (โควตาสูง 60 ครั้ง/นาที)
-                self.log_action("นัตตี้", f"yfinance blocked! Switching to Finnhub for {ticker}...", "WARNING")
-                try:
-                    fh_url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_KEY}"
-                    fh_res = requests.get(fh_url, timeout=10).json()
+                self.log_action("นัตตี้", f"[Tier 1] {ticker} failed: {str(e)}", "WARNING")
 
-                    if fh_res and "c" in fh_res and fh_res["c"] != 0:
-                        news_data[ticker] = {
-                            "symbol": ticker,
-                            "price": float(fh_res.get("c", 0)),
-                            "52week_high": float(fh_res.get("h", 0)),
-                            "52week_low": float(fh_res.get("l", 0)),
-                            "pe_ratio": None,
-                            "market_cap": None
-                        }
-                    else:
-                        raise Exception("Finnhub returned empty or zero data.")
+            # ===== TIER 2: Finnhub (ถ้า Tier 1 fail) =====
+            if data is None and FINNHUB_KEY:
+                self.log_action("นัตตี้", f"[Tier 2] Trying Finnhub for {ticker}...", "INFO")
+                fh_data = self._fetch_finnhub_full(ticker, FINNHUB_KEY)
+                if fh_data:
+                    data = fh_data
+                    self.log_action("นัตตี้", f"[Tier 2] ✅ {ticker} OK via Finnhub (price={fh_data['price']})", "SUCCESS")
+                else:
+                    self.log_action("นัตตี้", f"[Tier 2] Finnhub returned no usable data for {ticker}", "WARNING")
 
-                except Exception as fh_err:
-                    # 🟢 สายสำรองสุดท้าย (Ultimate Fallback): เจาะระบบด่านตรวจ Alpha Vantage ยิงสายเดี่ยวเซฟคำขอ
-                    self.log_action("นัตตี้", f"Finnhub failed! Switching to Alpha Vantage final gate for {ticker}...", "ERROR")
-                    try:
-                        av_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={ALPHA_VANTAGE_KEY}"
-                        av_res = requests.get(av_url, timeout=10).json()
-                        quote = av_res.get("Global Quote", {})
-                        
-                        if quote:
-                            news_data[ticker] = {
-                                "symbol": ticker,
-                                "price": float(quote.get("05. price", 0)),
-                                "52week_high": float(quote.get("03. high", 0)),
-                                "52week_low": float(quote.get("04. low", 0)),
-                                "pe_ratio": None,
-                                "market_cap": None
-                            }
-                        else:
-                            news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
-                    except Exception as err:
-                        self.log_action("นัตตี้", f"All fallback methods failed for {ticker}: {str(err)}", "CRITICAL")
-                        news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
+            # ===== TIER 3: Alpha Vantage (ถ้า Tier 1+2 fail) =====
+            if data is None and ALPHA_VANTAGE_KEY:
+                self.log_action("นัตตี้", f"[Tier 3] Trying Alpha Vantage for {ticker}...", "INFO")
+                ov = self._fetch_alpha_vantage_overview(ticker, ALPHA_VANTAGE_KEY)
+                price = ov.get("price_fallback")
+                if price:
+                    data = {
+                        "symbol":      ticker,
+                        "price":       price,
+                        "52week_high": ov.get("52week_high"),
+                        "52week_low":  ov.get("52week_low"),
+                        "pe_ratio":    ov.get("pe_ratio"),
+                        "market_cap":  ov.get("market_cap"),
+                        "source":      "alpha_vantage"
+                    }
+                    self.log_action("นัตตี้", f"[Tier 3] ✅ {ticker} OK via Alpha Vantage", "SUCCESS")
+                else:
+                    self.log_action("นัตตี้", f"[Tier 3] Alpha Vantage returned no price for {ticker}", "WARNING")
 
-        self.log_action("นัตตี้", f"Fetched {len(news_data)} stocks data successfully.", "INFO")
+            # ===== ทุก Tier fail → skip ticker นี้ ไม่ส่งข้อมูลไม่ครบให้หนุ่ม =====
+            if data is None:
+                self.log_action("นัตตี้", f"❌ All tiers failed for {ticker} — skipping (ไม่วิเคราะห์ด้วยข้อมูลไม่ครบ)", "ERROR")
+                continue
+
+            # log เตือนถ้าขาด P/E (หนุ่มจะได้รับแจ้งใน prompt)
+            if data.get("pe_ratio") is None:
+                self.log_action("นัตตี้", f"⚠️  {ticker}: P/E unavailable (loss-making co. หรือ API ไม่มีข้อมูล)", "WARNING")
+
+            news_data[ticker] = data
+
+        self.log_action("นัตตี้", f"Fetched {len(news_data)}/{len(stocks)} stocks (source breakdown in logs above)", "SUCCESS")
         return news_data
 
 
