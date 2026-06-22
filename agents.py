@@ -130,7 +130,6 @@ class AgentOrchestrator:
         """นัตตี้: ระบบสายสำรอง 3 ชั้น (yfinance -> Finnhub -> Alpha Vantage) รองรับพอร์ตใหญ่ไร้บั๊ก 429"""
         self.log_action("นัตตี้", "Starting news and data fetch...", "INFO")
         
-        # 🔑 ฝังคีย์ความปลอดภัย Finnhub ตัวจริงของนายเรียบร้อยแล้วครับ
         FINNHUB_KEY = "d8sh0gpr01qq7apvkbbgd8sh0gpr01qq7apvkbc0"
         ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
         news_data = {}
@@ -187,7 +186,7 @@ class AgentOrchestrator:
                         raise Exception("Finnhub returned empty or zero data.")
                         
                 except Exception as fh_err:
-                    # 🟢 สายสำรองสุดท้าย (Ultimate Fallback): เจาะระบบด่านตรวจ Alpha Vantage
+                    # 🟢 สายสำรองสุดท้าย (Ultimate Fallback): เจาะระบบด่านตรวจ Alpha Vantage ยิงสายเดี่ยวเซฟคำขอ
                     self.log_action("นัตตี้", f"Finnhub failed! Switching to Alpha Vantage final gate for {ticker}...", "ERROR")
                     try:
                         if not ALPHA_VANTAGE_KEY:
@@ -198,20 +197,20 @@ class AgentOrchestrator:
                         quote = av_res.get("Global Quote", {})
                         
                         if quote:
-                            overview = self._fetch_alpha_vantage_overview(ticker, ALPHA_VANTAGE_KEY)
                             news_data[ticker] = {
                                 "symbol": ticker,
                                 "price": float(quote.get("05. price", 0)),
-                                "52week_high": overview.get("52week_high"),
-                                "52week_low": overview.get("52week_low"),
-                                "pe_ratio": overview.get("pe_ratio"),
-                                "market_cap": overview.get("market_cap")
+                                "52week_high": float(quote.get("03. high", 0)),
+                                "52week_low": float(quote.get("04. low", 0)),
+                                "pe_ratio": None,
+                                "market_cap": None
                             }
                         else:
                             news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
                     except Exception as av_err:
                         self.log_action("นัตตี้", f"All fallback methods failed for {ticker}: {str(av_err)}", "CRITICAL")
                         news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
+
 
                     self.log_action("นัตตี้", f"Alpha Vantage fail: {str(av_err)}", "ERROR")
                     news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
