@@ -129,8 +129,7 @@ class AgentOrchestrator:
     def natty_get_news(self, stocks, days=1):
         """นัตตี้: ระบบสายสำรอง 3 ชั้น (yfinance -> Finnhub -> Alpha Vantage) รองรับพอร์ตใหญ่ไร้บั๊ก 429"""
         self.log_action("นัตตี้", "Starting news and data fetch...", "INFO")
-        
-        # 🔑 ฝังรหัส API คีย์ตัวจริงของนายครบถ้วนทั้งสองค่ายเรียบร้อยครับ
+
         FINNHUB_KEY = "d8sh0gpr01qq7apvkbbgd8sh0gpr01qq7apvkbc0"
         ALPHA_VANTAGE_KEY = "TW3VN3U23BREK2G"
         news_data = {}
@@ -139,7 +138,7 @@ class AgentOrchestrator:
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         })
-        
+
         from requests.adapters import HTTPAdapter
         class TimeoutAdapter(HTTPAdapter):
             def send(self, request, **kwargs):
@@ -153,10 +152,10 @@ class AgentOrchestrator:
                 time.sleep(1.2) # ชะลอความเร็วปลอดภัยต่อโควตา Finnhub 60 req/min
                 self.log_action("นัตตี้", f"Fetching {ticker} from yfinance...", "INFO")
                 stock_obj = yf.Ticker(ticker, session=session)
-                
+
                 if not stock_obj.info or 'currentPrice' not in stock_obj.info:
                     raise Exception("Trigger Fallback: yfinance rate limited.")
-                
+
                 info = stock_obj.info
                 news_data[ticker] = {
                     "symbol": ticker,
@@ -166,15 +165,14 @@ class AgentOrchestrator:
                     "pe_ratio": info.get('trailingPE'),
                     "market_cap": info.get('marketCap')
                 }
-                
+
             except Exception as e:
                 # 🔵 สายสำรองชั้นที่ 1: ดีดตัวเข้าหา Finnhub ดึงราคา (โควตาสูง 60 ครั้ง/นาที)
                 self.log_action("นัตตี้", f"yfinance blocked! Switching to Finnhub for {ticker}...", "WARNING")
                 try:
-                    # 🚀 FIXED URL: เติมพาร์ทข้อความคำสั่งเต็มระบบ ดึงราคาผ่านฉลุย
-                    fh_url = f"https://finnhub.io{ticker}&token={FINNHUB_KEY}"
+                    fh_url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_KEY}"
                     fh_res = requests.get(fh_url, timeout=10).json()
-                    
+
                     if fh_res and "c" in fh_res and fh_res["c"] != 0:
                         news_data[ticker] = {
                             "symbol": ticker,
@@ -186,13 +184,12 @@ class AgentOrchestrator:
                         }
                     else:
                         raise Exception("Finnhub returned empty or zero data.")
-                        
+
                 except Exception as fh_err:
                     # 🟢 สายสำรองสุดท้าย (Ultimate Fallback): เจาะระบบด่านตรวจ Alpha Vantage ยิงสายเดี่ยวเซฟคำขอ
                     self.log_action("นัตตี้", f"Finnhub failed! Switching to Alpha Vantage final gate for {ticker}...", "ERROR")
                     try:
-                        # 🚀 FIXED URL: เติมฟังก์ชันดึงค่า Global Quote ปิดประตูสายสำรองหลุดค้าง
-                        av_url = f"https://alphavantage.co{ticker}&apikey={ALPHA_VANTAGE_KEY}"
+                        av_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={ALPHA_VANTAGE_KEY}"
                         av_res = requests.get(av_url, timeout=10).json()
                         quote = av_res.get("Global Quote", {})
                         
