@@ -211,10 +211,6 @@ class AgentOrchestrator:
                         self.log_action("นัตตี้", f"All fallback methods failed for {ticker}: {str(av_err)}", "CRITICAL")
                         news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
 
-
-                    self.log_action("นัตตี้", f"Alpha Vantage fail: {str(av_err)}", "ERROR")
-                    news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
-
         self.log_action("นัตตี้", f"Fetched {len(news_data)} stocks data successfully.", "INFO")
         return news_data
     
