@@ -131,12 +131,22 @@ class AgentOrchestrator:
         self.log_action("นัตตี้", "Starting news and data fetch...", "INFO")
         
         ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+        if not ALPHA_VANTAGE_KEY:
+            self.log_action("นัตตี้", "ALPHA_VANTAGE_API_KEY not set — fallback will be skipped if yfinance fails", "WARNING")
         news_data = {}
 
         session = LimiterSession(per_second=2)
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         })
+        # ✅ ป้องกัน workflow ค้างไม่จบ ถ้า Yahoo เซิร์ฟเวอร์รับ request แต่ไม่ตอบกลับ
+        from requests.adapters import HTTPAdapter
+        class TimeoutAdapter(HTTPAdapter):
+            def send(self, request, **kwargs):
+                kwargs.setdefault('timeout', 10)
+                return super().send(request, **kwargs)
+        session.mount('https://', TimeoutAdapter())
+        session.mount('http://', TimeoutAdapter())
 
         for ticker in stocks:
             try:
@@ -159,6 +169,12 @@ class AgentOrchestrator:
                 
             except Exception as e:
                 self.log_action("นัตตี้", f"yfinance blocked! Switching to Alpha Vantage for {ticker}...", "WARNING")
+                
+                if not ALPHA_VANTAGE_KEY:
+                    self.log_action("นัตตี้", f"Skipping Alpha Vantage for {ticker}: no API key configured", "ERROR")
+                    news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
+                    continue
+                
                 try:
                     url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={ALPHA_VANTAGE_KEY}"
                     res = requests.get(url, timeout=10).json()
@@ -238,17 +254,37 @@ Provide analysis in JSON format."""
                         json_end = response.rfind('}') + 1
                         json_str = response[json_start:json_end]
                         result = json.loads(json_str)
+                        
+                        # ✅ ตรวจว่า signal เป็นค่าที่ระบบรองรับจริง ไม่งั้น frontend แสดงผลผิด
+                        if result.get('signal') not in ('BUY', 'HOLD', 'SELL'):
+                            self.log_action("หนุ่ม", f"{ticker}: invalid signal value '{result.get('signal')}' from Claude, defaulting to HOLD", "WARNING")
+                            result['signal'] = 'HOLD'
+                        
                         analysis_results[ticker] = result
                     except json.JSONDecodeError:
-                        analysis_results[ticker] = {
-                            "ticker": ticker,
-                            "signal": "HOLD",
-                            "confidence": 0.5,
-                            "s1": data.get('price', 0) * 0.95,
-                            "s2": data.get('price', 0) * 0.90,
-                            "s3": data.get('price', 0) * 0.85,
-                            "reasoning": "Unable to parse detailed analysis"
-                        }
+                        fallback_price = data.get('price', 0)
+                        if fallback_price <= 0:
+                            # ✅ ราคาไม่มีข้อมูลจริง (0 จาก fetch fail) — ห้ามคำนวณ S-levels ปลอม
+                            self.log_action("หนุ่ม", f"{ticker}: price data unavailable, flagging instead of guessing", "WARNING")
+                            analysis_results[ticker] = {
+                                "ticker": ticker,
+                                "signal": "HOLD",
+                                "confidence": 0.0,
+                                "s1": None,
+                                "s2": None,
+                                "s3": None,
+                                "reasoning": "No price data available — analysis skipped, not a real signal"
+                            }
+                        else:
+                            analysis_results[ticker] = {
+                                "ticker": ticker,
+                                "signal": "HOLD",
+                                "confidence": 0.5,
+                                "s1": fallback_price * 0.95,
+                                "s2": fallback_price * 0.90,
+                                "s3": fallback_price * 0.85,
+                                "reasoning": "Unable to parse detailed analysis"
+                            }
                     
                 except Exception as e:
                     self.log_action("หนุ่ม", f"Analysis failed for {ticker}: {str(e)}", "WARNING")
@@ -338,10 +374,10 @@ Check if signal, confidence, and S-levels are consistent."""
         """แฮรี่: ตรวจสอบ Portfolio ว่า align กับ signals ไหม"""
         self.log_action("แฮรี่", "Monitoring portfolio...", "INFO")
         
+        db = None
         try:
             db = SessionLocal()
             portfolio_holdings = db.query(Portfolio).all()
-            db.close()
             
             portfolio_status = {
                 "total_holdings": len(portfolio_holdings),
@@ -369,6 +405,10 @@ Check if signal, confidence, and S-levels are consistent."""
         except Exception as e:
             self.log_action("แฮรี่", f"Portfolio monitoring failed: {str(e)}", "ERROR")
             raise
+        finally:
+            # ✅ ปิด connection เสมอ ไม่ว่าจะสำเร็จหรือ exception เพื่อป้องกัน connection leak
+            if db is not None:
+                db.close()
     
     def _check_alignment(self, signal, shares):
         """ตรวจสอบว่า signal align กับ holdings ไหม"""
@@ -599,6 +639,7 @@ Suggest retry strategy."""
         """อัพเดต Database ด้วยผลลัพธ์
         ✅ FIXED: ข้าม ticker ที่ มด flag เป็น NEEDS_REVIEW (ยังไม่ผ่านการตรวจสอบจริง)
         เพื่อไม่ให้ signal ที่ไม่ได้ validate หลุดเข้า DB เหมือนกับ validate ผ่านแล้ว"""
+        db = None
         try:
             db = SessionLocal()
             skipped = []
@@ -608,6 +649,11 @@ Suggest retry strategy."""
                 if validation.get('recommendation') == 'NEEDS_REVIEW':
                     skipped.append(ticker)
                     self.log_action("DATABASE", f"Skipped {ticker}: flagged NEEDS_REVIEW by มด, not writing unvalidated signal", "WARNING")
+                    continue
+                
+                if analysis.get('s1') is None or analysis.get('confidence', 0) == 0.0:
+                    skipped.append(ticker)
+                    self.log_action("DATABASE", f"Skipped {ticker}: no real price data available, not writing placeholder signal", "WARNING")
                     continue
                 
                 stock = db.query(Stock).filter(Stock.ticker == ticker).first()
@@ -621,13 +667,16 @@ Suggest retry strategy."""
                     stock.updated_at = datetime.now()
                     db.commit()
             
-            db.close()
             if skipped:
                 self.log_action("DATABASE", f"Updated stock signals (skipped {len(skipped)}: {', '.join(skipped)})", "SUCCESS")
             else:
                 self.log_action("DATABASE", "Updated stock signals", "SUCCESS")
         except Exception as e:
             self.log_action("DATABASE", f"Update failed: {str(e)}", "ERROR")
+        finally:
+            # ✅ ปิด connection เสมอ ไม่ว่าจะสำเร็จหรือ exception
+            if db is not None:
+                db.close()
 
 
 # Initialize orchestrator
