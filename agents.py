@@ -79,36 +79,45 @@ class AgentOrchestrator:
         self.workflow_log.append(log_entry)
         print(f"[{agent_name}] {action} ({status})")
     
-    def claude_call(self, system_prompt, user_message, agent_name="Claude"):
-        """ใช้ Claude API สำหรับ Agent (with auto-fallback)
-        ✅ FIXED: แต่ละ call เป็น single-turn อิสระ ไม่ share history ข้าม agent/ticker
-        เพื่อป้องกัน: (1) token บวมสะสมตลอด workflow (2) Claude สับสน persona ข้าม agent"""
+    # Model constants — ใช้ตามประเภทงาน
+    MODEL_SONNET = "claude-sonnet-4-6"   # วิเคราะห์หุ้น, validate, report, QA
+    MODEL_HAIKU  = "claude-haiku-4-5-20251001"  # งานทั่วไป, สรุป, parse, log
+
+    def claude_call(self, system_prompt, user_message, agent_name="Claude", model=None, use_cache=False):
+        """ใช้ Claude API สำหรับ Agent (with auto-fallback + model selection + caching)
+        ✅ model: ระบุ model ที่ต้องการ (default = Sonnet)
+        ✅ use_cache: เปิด prompt caching บน system_prompt (ลด cost ~50% สำหรับ repeated calls)"""
+        if model is None:
+            model = self.MODEL_SONNET
+
         max_attempts = len(self.api_keys)
         attempt = 0
+
+        # Build system prompt block — with caching if requested
+        if use_cache:
+            system_block = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
+        else:
+            system_block = system_prompt
+
         messages = [{"role": "user", "content": user_message}]
-        
+
         while attempt < max_attempts:
             try:
-                # Get current client
                 client = self.get_client()
-                
-                # Call Claude API (synchronous, isolated single-turn)
                 response = client.messages.create(
-                    model="claude-opus-4-6",
-                    max_tokens=16000,
-                    system=system_prompt,
-                    messages=messages
+                    model=model,
+                    max_tokens=4096,
+                    system=system_block,
+                    messages=messages,
+                    extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"} if use_cache else {}
                 )
-                
                 assistant_message = response.content[0].text
-                
-                self.log_action(agent_name, f"Claude call success (Key #{self.current_key_index + 1})", "SUCCESS")
+                self.log_action(agent_name, f"Claude call success ({model.split('-')[1]} Key#{self.current_key_index + 1})", "SUCCESS")
                 return assistant_message
-                
+
             except Exception as e:
                 error_msg = str(e)
                 self.log_action(agent_name, f"Claude call error on Key #{self.current_key_index + 1}: {error_msg}", "ERROR")
-                
                 attempt += 1
                 if attempt < max_attempts:
                     self.log_action(agent_name, f"Trying next API key ({attempt}/{max_attempts})...", "WARNING")
@@ -197,7 +206,42 @@ class AgentOrchestrator:
             self.log_action("นัตตี้", f"Alpha Vantage OVERVIEW fail for {ticker}: {str(e)}", "WARNING")
             return {"pe_ratio": None, "market_cap": None, "52week_high": None, "52week_low": None, "price_fallback": None}
 
-    def natty_get_news(self, stocks, days=1):
+    def _fetch_finnhub_news(self, ticker, api_key, days=3):
+        """ดึงข่าวล่าสุดจาก Finnhub News API (ฟรี 60 req/min)
+        คืน list of {headline, summary, source, datetime} สูงสุด 5 ข่าว"""
+        try:
+            from_date = (datetime.now() - __import__('datetime').timedelta(days=days)).strftime('%Y-%m-%d')
+            to_date   = datetime.now().strftime('%Y-%m-%d')
+            url = f"https://finnhub.io/api/v1/company-news?symbol={ticker}&from={from_date}&to={to_date}&token={api_key}"
+            res = requests.get(url, timeout=10).json()
+            if not isinstance(res, list):
+                return []
+            news = []
+            for item in res[:5]:  # เอาแค่ 5 ข่าวล่าสุด
+                news.append({
+                    "headline": item.get("headline", ""),
+                    "summary":  item.get("summary",  "")[:300],  # ตัดที่ 300 chars ต่อข่าว
+                    "source":   item.get("source",   ""),
+                    "datetime": datetime.fromtimestamp(item.get("datetime", 0)).strftime('%Y-%m-%d %H:%M') if item.get("datetime") else ""
+                })
+            return news
+        except Exception as e:
+            self.log_action("นัตตี้", f"Finnhub news fail for {ticker}: {str(e)}", "WARNING")
+            return []
+
+    def _summarize_news(self, ticker, news_list):
+        """นัตตี้สรุปข่าวด้วย Haiku — ราคาถูก เพียงพอสำหรับ summarization"""
+        if not news_list:
+            return "ไม่มีข่าวล่าสุด"
+        system_prompt = """คุณคือนักข่าวที่สรุปข่าวหุ้นอย่างกระชับ
+สรุปข่าวที่ได้รับเป็นภาษาไทย 2-3 ประโยค เน้นผลกระทบต่อราคาหุ้น
+ตอบเป็น plain text ไม่ต้องมี JSON"""
+        news_text = "\n".join([f"- [{n['source']}] {n['headline']}: {n['summary']}" for n in news_list])
+        user_message = f"สรุปข่าวของ {ticker}:\n{news_text}"
+        try:
+            return self.claude_call(system_prompt, user_message, "นัตตี้", model=self.MODEL_HAIKU)
+        except Exception:
+            return "\n".join([n["headline"] for n in news_list[:3]])  # fallback: แค่ headlines
         """นัตตี้: ระบบสายสำรอง 3 ชั้น รองรับพอร์ต 30-40 ตัวได้สบาย
         Tier 1 (yfinance):      ฟรี ครบ แต่ติด 429 บน cloud IP
         Tier 2 (Finnhub):       60 req/min ไม่จำกัด daily ✅ ข้อมูลครบ P/E + 52-week จริง
@@ -293,6 +337,15 @@ class AgentOrchestrator:
             if data.get("pe_ratio") is None:
                 self.log_action("นัตตี้", f"⚠️  {ticker}: P/E unavailable (loss-making co. หรือ API ไม่มีข้อมูล)", "WARNING")
 
+            # ✅ ดึงข่าวจาก Finnhub News + สรุปด้วย Haiku
+            if FINNHUB_KEY:
+                news_list = self._fetch_finnhub_news(ticker, FINNHUB_KEY, days=days)
+                data["news_summary"] = self._summarize_news(ticker, news_list)
+                data["news_count"]   = len(news_list)
+            else:
+                data["news_summary"] = "ไม่มี Finnhub key — ไม่ได้ดึงข่าว"
+                data["news_count"]   = 0
+
             news_data[ticker] = data
 
         self.log_action("นัตตี้", f"Fetched {len(news_data)}/{len(stocks)} stocks (source breakdown in logs above)", "SUCCESS")
@@ -301,16 +354,23 @@ class AgentOrchestrator:
 
     # ==================== AGENT 2: หนุ่ม (Analyze Stocks) ====================
     def num_analyze_stocks(self, news_data, stocks):
-        """หนุ่ม: วิเคราะห์หุ้นด้วย Claude + yfinance"""
+        """หนุ่ม: วิเคราะห์หุ้นด้วย Claude Sonnet + ข่าวจากนัตตี้
+        ✅ Sonnet: reasoning แม่นสำหรับ signal ที่กระทบการลงทุน
+        ✅ Prompt caching: ประหยัด ~50% บน system_prompt ที่เหมือนกันทุก ticker"""
         self.log_action("หนุ่ม", "Starting stock analysis...", "INFO")
         
         try:
             system_prompt = """You are หนุ่ม (Num), a professional stock analyst.
-Analyze the stock data and provide:
+Analyze the stock data AND recent news to provide:
 1. BUY/HOLD/SELL signal
 2. Confidence score (0-1)
 3. 3 support/resistance levels (S1, S2, S3)
-4. Brief reasoning in Thai
+4. Brief reasoning in Thai (รวม sentiment ข่าวด้วย)
+
+IMPORTANT:
+- ถ้า P/E ติดลบ = บริษัทขาดทุน ให้ factor นี้เข้าไปใน signal
+- ถ้า Data Source เป็น lower reliability ให้ลด confidence อย่างน้อย 0.15
+- ถ้าข่าวเป็นลบมาก ให้ลด confidence หรือเปลี่ยน signal เป็น HOLD/SELL
 
 Return ONLY JSON format:
 {
@@ -322,17 +382,15 @@ Return ONLY JSON format:
     "s3": 140.0,
     "reasoning": "..."
 }"""
-            
+
             analysis_results = {}
 
-            # ✅ FIX #B: log tickers ที่ข้ามไปเพราะ นัตตี้ ไม่มีข้อมูล
             skipped_no_data = [t for t in stocks if t not in news_data]
             if skipped_no_data:
-                self.log_action("หนุ่ม", f"Skipping {skipped_no_data} — no data received from นัตตี้ (all tiers failed)", "WARNING")
+                self.log_action("หนุ่ม", f"Skipping {skipped_no_data} — no data from นัตตี้", "WARNING")
 
             for ticker, data in news_data.items():
-                pe_display  = data.get('pe_ratio')
-                # ✅ FIX #F: แสดง P/E ลบได้ (บริษัทขาดทุน) ≠ N/A
+                pe_display = data.get('pe_ratio')
                 if pe_display is not None:
                     pe_text = f"{pe_display:.2f}" + (" (ขาดทุน — P/E ติดลบ)" if pe_display < 0 else "")
                 else:
@@ -341,93 +399,77 @@ Return ONLY JSON format:
                 mcap_display = data.get('market_cap')
                 mcap_text = f"${mcap_display:,.0f}" if mcap_display is not None else "N/A (ไม่มีข้อมูล)"
 
-                # ✅ FIX #G: บอก Claude ว่าราคามาจาก source ไหน เพื่อปรับ confidence ตาม data quality
                 source = data.get('source', 'unknown')
                 source_note = {
                     'yfinance':      "Real-time price (high reliability)",
                     'finnhub':       "Real-time price via Finnhub (high reliability)",
-                    'alpha_vantage': "200-day moving average used as price proxy (lower reliability — not real-time)",
+                    'alpha_vantage': "200-day moving average as price proxy (lower reliability — not real-time)",
                 }.get(source, f"Unknown source: {source} (treat with caution)")
+
+                news_summary = data.get('news_summary', 'ไม่มีข่าว')
 
                 user_message = f"""Analyze this stock:
 Symbol: {ticker}
 Current Price: ${data.get('price', 0)}
-52-week High: ${data.get('52week_high', 0) or 'N/A'}
-52-week Low: ${data.get('52week_low', 0) or 'N/A'}
+52-week High: ${data.get('52week_high') or 'N/A'}
+52-week Low: ${data.get('52week_low') or 'N/A'}
 P/E Ratio: {pe_text}
 Market Cap: {mcap_text}
 Data Source: {source_note}
 
-Note:
-- If P/E or Market Cap is N/A, base analysis on price and 52-week range, lower confidence accordingly.
-- If P/E is negative, the company is currently loss-making — factor this into your signal.
-- If Data Source mentions 'lower reliability', reduce confidence score by at least 0.15.
+Recent News Summary:
+{news_summary}
 
 Provide analysis in JSON format."""
-                
+
                 try:
-                    response = self.claude_call(system_prompt, user_message, "หนุ่ม")
-                    
-                    # Parse JSON response
+                    # ✅ Sonnet + caching บน system_prompt
+                    response = self.claude_call(system_prompt, user_message, "หนุ่ม",
+                                                model=self.MODEL_SONNET, use_cache=True)
                     try:
                         json_start = response.find('{')
-                        json_end = response.rfind('}') + 1
-                        json_str = response[json_start:json_end]
-                        result = json.loads(json_str)
-                        
-                        # ✅ ตรวจว่า signal เป็นค่าที่ระบบรองรับจริง ไม่งั้น frontend แสดงผลผิด
+                        json_end   = response.rfind('}') + 1
+                        result     = json.loads(response[json_start:json_end])
+
                         if result.get('signal') not in ('BUY', 'HOLD', 'SELL'):
-                            self.log_action("หนุ่ม", f"{ticker}: invalid signal value '{result.get('signal')}' from Claude, defaulting to HOLD", "WARNING")
+                            self.log_action("หนุ่ม", f"{ticker}: invalid signal '{result.get('signal')}' → defaulting HOLD", "WARNING")
                             result['signal'] = 'HOLD'
-                        
+
                         analysis_results[ticker] = result
+
                     except json.JSONDecodeError:
-                        fallback_price = data.get('price', 0)
-                        if fallback_price <= 0:
-                            # ✅ ราคาไม่มีข้อมูลจริง (0 จาก fetch fail) — ห้ามคำนวณ S-levels ปลอม
-                            self.log_action("หนุ่ม", f"{ticker}: price data unavailable, flagging instead of guessing", "WARNING")
-                            analysis_results[ticker] = {
-                                "ticker": ticker,
-                                "signal": "HOLD",
-                                "confidence": 0.0,
-                                "s1": None,
-                                "s2": None,
-                                "s3": None,
-                                "reasoning": "No price data available — analysis skipped, not a real signal"
-                            }
+                        fallback_price = data.get('price') or 0
+                        if not fallback_price:
+                            analysis_results[ticker] = {"ticker": ticker, "signal": "HOLD", "confidence": 0.0,
+                                                        "s1": None, "s2": None, "s3": None,
+                                                        "reasoning": "No price data — analysis skipped"}
                         else:
-                            analysis_results[ticker] = {
-                                "ticker": ticker,
-                                "signal": "HOLD",
-                                "confidence": 0.5,
-                                "s1": fallback_price * 0.95,
-                                "s2": fallback_price * 0.90,
-                                "s3": fallback_price * 0.85,
-                                "reasoning": "Unable to parse detailed analysis"
-                            }
-                    
+                            analysis_results[ticker] = {"ticker": ticker, "signal": "HOLD", "confidence": 0.5,
+                                                        "s1": fallback_price * 0.95,
+                                                        "s2": fallback_price * 0.90,
+                                                        "s3": fallback_price * 0.85,
+                                                        "reasoning": "Could not parse analysis"}
                 except Exception as e:
                     self.log_action("หนุ่ม", f"Analysis failed for {ticker}: {str(e)}", "WARNING")
                     continue
-            
+
             self.log_action("หนุ่ม", f"Analyzed {len(analysis_results)} stocks", "SUCCESS")
             return analysis_results
-            
+
         except Exception as e:
             self.log_action("หนุ่ม", f"Analysis failed: {str(e)}", "ERROR")
             raise
 
     # ==================== AGENT 3: มด (Cross-Validate) ====================
     def mud_cross_validate(self, analysis_results):
-        """มด: ตรวจสอบความถูกต้องของ signals จากหนุ่ม"""
+        """มด: ตรวจสอบความถูกต้องของ signals — Sonnet + caching"""
         self.log_action("มด", "Starting cross-validation...", "INFO")
-        
         try:
             system_prompt = """You are มด (Mud), a validation expert.
 Review the stock analysis and validate:
-1. Signal consistency
+1. Signal consistency with confidence score
 2. Confidence score reasonableness (0-1)
-3. Support/Resistance levels logic
+3. Support/Resistance levels logic (S1 > S2 > S3 for downside levels)
 
 Return JSON:
 {
@@ -436,11 +478,9 @@ Return JSON:
     "issues": [],
     "recommendation": "PASS"
 }"""
-            
             validated_results = {}
 
             for ticker, analysis in analysis_results.items():
-                # ✅ FIX #J: ส่งแค่ field ที่มดต้องการจริงๆ ลด token และ prompt เยิ้ม
                 mud_input = {
                     "ticker":     ticker,
                     "signal":     analysis.get("signal"),
@@ -450,56 +490,29 @@ Return JSON:
                     "s3":         analysis.get("s3"),
                     "reasoning":  analysis.get("reasoning"),
                 }
-
                 user_message = f"""Validate this analysis:
 {json.dumps(mud_input, indent=2)}
 
 Check if signal, confidence, and S-levels are consistent."""
-                
+
                 try:
-                    response = self.claude_call(system_prompt, user_message, "มด")
-                    
+                    response = self.claude_call(system_prompt, user_message, "มด",
+                                                model=self.MODEL_SONNET, use_cache=True)
                     try:
-                        json_start = response.find('{')
-                        json_end = response.rfind('}') + 1
-                        json_str = response[json_start:json_end]
-                        result = json.loads(json_str)
-                        
-                        validated_results[ticker] = {
-                            **analysis,
-                            "validation": result
-                        }
+                        result = json.loads(response[response.find('{'):response.rfind('}')+1])
+                        validated_results[ticker] = {**analysis, "validation": result}
                     except json.JSONDecodeError:
-                        # ✅ ไม่ auto-PASS แบบหลอกๆ — flag ตามจริงว่า "ยังไม่ได้ตรวจสอบ"
-                        self.log_action("มด", f"Could not parse validation JSON for {ticker} — flagging for review", "WARNING")
-                        validated_results[ticker] = {
-                            **analysis,
-                            "validation": {
-                                "is_valid": None,
-                                "recommendation": "NEEDS_REVIEW",
-                                "issues": ["Validation response could not be parsed; not actually validated"]
-                            }
-                        }
-                    
+                        self.log_action("มด", f"Parse fail for {ticker} — NEEDS_REVIEW", "WARNING")
+                        validated_results[ticker] = {**analysis, "validation": {"is_valid": None, "recommendation": "NEEDS_REVIEW", "issues": ["Parse failed"]}}
                 except Exception as e:
                     self.log_action("มด", f"Validation failed for {ticker}: {str(e)}", "WARNING")
-                    # ✅ ไม่ auto-PASS แบบหลอกๆ — flag ตามจริงว่า "ยังไม่ได้ตรวจสอบ"
-                    validated_results[ticker] = {
-                        **analysis,
-                        "validation": {
-                            "is_valid": None,
-                            "recommendation": "NEEDS_REVIEW",
-                            "issues": [f"Validation call failed: {str(e)}"]
-                        }
-                    }
-            
+                    validated_results[ticker] = {**analysis, "validation": {"is_valid": None, "recommendation": "NEEDS_REVIEW", "issues": [str(e)]}}
+
             self.log_action("มด", f"Validated {len(validated_results)} stocks", "SUCCESS")
             return validated_results
-            
         except Exception as e:
             self.log_action("มด", f"Cross-validation failed: {str(e)}", "ERROR")
             raise
-
     # ==================== AGENT 4: แฮรี่ (Monitor Portfolio) ====================
     def harry_monitor_portfolio(self, analysis_results):
         """แฮรี่: ตรวจสอบ Portfolio ว่า align กับ signals ไหม"""
@@ -559,11 +572,8 @@ Check if signal, confidence, and S-levels are consistent."""
 
     # ==================== AGENT 5: เจน (Generate Report) ====================
     def jen_generate_report(self, analysis_results, portfolio_status, retry_hint=None):
-        """เจน: สร้าง Report สรุปจากการวิเคราะห์
-        ✅ FIX #6: ส่งแค่ field ที่จำเป็นให้เจน ไม่ส่ง nested validation object ทั้งก้อน
-        ✅ FIX #C: รับ retry_hint จากเก้า เพื่อปรับปรุง report ในรอบ retry"""
+        """เจน: สร้าง Report — Sonnet + caching"""
         self.log_action("เจน", f"Generating report{'  (retry with hint)' if retry_hint else ''}...", "INFO")
-        
         try:
             system_prompt = """You are เจน (Jen), a market report writer.
 Create a professional market report summarizing:
@@ -578,23 +588,21 @@ CRITICAL RULES:
 3. DO NOT embed or include ANY raw JavaScript code, scripts, dynamic templates, or tags like 'new Date()' or '.toLocaleDateString()' inside the HTML content.
 4. All dates, times, and statistics must be rendered as plain static Thai text only. No dynamic calculations allowed inside the report."""
 
-            # ✅ FIX #6: ส่งเฉพาะ field ที่เจนต้องการวิเคราะห์จริง ๆ
-            # ตัด nested validation object ออก เพื่อลด token โดยไม่กระทบคุณภาพ report
             jen_summary = {
                 ticker: {
-                    "signal":     data.get("signal"),
-                    "confidence": data.get("confidence"),
-                    "s1":         data.get("s1"),
-                    "s2":         data.get("s2"),
-                    "s3":         data.get("s3"),
-                    "reasoning":  data.get("reasoning"),
-                    "pe_ratio":   data.get("pe_ratio"),
-                    "price":      data.get("price"),
+                    "signal":       data.get("signal"),
+                    "confidence":   data.get("confidence"),
+                    "s1":           data.get("s1"),
+                    "s2":           data.get("s2"),
+                    "s3":           data.get("s3"),
+                    "reasoning":    data.get("reasoning"),
+                    "pe_ratio":     data.get("pe_ratio"),
+                    "price":        data.get("price"),
+                    "news_summary": data.get("news_summary", ""),
                 }
                 for ticker, data in analysis_results.items()
             }
 
-            # เพิ่ม retry hint จากเก้า ถ้ามี (รอบ retry เท่านั้น)
             retry_section = f"\n\nFEEDBACK FROM PREVIOUS ATTEMPT:\n{retry_hint}\nPlease address the above issues in this report." if retry_hint else ""
 
             user_message = f"""Generate report based on this data:
@@ -602,33 +610,27 @@ Analysis Results: {json.dumps(jen_summary, ensure_ascii=False)}
 Portfolio Status: {json.dumps(portfolio_status, ensure_ascii=False)}
 {retry_section}
 Create professional Thai report."""
-            
-            response = self.claude_call(system_prompt, user_message, "เจน")
-            
+
+            response = self.claude_call(system_prompt, user_message, "เจน",
+                                        model=self.MODEL_SONNET, use_cache=True)
             report = {
-                "timestamp":   datetime.now().isoformat(),
-                "summary":     response,
+                "timestamp":    datetime.now().isoformat(),
+                "summary":      response,
                 "total_stocks": len(analysis_results),
                 "buy_signals":  sum(1 for a in analysis_results.values() if a.get('signal') == 'BUY'),
                 "sell_signals": sum(1 for a in analysis_results.values() if a.get('signal') == 'SELL'),
             }
-            
             self.log_action("เจน", "Report generated", "SUCCESS")
             return report
-            
         except Exception as e:
             self.log_action("เจน", f"Report generation failed: {str(e)}", "ERROR")
             raise
-
+            
     # ==================== AGENT 6: นน (QA Manager Check) ====================
     def nan_qa_check(self, analysis_results, report):
-        """นน: ตรวจสอบคุณภาพก่อนส่ง (PASS/REJECT)
-        ✅ FIX #4: system_prompt เพิ่ม HTML injection rules ป้องกัน HTML tags ใน approval_reason
-        ✅ FIX #5: clean_report_text ใช้ word-boundary limit 8000 chars แทน [:3000] ที่ตัดกลาง JSON"""
+        """นน: ตรวจสอบคุณภาพก่อนส่ง — Sonnet + caching"""
         self.log_action("นน", "QA checking...", "INFO")
-
         try:
-            # ✅ FIX #4: เพิ่ม CRITICAL RULES ห้าม Claude embed HTML ใน JSON fields
             system_prompt = """You are นน (Non), QA Manager.
 Review the analysis and report:
 1. Data consistency
@@ -646,21 +648,16 @@ CRITICAL REGULATORY RULES:
 2. The 'approval_reason' and all items inside 'issues' MUST be written ONLY as short, clean plain descriptive Thai text strings.
 3. STRICT WARNING: NEVER copy, paste, embed, replicate, or leak raw HTML code strings, layout blocks, table chunks, script templates, or tags (such as <td>, <tr>, <div>, <style>) into any JSON string fields. Keep all output exclusively as plain descriptive text characters."""
 
-            # Strip HTML/CSS จาก report ก่อนส่งให้ นน
             raw_report = report.get('summary', '')
             clean_report_text = re.sub(r'<style[^>]*>.*?</style>', '', raw_report, flags=re.DOTALL)
             clean_report_text = re.sub(r'<[^>]+>', ' ', clean_report_text)
             clean_report_text = re.sub(r'\s+', ' ', clean_report_text).strip()
 
-            # ✅ FIX #5: word-boundary limit 8000 chars (แทน [:3000] ที่ตัดกลาง JSON/คำ)
-            # plain text หลัง strip HTML มักสั้นกว่า original 60-70%
-            # 8000 chars ≈ 2000 tokens — สมดุลระหว่าง QA coverage และ cost
             MAX_REPORT_CHARS = 8000
             if len(clean_report_text) > MAX_REPORT_CHARS:
                 cut = clean_report_text[:MAX_REPORT_CHARS].rsplit(' ', 1)[0]
                 clean_report_text = cut + "... [ข้อความถูกย่อเพื่อประสิทธิภาพ QA]"
 
-            # ส่งเฉพาะ field ที่ นน ต้องการจริง ๆ
             qa_summary = {
                 ticker: {
                     "signal":     data.get("signal"),
@@ -680,61 +677,36 @@ Report Content: {clean_report_text}
 
 Check if everything is correct and consistent."""
 
-            response = self.claude_call(system_prompt, user_message, "นน")
-
+            response = self.claude_call(system_prompt, user_message, "นน",
+                                        model=self.MODEL_SONNET, use_cache=True)
             try:
-                json_start = response.find('{')
-                json_end = response.rfind('}') + 1
-                json_str = response[json_start:json_end]
-                qa_result = json.loads(json_str)
-
-                # ✅ FIX #4: post-process strip HTML ออกจาก approval_reason และ issues
-                # กรณี Claude ยังส่ง HTML มาทั้งที่ prompt บอกแล้ว
+                qa_result = json.loads(response[response.find('{'):response.rfind('}')+1])
                 if isinstance(qa_result.get("approval_reason"), str):
                     qa_result["approval_reason"] = re.sub(r'<[^>]+>', '', qa_result["approval_reason"]).strip()
                 if isinstance(qa_result.get("issues"), list):
-                    qa_result["issues"] = [
-                        re.sub(r'<[^>]+>', '', issue).strip()
-                        if isinstance(issue, str) else issue
-                        for issue in qa_result["issues"]
-                    ]
-
+                    qa_result["issues"] = [re.sub(r'<[^>]+>', '', i).strip() if isinstance(i, str) else i for i in qa_result["issues"]]
             except json.JSONDecodeError:
-                # ✅ fail-safe: QA ทำไม่สำเร็จ → REJECT เพื่อความปลอดภัย (ไม่ auto-PASS)
-                self.log_action("นน", "Could not parse QA response JSON — defaulting to REJECT for safety", "WARNING")
-                qa_result = {
-                    "status": "REJECT",
-                    "issues": ["QA response could not be parsed; QA was not actually performed"],
-                    "approval_reason": "Auto-rejected: unparseable QA response"
-                }
+                self.log_action("นน", "Could not parse QA response — defaulting to REJECT for safety", "WARNING")
+                qa_result = {"status": "REJECT", "issues": ["QA response could not be parsed"], "approval_reason": "Auto-rejected: unparseable QA response"}
 
         except Exception as e:
             self.log_action("นน", f"QA check failed: {str(e)}", "ERROR")
-            return {
-                "status": "REJECT",
-                "issues": [f"QA call failed: {str(e)}"],
-                "approval_reason": "Auto-rejected: QA system error"
-            }
+            return {"status": "REJECT", "issues": [f"QA call failed: {str(e)}"], "approval_reason": "Auto-rejected: QA system error"}
 
         self.log_action("นน", f"QA Status: {qa_result.get('status', 'UNKNOWN')}", "INFO")
         return qa_result
 
-
+    # ==================== AGENT 7: เก้า (Retry Logic) ====================
     def kao_retry(self, agent_name, error_msg, attempt=1):
-        """เก้า: Retry Assistant (max 3 times)
-        ✅ FIX #C: คืน retry_hint กลับไปให้ run_workflow ส่งต่อให้เจน
-        เพื่อให้เจนรู้ว่าต้องแก้อะไรในรอบถัดไป ไม่ใช่แค่เสีย token แต่ไม่ได้ประโยชน์"""
+        """เก้า: Retry Assistant — Haiku เพียงพอสำหรับแนะนำ 2-3 ประโยค"""
         if attempt > self.max_retries:
             self.log_action("เก้า", f"Max retries exceeded for {agent_name}", "ERROR")
             return None
-
         self.log_action("เก้า", f"Analyzing failure for {agent_name} (Attempt {attempt})", "INFO")
-
         try:
             system_prompt = """You are เก้า (Kao), Retry Assistant.
 Analyze the QA failure and provide specific, actionable guidance for the report writer.
-Be concise — 2-3 sentences max.
-Focus on what the report writer should fix or avoid in the next attempt."""
+Be concise — 2-3 sentences max. Focus on what the report writer should fix or avoid."""
 
             user_message = f"""The report was REJECTED by QA with this issue:
 {error_msg}
@@ -742,38 +714,207 @@ Focus on what the report writer should fix or avoid in the next attempt."""
 What specific changes should the report writer make in the next attempt?
 Reply in Thai, 2-3 sentences only."""
 
-            response = self.claude_call(system_prompt, user_message, "เก้า")
-            self.log_action("เก้า", f"Retry hint generated: {response[:100]}...", "SUCCESS")
-            return response  # ✅ คืน hint กลับไปให้ run_workflow
+            response = self.claude_call(system_prompt, user_message, "เก้า",
+                                        model=self.MODEL_HAIKU)  # ✅ Haiku เพียงพอ
+            self.log_action("เก้า", f"Retry hint: {response[:80]}...", "SUCCESS")
+            return response
+        except Exception as e:
+            self.log_action("เก้า", f"Retry hint failed: {str(e)}", "ERROR")
+            return None
+
+    # ==================== AGENT 8: เอ (Record Improvements) ====================
+    def a_record_improvements(self, workflow_result, validated_results):
+        """เอ: บันทึก improvement log หลัง workflow pass — Haiku เพียงพอ"""
+        self.log_action("เอ", "Recording workflow improvements...", "INFO")
+        try:
+            buy_count  = sum(1 for a in validated_results.values() if a.get('signal') == 'BUY')
+            sell_count = sum(1 for a in validated_results.values() if a.get('signal') == 'SELL')
+            hold_count = sum(1 for a in validated_results.values() if a.get('signal') == 'HOLD')
+            needs_review = sum(1 for a in validated_results.values()
+                               if a.get('validation', {}).get('recommendation') == 'NEEDS_REVIEW')
+
+            system_prompt = """You are เอ (A), a workflow recorder.
+Summarize the workflow run in 2-3 Thai sentences.
+Focus on: signal distribution, data quality issues, and any notable patterns."""
+
+            user_message = f"""Summarize this workflow run:
+- Total stocks analyzed: {len(validated_results)}
+- BUY signals: {buy_count}
+- SELL signals: {sell_count}
+- HOLD signals: {hold_count}
+- NEEDS_REVIEW: {needs_review}
+- QA result: {workflow_result.get('qa_result', {}).get('status', 'UNKNOWN')}
+
+Write 2-3 sentences in Thai summarizing key observations."""
+
+            summary = self.claude_call(system_prompt, user_message, "เอ",
+                                       model=self.MODEL_HAIKU)
+
+            # บันทึกลง DB
+            db = None
+            try:
+                db = SessionLocal()
+                from models import WorkflowLog  # import ตรงนี้เพื่อ avoid circular import
+                log_entry = WorkflowLog(
+                    timestamp=datetime.now(),
+                    status=workflow_result.get('qa_result', {}).get('status', 'UNKNOWN'),
+                    stocks_analyzed=len(validated_results),
+                    buy_signals=buy_count,
+                    sell_signals=sell_count,
+                    hold_signals=hold_count,
+                    needs_review=needs_review,
+                    summary=summary
+                )
+                db.add(log_entry)
+                db.commit()
+                self.log_action("เอ", f"Improvement log saved: {summary[:80]}...", "SUCCESS")
+            except Exception as db_err:
+                # WorkflowLog model อาจยังไม่มี — log แค่ไม่ fail workflow
+                self.log_action("เอ", f"DB save skipped (model not ready): {str(db_err)}", "WARNING")
+                self.log_action("เอ", f"Summary: {summary[:120]}", "INFO")
+            finally:
+                if db:
+                    db.close()
 
         except Exception as e:
-            self.log_action("เก้า", f"Retry hint generation failed: {str(e)}", "ERROR")
+            self.log_action("เอ", f"Record failed: {str(e)}", "ERROR")
+
+    # ==================== AGENT 9: โคลสัน (Manual Trade Update) ====================
+    def colson_parse_trade(self, trade_text):
+        """โคลสัน: รับ trade text จาก user → parse → บันทึก DB — Haiku เพียงพอ"""
+        self.log_action("โคลสัน", f"Parsing trade: {trade_text[:50]}...", "INFO")
+        try:
+            system_prompt = """You are โคลสัน (Colson), a trade recorder.
+Parse the trade instruction and return ONLY JSON:
+{
+    "ticker": "AAPL",
+    "action": "BUY" or "SELL",
+    "shares": 100,
+    "price": 150.25
+}
+If you cannot parse, return {"error": "reason"}."""
+
+            response = self.claude_call(system_prompt, trade_text, "โคลสัน",
+                                        model=self.MODEL_HAIKU)
+            try:
+                trade_data = json.loads(response[response.find('{'):response.rfind('}')+1])
+                if "error" in trade_data:
+                    self.log_action("โคลสัน", f"Parse error: {trade_data['error']}", "WARNING")
+                    return None
+
+                # บันทึกลง DB
+                db = None
+                try:
+                    db = SessionLocal()
+                    trade = Trade(
+                        ticker=trade_data.get("ticker", "").upper(),
+                        action=trade_data.get("action", ""),
+                        shares=int(trade_data.get("shares", 0)),
+                        price=float(trade_data.get("price", 0))
+                    )
+                    db.add(trade)
+                    db.commit()
+                    self.log_action("โคลสัน", f"Trade recorded: {trade_data}", "SUCCESS")
+                    return trade_data
+                finally:
+                    if db:
+                        db.close()
+
+            except json.JSONDecodeError:
+                self.log_action("โคลสัน", "Could not parse trade response", "ERROR")
+                return None
+
+        except Exception as e:
+            self.log_action("โคลสัน", f"Trade parse failed: {str(e)}", "ERROR")
             return None
+
+    # ==================== AGENT 10: นิก (Code Optimizer — Every Friday) ====================
+    def nik_optimize_code(self):
+        """นิก: อ่าน workflow logs ย้อนหลัง 5 วัน → วิเคราะห์ปัญหา → เสนอ improvement — Haiku"""
+        self.log_action("นิก", "Starting weekly code optimization analysis...", "INFO")
+        try:
+            # ดึง logs ย้อนหลัง 5 วัน จาก workflow_log ปัจจุบัน
+            # (ในอนาคตดึงจาก DB WorkflowLog)
+            recent_logs = self.workflow_log[-100:] if len(self.workflow_log) > 100 else self.workflow_log
+            error_logs  = [l for l in recent_logs if l.get('status') in ('ERROR', 'WARNING')]
+
+            system_prompt = """You are นิก (Nik), a code optimization specialist.
+Analyze the workflow error logs and suggest improvements to agents.py.
+Focus on: recurring errors, failed agents, performance issues.
+Reply in Thai with specific, actionable recommendations.
+Format: numbered list, max 5 items."""
+
+            log_summary = json.dumps(error_logs[-50:], ensure_ascii=False)
+            user_message = f"""Analyze these workflow errors from the past 5 days:
+{log_summary}
+
+What specific improvements should be made to the agent system?
+List top 5 recommendations in Thai."""
+
+            recommendations = self.claude_call(system_prompt, user_message, "นิก",
+                                               model=self.MODEL_HAIKU)
+
+            self.log_action("นิก", f"Optimization recommendations ready:\n{recommendations}", "SUCCESS")
+
+            # Push ไป GitHub ถ้ามี GITHUB_TOKEN
+            github_token = os.getenv("GITHUB_TOKEN")
+            github_repo  = os.getenv("GITHUB_REPO", "MBBook/ai-stock-analyzer")
+
+            if github_token:
+                self._nik_push_recommendations(recommendations, github_token, github_repo)
+            else:
+                self.log_action("นิก", "GITHUB_TOKEN not set — recommendations logged only (not pushed)", "WARNING")
+
+            return recommendations
+
+        except Exception as e:
+            self.log_action("นิก", f"Optimization failed: {str(e)}", "ERROR")
+            return None
+
+    def _nik_push_recommendations(self, recommendations, github_token, repo):
+        """นิก push improvement report ไป GitHub เป็น markdown file"""
+        try:
+            import base64
+            filename = f"nik_reports/optimization_{datetime.now().strftime('%Y%m%d')}.md"
+            content  = f"# นิก Optimization Report — {datetime.now().strftime('%Y-%m-%d')}\n\n{recommendations}"
+            encoded  = base64.b64encode(content.encode()).decode()
+
+            url = f"https://api.github.com/repos/{repo}/contents/{filename}"
+            headers = {
+                "Authorization": f"token {github_token}",
+                "Accept":        "application/vnd.github.v3+json"
+            }
+            payload = {
+                "message": f"นิก: Weekly optimization report {datetime.now().strftime('%Y-%m-%d')}",
+                "content": encoded
+            }
+            res = requests.put(url, headers=headers, json=payload, timeout=15)
+            if res.status_code in (200, 201):
+                self.log_action("นิก", f"Report pushed to GitHub: {filename}", "SUCCESS")
+            else:
+                self.log_action("นิก", f"GitHub push failed: {res.status_code} {res.text[:100]}", "ERROR")
+        except Exception as e:
+            self.log_action("นิก", f"GitHub push error: {str(e)}", "ERROR")
 
     # ==================== MAIN WORKFLOW ====================
     def run_workflow(self, stocks=None, portfolio=None, include_weekend=False):
-        """Execute complete workflow - SEQUENTIAL
-        ✅ FIXED: เมื่อ QA REJECT จะ re-run เจน(report) + นน(QA) จริงๆ สูงสุด max_retries ครั้ง
-        แทนที่จะแค่ log คำแนะนำแล้วถือว่า "complete" ทั้งที่ reject
-        
+        """Execute complete 10-agent workflow — Sequential
+        นัตตี้ → หนุ่ม → มด → แฮรี่ → เจน → นน → (เก้า retry) → เอ → นิก(ศุกร์)
         Args:
             stocks: Stock list to analyze
-            portfolio: Current portfolio
-            include_weekend: True for Monday (Sat-Sun-Mon), False for Tue-Fri (24h)
+            include_weekend: True for Monday (Sat-Sun-Mon news), False for Tue-Fri (24h news)
         """
         if not stocks:
             stocks = ["AAPL", "GOOGL", "MSFT", "TSLA", "AMZN"]
-        
+
         self.workflow_log = []
-        
+
         if include_weekend:
             self.log_action("SYSTEM", "🔄 Monday mode: Fetching Sat-Sun-Mon news...", "INFO")
         else:
             self.log_action("SYSTEM", "📰 Regular mode: Fetching 24-hour news...", "INFO")
-        
+
         try:
-            # ========== SEQUENTIAL EXECUTION (runs once) ==========
-            
             # Step 1: นัตตี้ Get News
             news_data = self.natty_get_news(stocks, days=3 if include_weekend else 1)
 
@@ -839,7 +980,15 @@ Reply in Thai, 2-3 sentences only."""
             if qa_passed:
                 self.log_action("SYSTEM", "✅ Workflow PASSED - Updating database...", "SUCCESS")
                 self._update_database(validated_results)
-                self.log_action("เอ", "Recording improvements and code updates", "SUCCESS")
+
+                # ✅ เอ: บันทึก improvement log
+                self.a_record_improvements({"qa_result": qa_result}, validated_results)
+
+                # ✅ นิก: ทำงานทุกวันศุกร์เท่านั้น
+                if datetime.now().weekday() == 4:  # 4 = Friday
+                    self.log_action("SYSTEM", "📅 วันศุกร์ — เรียก นิก วิเคราะห์ code optimization", "INFO")
+                    self.nik_optimize_code()
+
                 final_status = "COMPLETE"
             else:
                 self.log_action("SYSTEM", f"❌ Workflow REJECTED after {self.max_retries} attempts - Database NOT updated", "ERROR")
