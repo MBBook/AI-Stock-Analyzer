@@ -7,14 +7,13 @@ FIXED: Removed async/await, added database validation
 import time
 import re
 import requests
-from requests.adapters import HTTPAdapter  # ✅ FIX #I: ย้ายมา top-level
+from requests.adapters import HTTPAdapter
 from anthropic import Anthropic
-from datetime import datetime, timedelta
+from datetime import datetime
 import yfinance as yf
 from requests_ratelimiter import LimiterSession
 import json
 import os
-from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Stock, Trade, Portfolio
 
@@ -28,7 +27,6 @@ class TimeoutAdapter(HTTPAdapter):
 class AgentOrchestrator:
     def __init__(self):
         self.workflow_log = []
-        self.error_count = {}
         self.max_retries = 3
         
         # Load multiple API keys from environment
@@ -440,10 +438,21 @@ Return JSON:
 }"""
             
             validated_results = {}
-            
+
             for ticker, analysis in analysis_results.items():
+                # ✅ FIX #J: ส่งแค่ field ที่มดต้องการจริงๆ ลด token และ prompt เยิ้ม
+                mud_input = {
+                    "ticker":     ticker,
+                    "signal":     analysis.get("signal"),
+                    "confidence": analysis.get("confidence"),
+                    "s1":         analysis.get("s1"),
+                    "s2":         analysis.get("s2"),
+                    "s3":         analysis.get("s3"),
+                    "reasoning":  analysis.get("reasoning"),
+                }
+
                 user_message = f"""Validate this analysis:
-{json.dumps(analysis, indent=2)}
+{json.dumps(mud_input, indent=2)}
 
 Check if signal, confidence, and S-levels are consistent."""
                 
