@@ -508,7 +508,9 @@ Check if signal, confidence, and S-levels are consistent."""
 
     # ==================== AGENT 5: เจน (Generate Report) ====================
     def jen_generate_report(self, analysis_results, portfolio_status):
-        """เจน: สร้าง Report สรุปจากการวิเคราะห์"""
+        """เจน: สร้าง Report สรุปจากการวิเคราะห์
+        ✅ FIX #6: ส่งแค่ field ที่จำเป็นให้เจน ไม่ส่ง nested validation object ทั้งก้อน
+        ลด token ต่อ call และป้องกัน context overflow เมื่อมีหุ้น 30-40 ตัว"""
         self.log_action("เจน", "Generating report...", "INFO")
         
         try:
@@ -522,11 +524,27 @@ Create a professional market report summarizing:
 CRITICAL RULES:
 1. Write in Thai.
 2. Return JSON with a 'report_html' field containing the complete formatted report.
-3. DO NOT embed or include ANY raw JavaScript code, scripts, dynamic templates, or tags like 'new Date()' or '.toLocaleDateString()' inside the HTML content. 
+3. DO NOT embed or include ANY raw JavaScript code, scripts, dynamic templates, or tags like 'new Date()' or '.toLocaleDateString()' inside the HTML content.
 4. All dates, times, and statistics must be rendered as plain static Thai text only. No dynamic calculations allowed inside the report."""
 
+            # ✅ FIX #6: ส่งเฉพาะ field ที่เจนต้องการวิเคราะห์จริง ๆ
+            # ตัด nested validation object ออก เพื่อลด token โดยไม่กระทบคุณภาพ report
+            jen_summary = {
+                ticker: {
+                    "signal":     data.get("signal"),
+                    "confidence": data.get("confidence"),
+                    "s1":         data.get("s1"),
+                    "s2":         data.get("s2"),
+                    "s3":         data.get("s3"),
+                    "reasoning":  data.get("reasoning"),
+                    "pe_ratio":   data.get("pe_ratio"),
+                    "price":      data.get("price"),
+                }
+                for ticker, data in analysis_results.items()
+            }
+
             user_message = f"""Generate report based on this data:
-Analysis Results: {json.dumps(analysis_results, ensure_ascii=False)}
+Analysis Results: {json.dumps(jen_summary, ensure_ascii=False)}
 Portfolio Status: {json.dumps(portfolio_status, ensure_ascii=False)}
 
 Create professional Thai report."""
@@ -534,10 +552,10 @@ Create professional Thai report."""
             response = self.claude_call(system_prompt, user_message, "เจน")
             
             report = {
-                "timestamp": datetime.now().isoformat(),
-                "summary": response,
+                "timestamp":   datetime.now().isoformat(),
+                "summary":     response,
                 "total_stocks": len(analysis_results),
-                "buy_signals": sum(1 for a in analysis_results.values() if a.get('signal') == 'BUY'),
+                "buy_signals":  sum(1 for a in analysis_results.values() if a.get('signal') == 'BUY'),
                 "sell_signals": sum(1 for a in analysis_results.values() if a.get('signal') == 'SELL'),
             }
             
@@ -550,39 +568,53 @@ Create professional Thai report."""
 
     # ==================== AGENT 6: นน (QA Manager Check) ====================
     def nan_qa_check(self, analysis_results, report):
-        """นน: ตรวจสอบคุณภาพก่อนส่ง (PASS/REJECT)"""
+        """นน: ตรวจสอบคุณภาพก่อนส่ง (PASS/REJECT)
+        ✅ FIX #4: system_prompt เพิ่ม HTML injection rules ป้องกัน HTML tags ใน approval_reason
+        ✅ FIX #5: clean_report_text ใช้ word-boundary limit 8000 chars แทน [:3000] ที่ตัดกลาง JSON"""
         self.log_action("นน", "QA checking...", "INFO")
 
         try:
-            system_prompt = """You are นน (Nan), QA Manager.
+            # ✅ FIX #4: เพิ่ม CRITICAL RULES ห้าม Claude embed HTML ใน JSON fields
+            system_prompt = """You are นน (Non), QA Manager.
 Review the analysis and report:
 1. Data consistency
 2. Logic soundness
 3. Report quality
 4. Risk assessment
 
-Return JSON:
+CRITICAL REGULATORY RULES:
+1. Return strictly a JSON object matching this structure:
 {
-"status": "PASS" or "REJECT",
-"issues": [],
-"approval_reason": "..."
-}"""
+  "status": "PASS" or "REJECT",
+  "issues": [],
+  "approval_reason": "..."
+}
+2. The 'approval_reason' and all items inside 'issues' MUST be written ONLY as short, clean plain descriptive Thai text strings.
+3. STRICT WARNING: NEVER copy, paste, embed, replicate, or leak raw HTML code strings, layout blocks, table chunks, script templates, or tags (such as <td>, <tr>, <div>, <style>) into any JSON string fields. Keep all output exclusively as plain descriptive text characters."""
 
+            # Strip HTML/CSS จาก report ก่อนส่งให้ นน
             raw_report = report.get('summary', '')
             clean_report_text = re.sub(r'<style[^>]*>.*?</style>', '', raw_report, flags=re.DOTALL)
             clean_report_text = re.sub(r'<[^>]+>', ' ', clean_report_text)
             clean_report_text = re.sub(r'\s+', ' ', clean_report_text).strip()
 
-            # ✅ ส่งเฉพาะ field ที่ นน ต้องการจริง ๆ (ไม่ส่ง full object รวม HTML ด้วย)
-            # เพื่อลด token ที่ใช้และป้องกัน context overflow
+            # ✅ FIX #5: word-boundary limit 8000 chars (แทน [:3000] ที่ตัดกลาง JSON/คำ)
+            # plain text หลัง strip HTML มักสั้นกว่า original 60-70%
+            # 8000 chars ≈ 2000 tokens — สมดุลระหว่าง QA coverage และ cost
+            MAX_REPORT_CHARS = 8000
+            if len(clean_report_text) > MAX_REPORT_CHARS:
+                cut = clean_report_text[:MAX_REPORT_CHARS].rsplit(' ', 1)[0]
+                clean_report_text = cut + "... [ข้อความถูกย่อเพื่อประสิทธิภาพ QA]"
+
+            # ส่งเฉพาะ field ที่ นน ต้องการจริง ๆ
             qa_summary = {
                 ticker: {
-                    "signal": data.get("signal"),
+                    "signal":     data.get("signal"),
                     "confidence": data.get("confidence"),
-                    "s1": data.get("s1"),
-                    "s2": data.get("s2"),
-                    "s3": data.get("s3"),
-                    "reasoning": data.get("reasoning"),
+                    "s1":         data.get("s1"),
+                    "s2":         data.get("s2"),
+                    "s3":         data.get("s3"),
+                    "reasoning":  data.get("reasoning"),
                     "validation": data.get("validation", {}).get("recommendation")
                 }
                 for ticker, data in analysis_results.items()
@@ -601,24 +633,36 @@ Check if everything is correct and consistent."""
                 json_end = response.rfind('}') + 1
                 json_str = response[json_start:json_end]
                 qa_result = json.loads(json_str)
+
+                # ✅ FIX #4: post-process strip HTML ออกจาก approval_reason และ issues
+                # กรณี Claude ยังส่ง HTML มาทั้งที่ prompt บอกแล้ว
+                if isinstance(qa_result.get("approval_reason"), str):
+                    qa_result["approval_reason"] = re.sub(r'<[^>]+>', '', qa_result["approval_reason"]).strip()
+                if isinstance(qa_result.get("issues"), list):
+                    qa_result["issues"] = [
+                        re.sub(r'<[^>]+>', '', issue).strip()
+                        if isinstance(issue, str) else issue
+                        for issue in qa_result["issues"]
+                    ]
+
             except json.JSONDecodeError:
-                # ✅ ไม่ auto-PASS แบบหลอกๆ — QA จริงๆ ทำไม่สำเร็จ ต้อง REJECT เพื่อความปลอดภัย
+                # ✅ fail-safe: QA ทำไม่สำเร็จ → REJECT เพื่อความปลอดภัย (ไม่ auto-PASS)
                 self.log_action("นน", "Could not parse QA response JSON — defaulting to REJECT for safety", "WARNING")
                 qa_result = {
                     "status": "REJECT",
                     "issues": ["QA response could not be parsed; QA was not actually performed"],
                     "approval_reason": "Auto-rejected: unparseable QA response"
                 }
+
         except Exception as e:
             self.log_action("นน", f"QA check failed: {str(e)}", "ERROR")
-            # ✅ ไม่ auto-PASS แบบหลอกๆ — error ระหว่าง QA ต้อง REJECT เพื่อความปลอดภัย
             return {
                 "status": "REJECT",
                 "issues": [f"QA call failed: {str(e)}"],
                 "approval_reason": "Auto-rejected: QA system error"
             }
 
-        self.log_action("นน", f"QA Status: {qa_result.get('status', 'PASS')}", "INFO")
+        self.log_action("นน", f"QA Status: {qa_result.get('status', 'UNKNOWN')}", "INFO")
         return qa_result
 
 
