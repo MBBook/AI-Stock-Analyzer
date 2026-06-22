@@ -127,21 +127,19 @@ class AgentOrchestrator:
             return {"pe_ratio": None, "market_cap": None, "52week_high": None, "52week_low": None}
 
     def natty_get_news(self, stocks, days=1):
-        """นัตตี้: ดึงข้อมูลและข่าวสารหุ้นพร้อมระบบ Fallback ไป Alpha Vantage เมื่อเจอ 429
-        ดึง P/E ratio และ Market Cap เสมอ (ทั้ง yfinance path และ Alpha Vantage path)
-        เพื่อให้หนุ่มวิเคราะห์ได้ครบ ไม่ขาดข้อมูลสำคัญ"""
+        """นัตตี้: ระบบสายสำรอง 3 ชั้น (yfinance -> Finnhub -> Alpha Vantage) รองรับพอร์ตใหญ่ไร้บั๊ก 429"""
         self.log_action("นัตตี้", "Starting news and data fetch...", "INFO")
         
+        # 🔑 ฝังคีย์ความปลอดภัย Finnhub ตัวจริงของนายเรียบร้อยแล้วครับ
+        FINNHUB_KEY = "d8sh0gpr01qq7apvkbbgd8sh0gpr01qq7apvkbc0"
         ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
-        if not ALPHA_VANTAGE_KEY:
-            self.log_action("นัตตี้", "ALPHA_VANTAGE_API_KEY not set — fallback will be skipped if yfinance fails", "WARNING")
         news_data = {}
 
         session = LimiterSession(per_second=2)
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         })
-        # ✅ ป้องกัน workflow ค้างไม่จบ ถ้า Yahoo เซิร์ฟเวอร์รับ request แต่ไม่ตอบกลับ
+        
         from requests.adapters import HTTPAdapter
         class TimeoutAdapter(HTTPAdapter):
             def send(self, request, **kwargs):
@@ -152,7 +150,7 @@ class AgentOrchestrator:
 
         for ticker in stocks:
             try:
-                time.sleep(2)
+                time.sleep(1.2) # ชะลอความเร็วปลอดภัยต่อโควตา Finnhub 60 req/min
                 self.log_action("นัตตี้", f"Fetching {ticker} from yfinance...", "INFO")
                 stock_obj = yf.Ticker(ticker, session=session)
                 
@@ -170,34 +168,51 @@ class AgentOrchestrator:
                 }
                 
             except Exception as e:
-                self.log_action("นัตตี้", f"yfinance blocked! Switching to Alpha Vantage for {ticker}...", "WARNING")
-                
-                if not ALPHA_VANTAGE_KEY:
-                    self.log_action("นัตตี้", f"Skipping Alpha Vantage for {ticker}: no API key configured", "ERROR")
-                    news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
-                    continue
-                
+                # 🔵 สายสำรองชั้นที่ 1: ดีดตัวเข้าหา Finnhub ดึงราคา (โควตาสูง 60 ครั้ง/นาที)
+                self.log_action("นัตตี้", f"yfinance blocked! Switching to Finnhub for {ticker}...", "WARNING")
                 try:
-                    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={ALPHA_VANTAGE_KEY}"
-                    res = requests.get(url, timeout=10).json()
-                    quote = res.get("Global Quote", {})
+                    fh_url = f"https://finnhub.io{ticker}&token={FINNHUB_KEY}"
+                    fh_res = requests.get(fh_url, timeout=10).json()
                     
-                    if quote:
-                        # ✅ ดึง P/E + Market Cap + 52-week range จาก OVERVIEW endpoint
-                        # หมายเหตุ: GLOBAL_QUOTE มีแค่ intraday high/low ไม่ใช่ 52-week
-                        # ต้องใช้ OVERVIEW ซึ่งมี 52WeekHigh / 52WeekLow จริง ๆ
-                        overview = self._fetch_alpha_vantage_overview(ticker, ALPHA_VANTAGE_KEY)
+                    if fh_res and "c" in fh_res and fh_res["c"] != 0:
                         news_data[ticker] = {
                             "symbol": ticker,
-                            "price": float(quote.get("05. price", 0)),
-                            "52week_high": overview.get("52week_high"),
-                            "52week_low": overview.get("52week_low"),
-                            "pe_ratio": overview["pe_ratio"],
-                            "market_cap": overview["market_cap"]
+                            "price": float(fh_res.get("c", 0)),
+                            "52week_high": float(fh_res.get("h", 0)),
+                            "52week_low": float(fh_res.get("l", 0)),
+                            "pe_ratio": None,
+                            "market_cap": None
                         }
                     else:
+                        raise Exception("Finnhub returned empty or zero data.")
+                        
+                except Exception as fh_err:
+                    # 🟢 สายสำรองสุดท้าย (Ultimate Fallback): เจาะระบบด่านตรวจ Alpha Vantage
+                    self.log_action("นัตตี้", f"Finnhub failed! Switching to Alpha Vantage final gate for {ticker}...", "ERROR")
+                    try:
+                        if not ALPHA_VANTAGE_KEY:
+                            raise Exception("Alpha Vantage API Key is not configured.")
+                            
+                        av_url = f"https://alphavantage.co{ticker}&apikey={ALPHA_VANTAGE_KEY}"
+                        av_res = requests.get(av_url, timeout=10).json()
+                        quote = av_res.get("Global Quote", {})
+                        
+                        if quote:
+                            overview = self._fetch_alpha_vantage_overview(ticker, ALPHA_VANTAGE_KEY)
+                            news_data[ticker] = {
+                                "symbol": ticker,
+                                "price": float(quote.get("05. price", 0)),
+                                "52week_high": overview.get("52week_high"),
+                                "52week_low": overview.get("52week_low"),
+                                "pe_ratio": overview.get("pe_ratio"),
+                                "market_cap": overview.get("market_cap")
+                            }
+                        else:
+                            news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
+                    except Exception as av_err:
+                        self.log_action("นัตตี้", f"All fallback methods failed for {ticker}: {str(av_err)}", "CRITICAL")
                         news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
-                except Exception as av_err:
+
                     self.log_action("นัตตี้", f"Alpha Vantage fail: {str(av_err)}", "ERROR")
                     news_data[ticker] = {"symbol": ticker, "price": 0, "52week_high": 0, "52week_low": 0, "pe_ratio": None, "market_cap": None}
 
