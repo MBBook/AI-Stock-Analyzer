@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 
@@ -38,3 +38,18 @@ class Portfolio(Base):
     current_value = Column(Float)
     total_gain = Column(Float)
     updated_at = Column(DateTime, default=datetime.utcnow)
+
+class WorkflowLog(Base):
+    """บันทึก workflow run ทุกครั้ง — ใช้โดย เอ (record) และ นิก (weekly analysis)"""
+    __tablename__ = "workflow_logs"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    timestamp       = Column(DateTime, default=datetime.utcnow)
+    status          = Column(String)               # COMPLETE / REJECTED / ABORTED
+    stocks_analyzed = Column(Integer, default=0)
+    buy_signals     = Column(Integer, default=0)
+    sell_signals    = Column(Integer, default=0)
+    hold_signals    = Column(Integer, default=0)
+    needs_review    = Column(Integer, default=0)
+    summary         = Column(Text,    nullable=True)  # เอ สรุปด้วย Haiku
+    include_weekend = Column(Boolean, default=False)  # True = Monday mode

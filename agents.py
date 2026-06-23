@@ -56,6 +56,8 @@ class AgentOrchestrator:
             self.log_action("SYSTEM", "⚠️ FINNHUB_API_KEY not set — Tier 2 (Finnhub) will be unavailable", "WARNING")
         if not os.getenv("ALPHA_VANTAGE_API_KEY"):
             self.log_action("SYSTEM", "⚠️ ALPHA_VANTAGE_API_KEY not set — Tier 3 (Alpha Vantage) will be unavailable", "WARNING")
+        if not os.getenv("MARKETAUX_API_KEY"):
+            self.log_action("SYSTEM", "⚠️ MARKETAUX_API_KEY not set — news fetching will be disabled", "WARNING")
     
     def get_client(self):
         """Get Anthropic client with current API key"""
@@ -206,57 +208,125 @@ class AgentOrchestrator:
             self.log_action("นัตตี้", f"Alpha Vantage OVERVIEW fail for {ticker}: {str(e)}", "WARNING")
             return {"pe_ratio": None, "market_cap": None, "52week_high": None, "52week_low": None, "price_fallback": None}
 
-    def _fetch_finnhub_news(self, ticker, api_key, days=3):
-        """ดึงข่าวล่าสุดจาก Finnhub News API (ฟรี 60 req/min)
-        คืน list of {headline, summary, source, datetime} สูงสุด 5 ข่าว"""
+    def _fetch_marketaux_news(self, ticker, api_key, include_weekend=False):
+        """ดึงข่าวจาก MarketAux — 6 ข่าวใน 1 call พร้อม sentiment score
+        
+        ✅ P3: ใช้ limit=6 แทน 2 calls → ใช้แค่ 40/100 calls ต่อวัน
+        ✅ published_after แบบ smart:
+           - ปกติ (อ-ศ): ดึงข่าว 22:00 เมื่อวาน ถึงตอนนี้
+           - วันจันทร์ (include_weekend=True): ดึงข่าวตั้งแต่ศุกร์ 22:00 ถึงตอนนี้
+        ✅ group_similar=true: MarketAux กรอง near-duplicate อัตโนมัติ
+        ✅ sentiment_score: -1 ถึง +1 ต่อ ticker → หนุ่มใช้วิเคราะห์ได้ทันที"""
         try:
-            from_date = (datetime.now() - __import__('datetime').timedelta(days=days)).strftime('%Y-%m-%d')
-            to_date   = datetime.now().strftime('%Y-%m-%d')
-            url = f"https://finnhub.io/api/v1/company-news?symbol={ticker}&from={from_date}&to={to_date}&token={api_key}"
+            from datetime import timedelta
+
+            # คำนวณ published_after ตาม mode
+            now = datetime.now()
+            if include_weekend:
+                # วันจันทร์ → ดึงตั้งแต่ศุกร์ที่แล้ว 22:00
+                days_back = (now.weekday() + 3) % 7  # จันทร์=0 → 3 วัน = ศุกร์
+                days_back = max(days_back, 3)  # ย้อนไปอย่างน้อย 3 วัน
+                since = (now - timedelta(days=days_back)).replace(
+                    hour=22, minute=0, second=0, microsecond=0)
+            else:
+                # อ-ศ ปกติ → ดึงตั้งแต่เมื่อวาน 22:00
+                since = (now - timedelta(days=1)).replace(
+                    hour=22, minute=0, second=0, microsecond=0)
+
+            published_after = since.strftime('%Y-%m-%dT%H:%M')
+
+            url = (
+                f"https://api.marketaux.com/v1/news/all"
+                f"?symbols={ticker}"
+                f"&filter_entities=true"
+                f"&must_have_entities=true"
+                f"&language=en"
+                f"&limit=6"
+                f"&group_similar=true"
+                f"&published_after={published_after}"
+                f"&api_token={api_key}"
+            )
+
             res = requests.get(url, timeout=10).json()
-            if not isinstance(res, list):
+            articles = res.get("data", [])
+
+            if not articles:
+                self.log_action("นัตตี้", f"MarketAux: no news for {ticker} since {published_after}", "WARNING")
                 return []
+
             news = []
-            for item in res[:5]:  # เอาแค่ 5 ข่าวล่าสุด
+            for item in articles:
+                # หา entity ที่ตรงกับ ticker นี้โดยเฉพาะ
+                entity = next(
+                    (e for e in item.get("entities", []) if e.get("symbol") == ticker),
+                    {}
+                )
                 news.append({
-                    "headline": item.get("headline", ""),
-                    "summary":  item.get("summary",  "")[:300],  # ตัดที่ 300 chars ต่อข่าว
-                    "source":   item.get("source",   ""),
-                    "datetime": datetime.fromtimestamp(item.get("datetime", 0)).strftime('%Y-%m-%d %H:%M') if item.get("datetime") else ""
+                    "uuid":            item.get("uuid", ""),
+                    "headline":        item.get("title", ""),
+                    "snippet":         item.get("snippet", "")[:250],
+                    "source":          item.get("source", ""),
+                    "published_at":    item.get("published_at", ""),
+                    "sentiment_score": entity.get("sentiment_score"),  # -1 ถึง +1
+                    "highlights":      entity.get("highlights", [])[:2],
                 })
+
+            self.log_action("นัตตี้", f"MarketAux: {len(news)} news for {ticker} (since {published_after})", "SUCCESS")
             return news
+
         except Exception as e:
-            self.log_action("นัตตี้", f"Finnhub news fail for {ticker}: {str(e)}", "WARNING")
+            self.log_action("นัตตี้", f"MarketAux news fail for {ticker}: {str(e)}", "WARNING")
             return []
 
-    def _summarize_news(self, ticker, news_list):
-        """นัตตี้สรุปข่าวด้วย Haiku — ราคาถูก เพียงพอสำหรับ summarization"""
+    def _format_news_for_prompt(self, ticker, news_list):
+        """แปลง news list เป็น text สำหรับส่งให้หนุ่ม
+        ✅ ไม่ต้องเรียก Haiku สรุปแล้ว — ใช้ sentiment_score + highlights โดยตรง
+        ประหยัด token และได้ sentiment ที่แม่นกว่า"""
         if not news_list:
             return "ไม่มีข่าวล่าสุด"
-        system_prompt = """คุณคือนักข่าวที่สรุปข่าวหุ้นอย่างกระชับ
-สรุปข่าวที่ได้รับเป็นภาษาไทย 2-3 ประโยค เน้นผลกระทบต่อราคาหุ้น
-ตอบเป็น plain text ไม่ต้องมี JSON"""
-        news_text = "\n".join([f"- [{n['source']}] {n['headline']}: {n['summary']}" for n in news_list])
-        user_message = f"สรุปข่าวของ {ticker}:\n{news_text}"
-        try:
-            return self.claude_call(system_prompt, user_message, "นัตตี้", model=self.MODEL_HAIKU)
-        except Exception:
-            return "\n".join([n["headline"] for n in news_list[:3]])  # fallback: แค่ headlines
-        """นัตตี้: ระบบสายสำรอง 3 ชั้น รองรับพอร์ต 30-40 ตัวได้สบาย
-        Tier 1 (yfinance):      ฟรี ครบ แต่ติด 429 บน cloud IP
-        Tier 2 (Finnhub):       60 req/min ไม่จำกัด daily ✅ ข้อมูลครบ P/E + 52-week จริง
-        Tier 3 (Alpha Vantage): 5 req/min 25/day ⚠️  สำรองสุดท้ายเท่านั้น
-        ✅ FIX #1: API keys โหลดจาก environment variables ไม่ hardcode ใน code"""
-        self.log_action("นัตตี้", "Starting news and data fetch (3-tier fallback)...", "INFO")
 
-        # ✅ FIX #1: ดึง keys จาก Render ENV ไม่ hardcode ใน source code
+        # คำนวณ avg sentiment
+        scores = [n["sentiment_score"] for n in news_list if n.get("sentiment_score") is not None]
+        avg_sentiment = sum(scores) / len(scores) if scores else None
+
+        if avg_sentiment is not None:
+            if avg_sentiment > 0.2:
+                sentiment_label = f"เชิงบวก ({avg_sentiment:.2f})"
+            elif avg_sentiment < -0.2:
+                sentiment_label = f"เชิงลบ ({avg_sentiment:.2f})"
+            else:
+                sentiment_label = f"กลาง ({avg_sentiment:.2f})"
+        else:
+            sentiment_label = "ไม่มีข้อมูล"
+
+        lines = [f"📊 Sentiment รวม: {sentiment_label}", f"📰 ข่าวล่าสุด {len(news_list)} ข่าว:"]
+        for n in news_list:
+            score_str = f"[{n['sentiment_score']:+.2f}]" if n.get("sentiment_score") is not None else ""
+            lines.append(f"• {score_str} [{n['source']}] {n['headline']}")
+            if n.get("highlights"):
+                lines.append(f"  → {n['highlights'][0]}")
+
+        return "\n".join(lines)
+
+    def natty_get_news(self, stocks, days=1, include_weekend=False):
+        """นัตตี้: ดึงข้อมูลหุ้นแบบ 3-tier fallback + ข่าวจาก MarketAux
+        Tier 1 (yfinance):      ฟรี ครบ แต่ติด 429 บน cloud IP
+        Tier 2 (Finnhub):       60 req/min ไม่จำกัด daily
+        Tier 3 (Alpha Vantage): 5 req/min 25/day — สำรองสุดท้าย
+        ข่าว: MarketAux 6 ข่าว/ticker, sentiment score สำเร็จรูป
+        include_weekend=True: วันจันทร์ — ดึงข่าวตั้งแต่ศุกร์ 22:00"""
+        self.log_action("นัตตี้", f"Starting fetch ({'Monday mode' if include_weekend else 'regular mode'})...", "INFO")
+
         FINNHUB_KEY       = os.getenv("FINNHUB_API_KEY")
         ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+        MARKETAUX_KEY     = os.getenv("MARKETAUX_API_KEY")
 
         if not FINNHUB_KEY:
             self.log_action("นัตตี้", "⚠️  FINNHUB_API_KEY not set — Tier 2 disabled", "WARNING")
         if not ALPHA_VANTAGE_KEY:
             self.log_action("นัตตี้", "⚠️  ALPHA_VANTAGE_API_KEY not set — Tier 3 disabled", "WARNING")
+        if not MARKETAUX_KEY:
+            self.log_action("นัตตี้", "⚠️  MARKETAUX_API_KEY not set — news disabled", "WARNING")
 
         news_data = {}
 
@@ -337,14 +407,19 @@ class AgentOrchestrator:
             if data.get("pe_ratio") is None:
                 self.log_action("นัตตี้", f"⚠️  {ticker}: P/E unavailable (loss-making co. หรือ API ไม่มีข้อมูล)", "WARNING")
 
-            # ✅ ดึงข่าวจาก Finnhub News + สรุปด้วย Haiku
-            if FINNHUB_KEY:
-                news_list = self._fetch_finnhub_news(ticker, FINNHUB_KEY, days=days)
-                data["news_summary"] = self._summarize_news(ticker, news_list)
+            # ✅ P3: ดึงข่าวจาก MarketAux (sentiment score สำเร็จรูป ไม่ต้องสรุปด้วย Haiku)
+            if MARKETAUX_KEY:
+                news_list = self._fetch_marketaux_news(ticker, MARKETAUX_KEY, include_weekend=include_weekend)
+                data["news_summary"] = self._format_news_for_prompt(ticker, news_list)
                 data["news_count"]   = len(news_list)
+                data["avg_sentiment"] = (
+                    sum(n["sentiment_score"] for n in news_list if n.get("sentiment_score") is not None)
+                    / max(1, sum(1 for n in news_list if n.get("sentiment_score") is not None))
+                ) if news_list else None
             else:
-                data["news_summary"] = "ไม่มี Finnhub key — ไม่ได้ดึงข่าว"
-                data["news_count"]   = 0
+                data["news_summary"]  = "ไม่มี MarketAux key — ไม่ได้ดึงข่าว"
+                data["news_count"]    = 0
+                data["avg_sentiment"] = None
 
             news_data[ticker] = data
 
@@ -406,7 +481,13 @@ Return ONLY JSON format:
                     'alpha_vantage': "200-day moving average as price proxy (lower reliability — not real-time)",
                 }.get(source, f"Unknown source: {source} (treat with caution)")
 
-                news_summary = data.get('news_summary', 'ไม่มีข่าว')
+                news_summary  = data.get('news_summary', 'ไม่มีข่าว')
+                avg_sentiment = data.get('avg_sentiment')
+                sentiment_note = (
+                    f"Market Sentiment Score: {avg_sentiment:+.2f} "
+                    f"({'เชิงบวก' if avg_sentiment > 0.2 else 'เชิงลบ' if avg_sentiment < -0.2 else 'กลาง'})"
+                    if avg_sentiment is not None else "Market Sentiment Score: N/A"
+                )
 
                 user_message = f"""Analyze this stock:
 Symbol: {ticker}
@@ -416,9 +497,16 @@ Current Price: ${data.get('price', 0)}
 P/E Ratio: {pe_text}
 Market Cap: {mcap_text}
 Data Source: {source_note}
+{sentiment_note}
 
-Recent News Summary:
+Recent News:
 {news_summary}
+
+Note:
+- ถ้า P/E หรือ Market Cap เป็น N/A ให้วิเคราะห์จาก price และ 52-week range แทน และลด confidence
+- ถ้า P/E ติดลบ = บริษัทขาดทุน ให้ factor นี้เข้าใน signal
+- ถ้า sentiment score ต่ำกว่า -0.3 ให้ระวัง อาจปรับ signal เป็น HOLD/SELL
+- ถ้า Data Source เป็น lower reliability ให้ลด confidence อย่างน้อย 0.15
 
 Provide analysis in JSON format."""
 
@@ -754,24 +842,28 @@ Write 2-3 sentences in Thai summarizing key observations."""
             db = None
             try:
                 db = SessionLocal()
-                from models import WorkflowLog  # import ตรงนี้เพื่อ avoid circular import
-                log_entry = WorkflowLog(
-                    timestamp=datetime.now(),
-                    status=workflow_result.get('qa_result', {}).get('status', 'UNKNOWN'),
-                    stocks_analyzed=len(validated_results),
-                    buy_signals=buy_count,
-                    sell_signals=sell_count,
-                    hold_signals=hold_count,
-                    needs_review=needs_review,
-                    summary=summary
-                )
-                db.add(log_entry)
-                db.commit()
-                self.log_action("เอ", f"Improvement log saved: {summary[:80]}...", "SUCCESS")
+                try:
+                    from models import WorkflowLog
+                    log_entry = WorkflowLog(
+                        timestamp=datetime.now(),
+                        status=workflow_result.get('qa_result', {}).get('status', 'UNKNOWN'),
+                        stocks_analyzed=len(validated_results),
+                        buy_signals=buy_count,
+                        sell_signals=sell_count,
+                        hold_signals=hold_count,
+                        needs_review=needs_review,
+                        summary=summary,
+                        include_weekend=workflow_result.get('include_weekend', False)
+                    )
+                    db.add(log_entry)
+                    db.commit()
+                    self.log_action("เอ", f"Improvement log saved to DB ✅", "SUCCESS")
+                except ImportError:
+                    # WorkflowLog ยังไม่ได้เพิ่มใน models.py — log เฉยๆ ไม่ fail
+                    self.log_action("เอ", "WorkflowLog model not found — add it to models.py (see workflow_log_model.py)", "WARNING")
+                    self.log_action("เอ", f"Summary: {summary[:150]}", "INFO")
             except Exception as db_err:
-                # WorkflowLog model อาจยังไม่มี — log แค่ไม่ fail workflow
-                self.log_action("เอ", f"DB save skipped (model not ready): {str(db_err)}", "WARNING")
-                self.log_action("เอ", f"Summary: {summary[:120]}", "INFO")
+                self.log_action("เอ", f"DB error: {str(db_err)}", "WARNING")
             finally:
                 if db:
                     db.close()
@@ -915,8 +1007,12 @@ List top 5 recommendations in Thai."""
             self.log_action("SYSTEM", "📰 Regular mode: Fetching 24-hour news...", "INFO")
 
         try:
-            # Step 1: นัตตี้ Get News
-            news_data = self.natty_get_news(stocks, days=3 if include_weekend else 1)
+            # Step 1: นัตตี้ Get News + ราคา
+            news_data = self.natty_get_news(
+                stocks,
+                days=3 if include_weekend else 1,
+                include_weekend=include_weekend
+            )
 
             # ✅ FIX #A: early exit ถ้าไม่มีข้อมูลหุ้นเลย ไม่ให้ workflow รันต่อแบบ COMPLETE ปลอม
             if not news_data:
