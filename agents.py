@@ -450,6 +450,39 @@ class AgentOrchestrator:
                 if fh_data:
                     data = fh_data
                     self.log_action("นัตตี้", f"[Tier 2] ✅ {ticker} OK via Finnhub (price={fh_data['price']})", "SUCCESS")
+
+                    # ✅ CROSS-VALIDATE: ถ้า Finnhub ให้ข้อมูลไม่ครบหรือดูผิดปกติ
+                    # → ดึง Alpha Vantage OVERVIEW มา patch เฉพาะ field ที่ขาด (ประหยัด AV quota)
+                    # Condition: 52w range ถูก sanity check ล้างออก หรือ market_cap น้อยกว่า price
+                    # (Finnhub market_cap หน่วยเป็น ล้าน USD — ถ้า < price ใน USD = implied shares < 1M = ผิดแน่)
+                    mcap = data.get("market_cap")
+                    price_now = data.get("price", 0)
+                    mcap_suspect = mcap is not None and price_now > 0 and mcap < price_now
+                    range_missing = data.get("52week_high") is None or data.get("52week_low") is None
+
+                    if (range_missing or mcap_suspect) and ALPHA_VANTAGE_KEY:
+                        reasons = []
+                        if range_missing: reasons.append("52w range missing")
+                        if mcap_suspect:  reasons.append(f"market_cap {mcap} < price {price_now} (unit mismatch?)")
+                        self.log_action("นัตตี้", f"[AV cross-check] {ticker}: {', '.join(reasons)} — fetching AV OVERVIEW...", "INFO")
+                        ov = self._fetch_alpha_vantage_overview(ticker, ALPHA_VANTAGE_KEY)
+
+                        # Patch 52w range (AV คืน USD ตรง — ใช้ได้เลย)
+                        if range_missing and ov.get("52week_high") and ov.get("52week_low"):
+                            av_h = ov["52week_high"]
+                            av_l = ov["52week_low"]
+                            # sanity check ก่อน patch
+                            if av_l <= price_now <= av_h * 1.05 or av_l * 0.95 <= price_now:
+                                data["52week_high"] = av_h
+                                data["52week_low"]  = av_l
+                                self.log_action("นัตตี้", f"[AV patch ✅] {ticker}: 52w range → ${av_l:.2f}–${av_h:.2f}", "SUCCESS")
+                            else:
+                                self.log_action("นัตตี้", f"[AV patch ⚠️] {ticker}: AV 52w range also unreliable — skipping", "WARNING")
+
+                        # Patch market_cap (AV คืน full USD → หาร 1M ให้ตรง unit Finnhub)
+                        if mcap_suspect and ov.get("market_cap") and ov["market_cap"] > price_now * 1_000_000:
+                            data["market_cap"] = ov["market_cap"] / 1_000_000  # normalize → ล้าน USD
+                            self.log_action("นัตตี้", f"[AV patch ✅] {ticker}: market_cap patched → ${data['market_cap']:,.0f}M", "SUCCESS")
                 else:
                     self.log_action("นัตตี้", f"[Tier 2] Finnhub returned no usable data for {ticker}", "WARNING")
 
@@ -774,7 +807,7 @@ Portfolio Status: {json.dumps(portfolio_status, ensure_ascii=False)}
 Create professional Thai report."""
 
             response = self.claude_call(system_prompt, user_message, "เจน",
-                                        model=self.MODEL_SONNET, use_cache=True, max_tokens=8192)
+                                        model=self.MODEL_SONNET, use_cache=True, max_tokens=16000)
             report = {
                 "timestamp":    datetime.now().isoformat(),
                 "summary":      response,
@@ -1353,8 +1386,6 @@ Fix the top issues found in the logs. Return the complete updated agents.py."""
                     stock.updated_at    = datetime.now()
                     updated.append(ticker)
 
-            # ✅ FIX #E: commit ครั้งเดียวหลัง loop จบ (แทน N commits แยก)
-            # ลด DB round trips จาก N → 1 ประหยัดเวลาเมื่อมีหุ้น 30-40 ตัว
             db.commit()
 
             summary = f"Updated: {updated}" if updated else "No stocks updated"
@@ -1364,7 +1395,6 @@ Fix the top issues found in the logs. Return the complete updated agents.py."""
         except Exception as e:
             self.log_action("DATABASE", f"Update failed: {str(e)}", "ERROR")
         finally:
-            # ✅ ปิด connection เสมอ ไม่ว่าจะสำเร็จหรือ exception
             if db is not None:
                 db.close()
 
