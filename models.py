@@ -53,3 +53,4 @@ class WorkflowLog(Base):
     needs_review    = Column(Integer, default=0)
     summary         = Column(Text,    nullable=True)  # เอ สรุปด้วย Haiku
     include_weekend = Column(Boolean, default=False)  # True = Monday mode
+    cost_usd        = Column(Float,   default=0.0)    # ค่าใช้จ่าย API ของ run นี้ (USD)

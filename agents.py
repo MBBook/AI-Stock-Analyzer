@@ -48,6 +48,8 @@ class AgentOrchestrator:
         if not db_url:
             raise ValueError("DATABASE_URL not set in environment!")
         
+        self.session_cost_usd = 0.0  # สะสม cost ทั้ง workflow run นี้
+
         self.log_action("SYSTEM", f"Loaded {len(self.api_keys)} API keys", "INFO")
         self.log_action("SYSTEM", "Database URL validated", "INFO")
 
@@ -87,6 +89,23 @@ class AgentOrchestrator:
     MODEL_SONNET = "claude-sonnet-4-6"   # วิเคราะห์หุ้น, validate, report, QA
     MODEL_HAIKU  = "claude-haiku-4-5-20251001"  # งานทั่วไป, สรุป, parse, log
 
+    # ==================== BUDGET GUARD ====================
+    # ราคาต่อ 1 ล้าน token (USD) — อ้างอิง Anthropic pricing
+    COST_PER_MTK = {
+        "sonnet": {"input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.30},
+        "haiku":  {"input": 0.80, "output": 4.0,  "cache_write": 1.00, "cache_read": 0.08},
+    }
+
+    # Limit รายวัน (USD) — จันทร์สูงกว่าเพราะดึงข่าว 72 ชม., ศุกร์บวกค่า นิก
+    # Monthly ceiling: (4×1.20) + (12×0.85) + (4×1.10) = $19.40 ✅ ใต้ $20
+    DAILY_BUDGET = {
+        0: 1.20,  # Monday    — news 72hr
+        1: 0.85,  # Tuesday
+        2: 0.85,  # Wednesday
+        3: 0.85,  # Thursday
+        4: 1.10,  # Friday    — + นิก optimize
+    }
+
     def claude_call(self, system_prompt, user_message, agent_name="Claude", model=None, use_cache=False, max_tokens=4096):
         """ใช้ Claude API สำหรับ Agent (with auto-fallback + model selection + caching)
         ✅ model: ระบุ model ที่ต้องการ (default = Sonnet)
@@ -117,6 +136,24 @@ class AgentOrchestrator:
                     extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"} if use_cache else {}
                 )
                 assistant_message = response.content[0].text
+
+                # ✅ BUDGET: นับ token และสะสม cost session
+                if hasattr(response, 'usage'):
+                    u = response.usage
+                    model_key = "haiku" if "haiku" in model else "sonnet"
+                    rates = self.COST_PER_MTK[model_key]
+                    cache_write  = getattr(u, 'cache_creation_input_tokens', 0) or 0
+                    cache_read   = getattr(u, 'cache_read_input_tokens', 0) or 0
+                    fresh_input  = max(0, (getattr(u, 'input_tokens', 0) or 0) - cache_write - cache_read)
+                    output_toks  = getattr(u, 'output_tokens', 0) or 0
+                    call_cost = (
+                        (fresh_input  / 1_000_000) * rates["input"] +
+                        (output_toks  / 1_000_000) * rates["output"] +
+                        (cache_write  / 1_000_000) * rates["cache_write"] +
+                        (cache_read   / 1_000_000) * rates["cache_read"]
+                    )
+                    self.session_cost_usd += call_cost
+
                 self.log_action(agent_name, f"Claude call success ({model.split('-')[1]} Key#{self.current_key_index + 1})", "SUCCESS")
                 return assistant_message
 
@@ -130,6 +167,26 @@ class AgentOrchestrator:
                 else:
                     self.log_action(agent_name, f"All {max_attempts} API keys exhausted", "ERROR")
                     raise
+
+    # ==================== BUDGET CHECK ====================
+    def _check_daily_budget(self, db):
+        """ตรวจสอบ cost วันนี้ก่อนรัน workflow
+        Returns: (ok: bool, today_spent: float, daily_limit: float)"""
+        today = datetime.now()
+        limit = self.DAILY_BUDGET.get(today.weekday(), 0.85)
+        try:
+            from models import WorkflowLog
+            from sqlalchemy import func
+            day_start = today.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end   = today.replace(hour=23, minute=59, second=59, microsecond=999999)
+            today_cost = db.query(func.sum(WorkflowLog.cost_usd)).filter(
+                WorkflowLog.timestamp >= day_start,
+                WorkflowLog.timestamp <= day_end
+            ).scalar() or 0.0
+            return today_cost < limit, today_cost, limit
+        except Exception as e:
+            self.log_action("BUDGET", f"Budget check error: {str(e)} — proceeding with caution", "WARNING")
+            return True, 0.0, limit  # fail-open: ถ้าเช็คไม่ได้ให้รันต่อ
 
     # ==================== AGENT 1: นัตตี้ (Get News) ====================
 
@@ -856,7 +913,8 @@ Write 2-3 sentences in Thai summarizing key observations."""
                         hold_signals=hold_count,
                         needs_review=needs_review,
                         summary=summary,
-                        include_weekend=workflow_result.get('include_weekend', False)
+                        include_weekend=workflow_result.get('include_weekend', False),
+                        cost_usd=round(self.session_cost_usd, 6)  # ✅ BUDGET: บันทึก cost จริงของ run นี้
                     )
                     db.add(log_entry)
                     db.commit()
@@ -1123,6 +1181,28 @@ Fix the top issues found in the logs. Return the complete updated agents.py."""
             stocks = ["AAPL", "GOOGL", "MSFT", "TSLA", "AMZN"]
 
         self.workflow_log = []
+        self.session_cost_usd = 0.0  # reset ทุก run ใหม่
+
+        # ===== BUDGET GUARD: ตรวจก่อนเริ่มเสมอ =====
+        db_budget = None
+        try:
+            db_budget = SessionLocal()
+            budget_ok, today_spent, daily_limit = self._check_daily_budget(db_budget)
+            self.log_action("BUDGET", f"Today spent: ${today_spent:.4f} / Limit: ${daily_limit:.2f}", "INFO")
+            if not budget_ok:
+                self.log_action("BUDGET",
+                    f"⚠️  Daily budget exceeded (${today_spent:.4f} >= ${daily_limit:.2f}) — workflow skipped to protect monthly cap",
+                    "ERROR")
+                return {
+                    "status": "BUDGET_EXCEEDED",
+                    "reason": f"Daily limit ${daily_limit:.2f} reached (spent ${today_spent:.4f} today). Workflow skipped.",
+                    "workflow_log": self.workflow_log,
+                    "qa_result": None,
+                    "report": None
+                }
+        finally:
+            if db_budget:
+                db_budget.close()
 
         if include_weekend:
             self.log_action("SYSTEM", "🔄 Monday mode: Fetching Sat-Sun-Mon news...", "INFO")
