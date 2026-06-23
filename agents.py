@@ -236,11 +236,25 @@ class AgentOrchestrator:
             metric_url = f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={api_key}"
             metric = requests.get(metric_url, timeout=10).json().get("metric", {})
 
+            week52_high = self._safe_positive_float(metric.get("52WeekHigh"))
+            week52_low  = self._safe_positive_float(metric.get("52WeekLow"))
+
+            # ✅ Sanity check: ราคาต้องอยู่ใน 52-week range
+            # ถ้าไม่ใช่ = Finnhub mix currency หรือ share class ผิด (เช่น TSM TWD, ASML Amsterdam)
+            if week52_high and price > week52_high * 1.05:
+                self.log_action("นัตตี้", f"⚠️ {ticker}: price ${price} > 52w_high ${week52_high} — range data unreliable (currency/class mismatch?)", "WARNING")
+                week52_high = None
+                week52_low  = None
+            elif week52_low and price < week52_low * 0.95:
+                self.log_action("นัตตี้", f"⚠️ {ticker}: price ${price} < 52w_low ${week52_low} — range data unreliable (currency/class mismatch?)", "WARNING")
+                week52_high = None
+                week52_low  = None
+
             return {
                 "symbol":      ticker,
                 "price":       price,
-                "52week_high": self._safe_positive_float(metric.get("52WeekHigh")),
-                "52week_low":  self._safe_positive_float(metric.get("52WeekLow")),
+                "52week_high": week52_high,
+                "52week_low":  week52_low,
                 "pe_ratio":    self._safe_float(metric.get("peNormalizedAnnual")),        # ✅ ลบได้
                 "market_cap":  self._safe_positive_float(metric.get("marketCapitalization")),
                 "source":      "finnhub"
@@ -760,7 +774,7 @@ Portfolio Status: {json.dumps(portfolio_status, ensure_ascii=False)}
 Create professional Thai report."""
 
             response = self.claude_call(system_prompt, user_message, "เจน",
-                                        model=self.MODEL_SONNET, use_cache=True)
+                                        model=self.MODEL_SONNET, use_cache=True, max_tokens=8192)
             report = {
                 "timestamp":    datetime.now().isoformat(),
                 "summary":      response,
