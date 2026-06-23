@@ -37,9 +37,9 @@ import sys
 import importlib.util
 import os
 
-# โหลด agents_final.py (version ล่าสุด) แทน agents.py เดิม
+# โหลด agents.py
 spec = importlib.util.spec_from_file_location(
-    "agents", os.path.join(os.path.dirname(__file__), "agents_final.py")
+    "agents", os.path.join(os.path.dirname(__file__), "agents.py")
 )
 agents_module = importlib.util.module_from_spec(spec)
 sys.modules["agents"] = agents_module
@@ -635,8 +635,16 @@ class TestWorkflow(unittest.TestCase):
         """claude_call ต้องสร้าง messages ใหม่ทุกครั้ง — ไม่มี shared history"""
         messages_seen = []
         def capture_call(*args, **kwargs):
-            # เก็บ messages ที่ถูกส่ง
-            return MagicMock(content=[MagicMock(text='{"signal":"HOLD","confidence":0.5,"s1":100,"s2":95,"s3":90,"reasoning":"test","ticker":"X"}')])
+            # เก็บ messages ที่ถูกส่ง — usage ต้องเป็น int จริงๆ ไม่ใช่ MagicMock
+            mock_usage = MagicMock()
+            mock_usage.input_tokens = 100
+            mock_usage.output_tokens = 50
+            mock_usage.cache_creation_input_tokens = 0
+            mock_usage.cache_read_input_tokens = 0
+            return MagicMock(
+                content=[MagicMock(text='{"signal":"HOLD","confidence":0.5,"s1":100,"s2":95,"s3":90,"reasoning":"test","ticker":"X"}')],
+                usage=mock_usage
+            )
 
         with patch("agents.Anthropic") as mock_client:
             mock_instance = MagicMock()

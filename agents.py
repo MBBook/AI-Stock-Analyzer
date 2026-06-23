@@ -142,10 +142,10 @@ class AgentOrchestrator:
                     u = response.usage
                     model_key = "haiku" if "haiku" in model else "sonnet"
                     rates = self.COST_PER_MTK[model_key]
-                    cache_write  = getattr(u, 'cache_creation_input_tokens', 0) or 0
-                    cache_read   = getattr(u, 'cache_read_input_tokens', 0) or 0
-                    fresh_input  = max(0, (getattr(u, 'input_tokens', 0) or 0) - cache_write - cache_read)
-                    output_toks  = getattr(u, 'output_tokens', 0) or 0
+                    cache_write  = int(getattr(u, 'cache_creation_input_tokens', 0) or 0)
+                    cache_read   = int(getattr(u, 'cache_read_input_tokens', 0) or 0)
+                    fresh_input  = max(0, int(getattr(u, 'input_tokens', 0) or 0) - cache_write - cache_read)
+                    output_toks  = int(getattr(u, 'output_tokens', 0) or 0)
                     call_cost = (
                         (fresh_input  / 1_000_000) * rates["input"] +
                         (output_toks  / 1_000_000) * rates["output"] +
