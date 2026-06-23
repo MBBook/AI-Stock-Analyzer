@@ -1,0 +1,40 @@
+name: AI Stock Workflow
+
+on:
+  schedule:
+    # อังคาร-ศุกร์ 22:00 WIB (15:00 UTC)
+    - cron: '0 15 * * 2-5'
+    # วันจันทร์ 22:00 WIB — include_weekend=true
+    - cron: '0 15 * * 1'
+  workflow_dispatch:  # รันมือได้จาก GitHub UI
+
+jobs:
+  run-workflow:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Weekday Workflow (Tue-Fri)
+        if: github.event.schedule == '0 15 * * 2-5'
+        run: |
+          curl -X POST https://ai-stock-analyzer-msli.onrender.com/workflow \
+            --max-time 600 \
+            -o result.json \
+            -w "\nHTTP Status: %{http_code}\n"
+
+      - name: Trigger Monday Workflow (with weekend news)
+        if: github.event.schedule == '0 15 * * 1'
+        run: |
+          curl -X POST "https://ai-stock-analyzer-msli.onrender.com/workflow?include_weekend=true" \
+            --max-time 600 \
+            -o result.json \
+            -w "\nHTTP Status: %{http_code}\n"
+
+      - name: Show Result Summary
+        run: |
+          echo "=== Workflow Status ==="
+          cat result.json | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          print('Status:', d.get('status', 'unknown'))
+          qa = d.get('qa_result', {})
+          print('QA:', qa.get('status', 'N/A'))
+          " 2>/dev/null || echo "Could not parse result"
