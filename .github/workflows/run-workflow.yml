@@ -12,8 +12,8 @@ jobs:
   run-workflow:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Weekday Workflow (Tue-Fri)
-        if: github.event.schedule == '0 15 * * 2-5'
+      - name: Trigger Weekday Workflow (Tue-Fri or manual)
+        if: github.event.schedule == '0 15 * * 2-5' || github.event_name == 'workflow_dispatch'
         run: |
           curl -X POST https://ai-stock-analyzer-msli.onrender.com/workflow \
             --max-time 600 \
