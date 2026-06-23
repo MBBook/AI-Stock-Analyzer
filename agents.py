@@ -58,6 +58,8 @@ class AgentOrchestrator:
             self.log_action("SYSTEM", "⚠️ ALPHA_VANTAGE_API_KEY not set — Tier 3 (Alpha Vantage) will be unavailable", "WARNING")
         if not os.getenv("MARKETAUX_API_KEY"):
             self.log_action("SYSTEM", "⚠️ MARKETAUX_API_KEY not set — news fetching will be disabled", "WARNING")
+        if not os.getenv("GITHUB_TOKEN"):
+            self.log_action("SYSTEM", "⚠️ GITHUB_TOKEN not set — นิก cannot push to GitHub (Friday optimization disabled)", "WARNING")
     
     def get_client(self):
         """Get Anthropic client with current API key"""
@@ -85,10 +87,11 @@ class AgentOrchestrator:
     MODEL_SONNET = "claude-sonnet-4-6"   # วิเคราะห์หุ้น, validate, report, QA
     MODEL_HAIKU  = "claude-haiku-4-5-20251001"  # งานทั่วไป, สรุป, parse, log
 
-    def claude_call(self, system_prompt, user_message, agent_name="Claude", model=None, use_cache=False):
+    def claude_call(self, system_prompt, user_message, agent_name="Claude", model=None, use_cache=False, max_tokens=4096):
         """ใช้ Claude API สำหรับ Agent (with auto-fallback + model selection + caching)
         ✅ model: ระบุ model ที่ต้องการ (default = Sonnet)
-        ✅ use_cache: เปิด prompt caching บน system_prompt (ลด cost ~50% สำหรับ repeated calls)"""
+        ✅ use_cache: เปิด prompt caching บน system_prompt (ลด cost ~50%)
+        ✅ max_tokens: ปรับได้ตามงาน (นิก ต้องการ 8192+ เพื่อเขียน agents.py ทั้งไฟล์)"""
         if model is None:
             model = self.MODEL_SONNET
 
@@ -108,7 +111,7 @@ class AgentOrchestrator:
                 client = self.get_client()
                 response = client.messages.create(
                     model=model,
-                    max_tokens=4096,
+                    max_tokens=max_tokens,
                     system=system_block,
                     messages=messages,
                     extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"} if use_cache else {}
@@ -922,10 +925,17 @@ If you cannot parse, return {"error": "reason"}."""
 
     # ==================== AGENT 10: นิก (Code Optimizer — Every Friday) ====================
     def nik_optimize_code(self):
-        """นิก: อ่าน WorkflowLog ย้อนหลัง 5 วันจาก DB → วิเคราะห์ → push GitHub — Haiku"""
-        self.log_action("นิก", "Starting weekly code optimization analysis...", "INFO")
+        """นิก: อ่าน WorkflowLog 5 วัน → วิเคราะห์ → แก้ agents.py → push GitHub → Render auto-deploy"""
+        self.log_action("นิก", "Starting weekly code optimization...", "INFO")
         try:
-            # ✅ ดึง logs ย้อนหลัง 5 วัน จาก DB จริงๆ (ไม่ใช่แค่ session ปัจจุบัน)
+            github_token = os.getenv("GITHUB_TOKEN")
+            github_repo  = os.getenv("GITHUB_REPO", "MBBook/ai-stock-analyzer")
+
+            if not github_token:
+                self.log_action("นิก", "GITHUB_TOKEN not set — cannot push. Set it in Render ENV.", "WARNING")
+                return None
+
+            # ===== Step 1: ดึง WorkflowLog ย้อนหลัง 5 วัน จาก DB =====
             from datetime import timedelta
             db = None
             db_logs = []
@@ -937,80 +947,95 @@ If you cannot parse, return {"error": "reason"}."""
                     db_logs = db.query(WorkflowLog).filter(
                         WorkflowLog.timestamp >= since
                     ).order_by(WorkflowLog.timestamp.desc()).all()
-                    self.log_action("นิก", f"Loaded {len(db_logs)} workflow runs from DB (past 5 days)", "INFO")
+                    self.log_action("นิก", f"Loaded {len(db_logs)} runs from DB", "INFO")
                 except ImportError:
-                    self.log_action("นิก", "WorkflowLog model not found — using session logs only", "WARNING")
-            except Exception as db_err:
-                self.log_action("นิก", f"DB read failed: {str(db_err)} — using session logs only", "WARNING")
+                    self.log_action("นิก", "WorkflowLog not in models.py — using session logs", "WARNING")
+            except Exception as e:
+                self.log_action("นิก", f"DB read failed: {str(e)}", "WARNING")
             finally:
                 if db:
                     db.close()
 
-            # สร้าง analysis context จาก DB logs
+            # สร้าง history context
             if db_logs:
-                db_summary = []
-                for log in db_logs:
-                    db_summary.append({
-                        "timestamp":       log.timestamp.isoformat(),
-                        "status":          log.status,
-                        "stocks_analyzed": log.stocks_analyzed,
-                        "buy":             log.buy_signals,
-                        "sell":            log.sell_signals,
-                        "hold":            log.hold_signals,
-                        "needs_review":    log.needs_review,
-                        "summary":         log.summary,
-                        "include_weekend": log.include_weekend,
-                    })
-                history_text = json.dumps(db_summary, ensure_ascii=False)
+                history = json.dumps([{
+                    "timestamp":    l.timestamp.isoformat(),
+                    "status":       l.status,
+                    "stocks":       l.stocks_analyzed,
+                    "buy":          l.buy_signals,
+                    "sell":         l.sell_signals,
+                    "needs_review": l.needs_review,
+                    "summary":      l.summary,
+                } for l in db_logs], ensure_ascii=False)
             else:
-                # fallback: ใช้ session logs ถ้า DB ว่าง
-                error_logs   = [l for l in self.workflow_log if l.get('status') in ('ERROR', 'WARNING')]
-                history_text = json.dumps(error_logs[-50:], ensure_ascii=False)
+                error_logs = [l for l in self.workflow_log if l.get('status') in ('ERROR', 'WARNING')]
+                history = json.dumps(error_logs[-50:], ensure_ascii=False)
 
-            # รวม error logs ของ session ปัจจุบันด้วย
             session_errors = [l for l in self.workflow_log if l.get('status') in ('ERROR', 'WARNING')]
-            session_text   = json.dumps(session_errors[-30:], ensure_ascii=False) if session_errors else "ไม่มี error ใน session นี้"
+            session_text = json.dumps(session_errors[-30:], ensure_ascii=False) if session_errors else "ไม่มี error"
 
-            system_prompt = """You are นิก (Nik), a code optimization specialist for an AI stock analyzer system.
-You have access to workflow run history and error logs from the past 5 days.
+            # ===== Step 2: ดึง agents.py ปัจจุบันจาก GitHub =====
+            current_code, sha = self._nik_get_current_agents_py(github_token, github_repo)
+            if not current_code:
+                self.log_action("นิก", "Cannot fetch agents.py from GitHub — aborting", "ERROR")
+                return None
 
-Analyze the data and provide specific, actionable improvements for agents.py.
-Focus on:
-1. Recurring errors or failures (which agents fail most?)
-2. QA rejection patterns (what causes REJECT?)
-3. Data quality issues (which tickers fail to fetch data?)
-4. Performance bottlenecks
-5. Signal quality concerns
+            # ===== Step 3: นิก วิเคราะห์ + แก้ code =====
+            system_prompt = """You are นิก (Nik), an expert Python developer maintaining an AI stock analyzer system.
 
-Reply in Thai with specific recommendations.
-Format: numbered list, max 5 items, each with clear action to take."""
+You will receive:
+1. Workflow history (past 5 days) — showing what's failing
+2. Current session error logs
+3. The current agents.py code
 
-            user_message = f"""Weekly optimization analysis for AI Stock Analyzer:
+Your job:
+1. Identify the TOP 3 most impactful issues from the logs
+2. Make MINIMAL, SAFE fixes to agents.py (do NOT rewrite everything)
+3. Focus on: error handling, retry logic, prompt improvements, timeout issues
+4. Add comments explaining each change
 
-=== Workflow History (past 5 days from DB) ===
-{history_text}
+CRITICAL RULES:
+- Return the COMPLETE updated agents.py — every line, no truncation
+- Keep all existing functionality intact
+- Only fix what the logs show is actually broken
+- Do NOT change model names, API keys, or database schema"""
 
-=== Current Session Error Logs ===
+            user_message = f"""=== Workflow History (5 days) ===
+{history}
+
+=== Current Session Errors ===
 {session_text}
 
-What are the top 5 specific improvements needed in the agent system?
-List each with: ปัญหา, สาเหตุ, วิธีแก้ไข"""
+=== Current agents.py ===
+{current_code}
 
-            recommendations = self.claude_call(system_prompt, user_message, "นิก",
-                                               model=self.MODEL_HAIKU)
+Fix the top issues found in the logs. Return the complete updated agents.py."""
 
-            self.log_action("นิก", f"✅ Optimization recommendations:\n{recommendations}", "SUCCESS")
+            self.log_action("นิก", "Analyzing logs and improving agents.py with Sonnet...", "INFO")
+            improved_code = self.claude_call(
+                system_prompt, user_message, "นิก",
+                model=self.MODEL_SONNET,
+                max_tokens=16000  # agents.py ~25k chars ≈ 8k tokens output — Sonnet handles this
+            )
 
-            # Push ไป GitHub ถ้ามี GITHUB_TOKEN
-            github_token = os.getenv("GITHUB_TOKEN")
-            github_repo  = os.getenv("GITHUB_REPO", "MBBook/ai-stock-analyzer")
+            # ตรวจว่าได้ Python code จริง (ไม่ใช่ response เปล่า)
+            if "class AgentOrchestrator" not in improved_code:
+                self.log_action("นิก", "Response doesn't look like valid agents.py — aborting push", "ERROR")
+                # Push report แทน
+                self._nik_push_recommendations(improved_code, github_token, github_repo)
+                return improved_code
 
-            if github_token:
-                self._nik_push_recommendations(recommendations, github_token, github_repo)
+            # ===== Step 4: Push agents.py ไป GitHub → Render auto-deploy =====
+            self.log_action("นิก", "Pushing improved agents.py to GitHub...", "INFO")
+            success = self._nik_push_agents_py(improved_code, sha, github_token, github_repo)
+
+            if success:
+                self.log_action("นิก", "✅ agents.py updated on GitHub → Render will auto-deploy in ~3 min", "SUCCESS")
             else:
-                self.log_action("นิก", "GITHUB_TOKEN not set — recommendations logged only", "WARNING")
+                self.log_action("นิก", "Push failed — saving as report instead", "WARNING")
+                self._nik_push_recommendations(improved_code, github_token, github_repo)
 
-            return recommendations
+            return improved_code
 
         except Exception as e:
             self.log_action("นิก", f"Optimization failed: {str(e)}", "ERROR")
@@ -1040,6 +1065,51 @@ List each with: ปัญหา, สาเหตุ, วิธีแก้ไข
                 self.log_action("นิก", f"GitHub push failed: {res.status_code} {res.text[:100]}", "ERROR")
         except Exception as e:
             self.log_action("นิก", f"GitHub push error: {str(e)}", "ERROR")
+
+    def _nik_get_current_agents_py(self, github_token, repo):
+        """ดึง agents.py ปัจจุบันจาก GitHub"""
+        try:
+            url = f"https://api.github.com/repos/{repo}/contents/agents.py"
+            headers = {
+                "Authorization": f"token {github_token}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            res = requests.get(url, headers=headers, timeout=15).json()
+            if "content" in res:
+                import base64
+                content = base64.b64decode(res["content"]).decode("utf-8")
+                sha = res.get("sha", "")
+                return content, sha
+            return None, None
+        except Exception as e:
+            self.log_action("นิก", f"Could not fetch agents.py from GitHub: {str(e)}", "ERROR")
+            return None, None
+
+    def _nik_push_agents_py(self, new_content, sha, github_token, repo):
+        """นิก push agents.py ที่แก้แล้วไป GitHub → Render auto-deploy"""
+        try:
+            import base64
+            encoded = base64.b64encode(new_content.encode("utf-8")).decode()
+            url = f"https://api.github.com/repos/{repo}/contents/agents.py"
+            headers = {
+                "Authorization": f"token {github_token}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            payload = {
+                "message": f"นิก: Auto-optimize agents.py {datetime.now().strftime('%Y-%m-%d')}",
+                "content": encoded,
+                "sha": sha  # จำเป็นสำหรับ update file ที่มีอยู่แล้ว
+            }
+            res = requests.put(url, headers=headers, json=payload, timeout=30)
+            if res.status_code in (200, 201):
+                self.log_action("นิก", "✅ agents.py pushed to GitHub → Render auto-deploy started", "SUCCESS")
+                return True
+            else:
+                self.log_action("นิก", f"Push agents.py failed: {res.status_code} {res.text[:200]}", "ERROR")
+                return False
+        except Exception as e:
+            self.log_action("นิก", f"Push agents.py error: {str(e)}", "ERROR")
+            return False
 
     # ==================== MAIN WORKFLOW ====================
     def run_workflow(self, stocks=None, portfolio=None, include_weekend=False):
