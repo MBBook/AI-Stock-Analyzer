@@ -922,31 +922,84 @@ If you cannot parse, return {"error": "reason"}."""
 
     # ==================== AGENT 10: นิก (Code Optimizer — Every Friday) ====================
     def nik_optimize_code(self):
-        """นิก: อ่าน workflow logs ย้อนหลัง 5 วัน → วิเคราะห์ปัญหา → เสนอ improvement — Haiku"""
+        """นิก: อ่าน WorkflowLog ย้อนหลัง 5 วันจาก DB → วิเคราะห์ → push GitHub — Haiku"""
         self.log_action("นิก", "Starting weekly code optimization analysis...", "INFO")
         try:
-            # ดึง logs ย้อนหลัง 5 วัน จาก workflow_log ปัจจุบัน
-            # (ในอนาคตดึงจาก DB WorkflowLog)
-            recent_logs = self.workflow_log[-100:] if len(self.workflow_log) > 100 else self.workflow_log
-            error_logs  = [l for l in recent_logs if l.get('status') in ('ERROR', 'WARNING')]
+            # ✅ ดึง logs ย้อนหลัง 5 วัน จาก DB จริงๆ (ไม่ใช่แค่ session ปัจจุบัน)
+            from datetime import timedelta
+            db = None
+            db_logs = []
+            try:
+                db = SessionLocal()
+                try:
+                    from models import WorkflowLog
+                    since = datetime.now() - timedelta(days=5)
+                    db_logs = db.query(WorkflowLog).filter(
+                        WorkflowLog.timestamp >= since
+                    ).order_by(WorkflowLog.timestamp.desc()).all()
+                    self.log_action("นิก", f"Loaded {len(db_logs)} workflow runs from DB (past 5 days)", "INFO")
+                except ImportError:
+                    self.log_action("นิก", "WorkflowLog model not found — using session logs only", "WARNING")
+            except Exception as db_err:
+                self.log_action("นิก", f"DB read failed: {str(db_err)} — using session logs only", "WARNING")
+            finally:
+                if db:
+                    db.close()
 
-            system_prompt = """You are นิก (Nik), a code optimization specialist.
-Analyze the workflow error logs and suggest improvements to agents.py.
-Focus on: recurring errors, failed agents, performance issues.
-Reply in Thai with specific, actionable recommendations.
-Format: numbered list, max 5 items."""
+            # สร้าง analysis context จาก DB logs
+            if db_logs:
+                db_summary = []
+                for log in db_logs:
+                    db_summary.append({
+                        "timestamp":       log.timestamp.isoformat(),
+                        "status":          log.status,
+                        "stocks_analyzed": log.stocks_analyzed,
+                        "buy":             log.buy_signals,
+                        "sell":            log.sell_signals,
+                        "hold":            log.hold_signals,
+                        "needs_review":    log.needs_review,
+                        "summary":         log.summary,
+                        "include_weekend": log.include_weekend,
+                    })
+                history_text = json.dumps(db_summary, ensure_ascii=False)
+            else:
+                # fallback: ใช้ session logs ถ้า DB ว่าง
+                error_logs   = [l for l in self.workflow_log if l.get('status') in ('ERROR', 'WARNING')]
+                history_text = json.dumps(error_logs[-50:], ensure_ascii=False)
 
-            log_summary = json.dumps(error_logs[-50:], ensure_ascii=False)
-            user_message = f"""Analyze these workflow errors from the past 5 days:
-{log_summary}
+            # รวม error logs ของ session ปัจจุบันด้วย
+            session_errors = [l for l in self.workflow_log if l.get('status') in ('ERROR', 'WARNING')]
+            session_text   = json.dumps(session_errors[-30:], ensure_ascii=False) if session_errors else "ไม่มี error ใน session นี้"
 
-What specific improvements should be made to the agent system?
-List top 5 recommendations in Thai."""
+            system_prompt = """You are นิก (Nik), a code optimization specialist for an AI stock analyzer system.
+You have access to workflow run history and error logs from the past 5 days.
+
+Analyze the data and provide specific, actionable improvements for agents.py.
+Focus on:
+1. Recurring errors or failures (which agents fail most?)
+2. QA rejection patterns (what causes REJECT?)
+3. Data quality issues (which tickers fail to fetch data?)
+4. Performance bottlenecks
+5. Signal quality concerns
+
+Reply in Thai with specific recommendations.
+Format: numbered list, max 5 items, each with clear action to take."""
+
+            user_message = f"""Weekly optimization analysis for AI Stock Analyzer:
+
+=== Workflow History (past 5 days from DB) ===
+{history_text}
+
+=== Current Session Error Logs ===
+{session_text}
+
+What are the top 5 specific improvements needed in the agent system?
+List each with: ปัญหา, สาเหตุ, วิธีแก้ไข"""
 
             recommendations = self.claude_call(system_prompt, user_message, "นิก",
                                                model=self.MODEL_HAIKU)
 
-            self.log_action("นิก", f"Optimization recommendations ready:\n{recommendations}", "SUCCESS")
+            self.log_action("นิก", f"✅ Optimization recommendations:\n{recommendations}", "SUCCESS")
 
             # Push ไป GitHub ถ้ามี GITHUB_TOKEN
             github_token = os.getenv("GITHUB_TOKEN")
@@ -955,7 +1008,7 @@ List top 5 recommendations in Thai."""
             if github_token:
                 self._nik_push_recommendations(recommendations, github_token, github_repo)
             else:
-                self.log_action("นิก", "GITHUB_TOKEN not set — recommendations logged only (not pushed)", "WARNING")
+                self.log_action("นิก", "GITHUB_TOKEN not set — recommendations logged only", "WARNING")
 
             return recommendations
 
@@ -1126,13 +1179,14 @@ List top 5 recommendations in Thai."""
 
                 stock = db.query(Stock).filter(Stock.ticker == ticker).first()
                 if stock:
-                    stock.signal     = analysis.get('signal', 'HOLD')
-                    stock.confidence = analysis.get('confidence', 0.5)
-                    stock.fair_price = analysis.get('fair_price', stock.current_price)
-                    stock.s1         = analysis.get('s1', stock.current_price)
-                    stock.s2         = analysis.get('s2', stock.current_price)
-                    stock.s3         = analysis.get('s3', stock.current_price)
-                    stock.updated_at = datetime.now()
+                    stock.signal        = analysis.get('signal', 'HOLD')
+                    stock.confidence    = analysis.get('confidence', 0.5)
+                    stock.current_price = analysis.get('price', stock.current_price) or stock.current_price
+                    stock.fair_price    = analysis.get('fair_price', stock.current_price)
+                    stock.s1            = analysis.get('s1', stock.current_price)
+                    stock.s2            = analysis.get('s2', stock.current_price)
+                    stock.s3            = analysis.get('s3', stock.current_price)
+                    stock.updated_at    = datetime.now()
                     updated.append(ticker)
 
             # ✅ FIX #E: commit ครั้งเดียวหลัง loop จบ (แทน N commits แยก)
