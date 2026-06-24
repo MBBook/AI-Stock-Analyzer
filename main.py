@@ -70,35 +70,51 @@ def _run_workflow_bg(stocks: list, include_weekend: bool):
     """รัน workflow ใน background thread แล้วเก็บผลใน _job"""
     try:
         result = orchestrator.run_workflow(stocks=stocks, include_weekend=include_weekend)
-        qa = result.get("qa_result") or {}
+        wf_status = result.get("status", "UNKNOWN")
+        qa        = result.get("qa_result") or {}
         qa_status = qa.get("status", "N/A")
-        bkk = datetime.now(timezone(timedelta(hours=7))).strftime("%Y-%m-%d %H:%M")
+        bkk       = datetime.now(timezone(timedelta(hours=7))).strftime("%Y-%m-%d %H:%M")
 
         with _job_lock:
             _job["status"] = "completed"
             _job["finished_at"] = datetime.utcnow().isoformat()
             _job["result"] = {
-                "workflow_status": result.get("status"),
+                "workflow_status": wf_status,
                 "qa_result": qa,
                 "report": result.get("report"),
             }
 
-        # นับ signal จาก report (ถ้ามี)
-        report = result.get("report", {}) or {}
-        summaries = report.get("stock_summaries", []) or []
-        buy_count  = sum(1 for s in summaries if s.get("signal") == "BUY")
-        hold_count = sum(1 for s in summaries if s.get("signal") == "HOLD")
-        sell_count = sum(1 for s in summaries if s.get("signal") == "SELL")
-        signal_line = f"📈 BUY: {buy_count}  ⚖️ HOLD: {hold_count}  📉 SELL: {sell_count}" if summaries else ""
+        # แยก notification ตาม workflow status
+        if wf_status == "BUDGET_EXCEEDED":
+            msg = (
+                f"💰 Budget หมดวันนี้ — ข้ามการวิเคราะห์\n"
+                f"⏰ {bkk} (Bangkok)\n"
+                f"📊 หุ้น: {len(stocks)} ตัว"
+            )
+        elif wf_status == "ABORTED":
+            msg = (
+                f"⚠️ Workflow ABORTED — ข้อมูลไม่ครบ\n"
+                f"⏰ {bkk} (Bangkok)"
+            )
+        else:
+            # COMPLETE หรือ REJECTED
+            report    = result.get("report", {}) or {}
+            summaries = report.get("stock_summaries", []) or []
+            buy_count  = sum(1 for s in summaries if s.get("signal") == "BUY")
+            hold_count = sum(1 for s in summaries if s.get("signal") == "HOLD")
+            sell_count = sum(1 for s in summaries if s.get("signal") == "SELL")
+            signal_line = f"📈 BUY: {buy_count}  ⚖️ HOLD: {hold_count}  📉 SELL: {sell_count}" if summaries else ""
 
-        msg = (
-            f"✅ AI Stock Analysis เสร็จแล้ว\n"
-            f"⏰ {bkk} (Bangkok)\n"
-            f"📊 หุ้น: {len(stocks)} ตัว\n"
-            f"🎯 QA: {qa_status}"
-        )
-        if signal_line:
-            msg += f"\n{signal_line}"
+            icon = "✅" if wf_status == "COMPLETE" else "❌"
+            msg = (
+                f"{icon} AI Stock Analysis เสร็จแล้ว\n"
+                f"⏰ {bkk} (Bangkok)\n"
+                f"📊 หุ้น: {len(stocks)} ตัว\n"
+                f"🎯 QA: {qa_status}"
+            )
+            if signal_line:
+                msg += f"\n{signal_line}"
+
         _send_line_notification(msg)
 
     except Exception as e:
