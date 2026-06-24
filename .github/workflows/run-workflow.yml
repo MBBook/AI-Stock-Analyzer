@@ -16,7 +16,7 @@ jobs:
         if: github.event.schedule == '0 15 * * 2-5' || github.event_name == 'workflow_dispatch'
         run: |
           curl -X POST https://ai-stock-analyzer-msli.onrender.com/workflow \
-            --max-time 600 \
+            --max-time 1200 \
             -o result.json \
             -w "\nHTTP Status: %{http_code}\n"
 
@@ -24,7 +24,7 @@ jobs:
         if: github.event.schedule == '0 15 * * 1'
         run: |
           curl -X POST "https://ai-stock-analyzer-msli.onrender.com/workflow?include_weekend=true" \
-            --max-time 600 \
+            --max-time 1200 \
             -o result.json \
             -w "\nHTTP Status: %{http_code}\n"
 
