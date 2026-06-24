@@ -1,12 +1,7 @@
 name: AI Stock Workflow
 
 on:
-  schedule:
-    # อังคาร-ศุกร์ 22:00 WIB (15:00 UTC)
-    - cron: '0 15 * * 2-5'
-    # วันจันทร์ 22:00 WIB — include_weekend=true
-    - cron: '0 15 * * 1'
-  workflow_dispatch:  # รันมือได้จาก GitHub UI
+  workflow_dispatch:  # trigger จาก cron-job.org หรือรันมือ
 
 jobs:
   run-workflow:
