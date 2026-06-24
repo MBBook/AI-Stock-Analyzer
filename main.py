@@ -4,14 +4,41 @@ from sqlalchemy.orm import Session
 import os
 import threading
 import uuid
+import requests
 from dotenv import load_dotenv
 from database import get_db, engine
 from models import Base, Stock, Trade, Portfolio
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from scheduler import setup_scheduler, shutdown_scheduler
 from agents import orchestrator
 
 load_dotenv()
+
+# ===== LINE NOTIFICATION =====
+
+def _send_line_notification(message: str):
+    """ส่ง LINE push message ไปหา user"""
+    token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
+    user_id = os.getenv("LINE_USER_ID", "")
+    if not token or not user_id:
+        print("[LINE] ไม่มี credentials — ข้าม")
+        return
+    try:
+        resp = requests.post(
+            "https://api.line.me/v2/bot/message/push",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={"to": user_id, "messages": [{"type": "text", "text": message}]},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            print("[LINE] ส่งสำเร็จ")
+        else:
+            print(f"[LINE] ส่งไม่สำเร็จ: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"[LINE] Error: {e}")
 
 app = FastAPI(title="AI Stock Analyzer")
 
@@ -43,20 +70,49 @@ def _run_workflow_bg(stocks: list, include_weekend: bool):
     """รัน workflow ใน background thread แล้วเก็บผลใน _job"""
     try:
         result = orchestrator.run_workflow(stocks=stocks, include_weekend=include_weekend)
+        qa = result.get("qa_result") or {}
+        qa_status = qa.get("status", "N/A")
+        bkk = datetime.now(timezone(timedelta(hours=7))).strftime("%Y-%m-%d %H:%M")
+
         with _job_lock:
             _job["status"] = "completed"
             _job["finished_at"] = datetime.utcnow().isoformat()
             _job["result"] = {
                 "workflow_status": result.get("status"),
-                "qa_result": result.get("qa_result"),
+                "qa_result": qa,
                 "report": result.get("report"),
-                # ตัด workflow_log ออกจาก status endpoint (ใหญ่มาก) — ดูได้ที่ /workflow/logs
             }
+
+        # นับ signal จาก report (ถ้ามี)
+        report = result.get("report", {}) or {}
+        summaries = report.get("stock_summaries", []) or []
+        buy_count  = sum(1 for s in summaries if s.get("signal") == "BUY")
+        hold_count = sum(1 for s in summaries if s.get("signal") == "HOLD")
+        sell_count = sum(1 for s in summaries if s.get("signal") == "SELL")
+        signal_line = f"📈 BUY: {buy_count}  ⚖️ HOLD: {hold_count}  📉 SELL: {sell_count}" if summaries else ""
+
+        msg = (
+            f"✅ AI Stock Analysis เสร็จแล้ว\n"
+            f"⏰ {bkk} (Bangkok)\n"
+            f"📊 หุ้น: {len(stocks)} ตัว\n"
+            f"🎯 QA: {qa_status}"
+        )
+        if signal_line:
+            msg += f"\n{signal_line}"
+        _send_line_notification(msg)
+
     except Exception as e:
+        bkk = datetime.now(timezone(timedelta(hours=7))).strftime("%Y-%m-%d %H:%M")
         with _job_lock:
             _job["status"] = "error"
             _job["finished_at"] = datetime.utcnow().isoformat()
             _job["error"] = str(e)
+
+        _send_line_notification(
+            f"❌ AI Stock Analysis ล้มเหลว\n"
+            f"⏰ {bkk} (Bangkok)\n"
+            f"💥 Error: {str(e)[:200]}"
+        )
 
 
 # ===== LIFECYCLE =====
