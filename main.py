@@ -1,7 +1,9 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import os
+import threading
+import uuid
 from dotenv import load_dotenv
 from database import get_db, engine
 from models import Base, Stock, Trade, Portfolio
@@ -25,6 +27,40 @@ app.add_middleware(
 # สร้าง tables
 Base.metadata.create_all(bind=engine)
 
+# ===== JOB STATE (in-memory) =====
+_job: dict = {
+    "job_id": None,
+    "status": "idle",       # idle | running | completed | error
+    "started_at": None,
+    "finished_at": None,
+    "result": None,
+    "error": None,
+}
+_job_lock = threading.Lock()
+
+
+def _run_workflow_bg(stocks: list, include_weekend: bool):
+    """รัน workflow ใน background thread แล้วเก็บผลใน _job"""
+    try:
+        result = orchestrator.run_workflow(stocks=stocks, include_weekend=include_weekend)
+        with _job_lock:
+            _job["status"] = "completed"
+            _job["finished_at"] = datetime.utcnow().isoformat()
+            _job["result"] = {
+                "workflow_status": result.get("status"),
+                "qa_result": result.get("qa_result"),
+                "report": result.get("report"),
+                # ตัด workflow_log ออกจาก status endpoint (ใหญ่มาก) — ดูได้ที่ /workflow/logs
+            }
+    except Exception as e:
+        with _job_lock:
+            _job["status"] = "error"
+            _job["finished_at"] = datetime.utcnow().isoformat()
+            _job["error"] = str(e)
+
+
+# ===== LIFECYCLE =====
+
 @app.on_event("startup")
 async def startup():
     setup_scheduler()
@@ -46,13 +82,10 @@ async def health():
 # Stock Management
 @app.post("/stocks")
 async def add_stock(ticker: str, db: Session = Depends(get_db)):
-    
     ticker = ticker.upper()
-
     existing = db.query(Stock).filter(Stock.ticker == ticker).first()
     if existing:
         return {"status": "exists", "ticker": ticker}
-    
     new_stock = Stock(ticker=ticker)
     db.add(new_stock)
     db.commit()
@@ -83,7 +116,6 @@ async def remove_stock(ticker: str, db: Session = Depends(get_db)):
     stock = db.query(Stock).filter(Stock.ticker == ticker).first()
     if not stock:
         return {"status": "not_found", "ticker": ticker}
-    
     db.delete(stock)
     db.commit()
     return {"status": "deleted", "ticker": ticker}
@@ -104,7 +136,6 @@ async def get_portfolio(db: Session = Depends(get_db)):
     total_value = sum(h.current_value for h in holdings) if holdings else 0
     total_cost = sum(h.avg_cost * h.shares for h in holdings) if holdings else 0
     total_gain = total_value - total_cost
-    
     return {
         "total_value": total_value,
         "total_cost": total_cost,
@@ -135,54 +166,78 @@ async def get_latest_analysis(db: Session = Depends(get_db)):
         "workflow_status": "pending"
     }
 
-# ===== WORKFLOW ENDPOINT (FIXED: Removed async) =====
+# ===== WORKFLOW ENDPOINTS =====
 
 @app.post("/workflow")
-def run_workflow(include_weekend: bool = False, db: Session = Depends(get_db)):
-    """Run complete agent workflow
-    
-    Args:
-        include_weekend: True for Monday (Sat-Sun-Mon), False for Tue-Fri (24h)
-    
-    Returns:
-        Workflow execution status with logs and results
-    """
-    try:
-        # Get all stocks from database
+async def start_workflow(include_weekend: bool = False, db: Session = Depends(get_db)):
+    """เริ่ม workflow ใน background — return ทันที ไม่รอให้เสร็จ"""
+    with _job_lock:
+        if _job["status"] == "running":
+            return {
+                "status": "already_running",
+                "job_id": _job["job_id"],
+                "started_at": _job["started_at"],
+                "message": "Workflow is already running. Check GET /workflow/status"
+            }
+
         stocks_list = db.query(Stock).all()
-        
         if not stocks_list:
             return {
                 "status": "no_stocks",
                 "message": "Add stocks first using POST /stocks",
-                "timestamp": datetime.utcnow()
+                "timestamp": datetime.utcnow().isoformat()
             }
-        
-        stocks = [s.ticker for s in stocks_list]
-        
-        # Run workflow (now synchronous)
-        result = orchestrator.run_workflow(
-            stocks=stocks,
-            include_weekend=include_weekend
-        )
-        
-        return {
-            "status": "success",
-            "workflow_log": result.get("workflow_log"),
-            "qa_result": result.get("qa_result"),
-            "report": result.get("report"),
-            "timestamp": datetime.utcnow()
-        }
-        
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e),
-            "workflow_log": orchestrator.workflow_log,
-            "timestamp": datetime.utcnow()
-        }
 
-# ===== WORKFLOW LOGS ENDPOINT =====
+        stocks = [s.ticker for s in stocks_list]
+        job_id = str(uuid.uuid4())[:8]
+
+        _job["job_id"] = job_id
+        _job["status"] = "running"
+        _job["started_at"] = datetime.utcnow().isoformat()
+        _job["finished_at"] = None
+        _job["result"] = None
+        _job["error"] = None
+
+    t = threading.Thread(
+        target=_run_workflow_bg,
+        args=(stocks, include_weekend),
+        daemon=True
+    )
+    t.start()
+
+    return {
+        "status": "started",
+        "job_id": job_id,
+        "stocks_count": len(stocks),
+        "started_at": _job["started_at"],
+        "message": "Workflow running in background. Poll GET /workflow/status for result."
+    }
+
+
+@app.get("/workflow/status")
+async def get_workflow_status():
+    """ดูสถานะ workflow ปัจจุบัน"""
+    with _job_lock:
+        snapshot = dict(_job)
+
+    if snapshot["status"] == "idle":
+        return {"status": "idle", "message": "No workflow has been started yet."}
+
+    response = {
+        "status": snapshot["status"],
+        "job_id": snapshot["job_id"],
+        "started_at": snapshot["started_at"],
+        "finished_at": snapshot["finished_at"],
+    }
+
+    if snapshot["status"] == "completed":
+        response["result"] = snapshot["result"]
+
+    if snapshot["status"] == "error":
+        response["error"] = snapshot["error"]
+
+    return response
+
 
 @app.get("/workflow/logs")
 async def get_workflow_logs():
@@ -191,6 +246,7 @@ async def get_workflow_logs():
         "logs": orchestrator.workflow_log,
         "timestamp": datetime.utcnow()
     }
+
 
 if __name__ == "__main__":
     import uvicorn

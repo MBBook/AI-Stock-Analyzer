@@ -12,29 +12,80 @@ jobs:
   run-workflow:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Weekday Workflow (Tue-Fri or manual)
+      - name: Start Workflow (Tue-Fri or manual)
         if: github.event.schedule == '0 15 * * 2-5' || github.event_name == 'workflow_dispatch'
         run: |
-          curl -X POST https://ai-stock-analyzer-msli.onrender.com/workflow \
-            --max-time 1200 \
-            -o result.json \
-            -w "\nHTTP Status: %{http_code}\n"
+          echo "=== Starting workflow (regular mode) ==="
+          curl -s -X POST https://ai-stock-analyzer-msli.onrender.com/workflow \
+            --max-time 30 \
+            -o start_result.json
+          cat start_result.json
+          echo ""
+          STATUS=$(python3 -c "import json; d=json.load(open('start_result.json')); print(d.get('status','unknown'))")
+          echo "Start status: $STATUS"
+          if [ "$STATUS" != "started" ] && [ "$STATUS" != "already_running" ]; then
+            echo "Failed to start workflow: $STATUS"
+            exit 1
+          fi
 
-      - name: Trigger Monday Workflow (with weekend news)
+      - name: Start Workflow (Monday - with weekend news)
         if: github.event.schedule == '0 15 * * 1'
         run: |
-          curl -X POST "https://ai-stock-analyzer-msli.onrender.com/workflow?include_weekend=true" \
-            --max-time 1200 \
-            -o result.json \
-            -w "\nHTTP Status: %{http_code}\n"
+          echo "=== Starting workflow (Monday/weekend mode) ==="
+          curl -s -X POST "https://ai-stock-analyzer-msli.onrender.com/workflow?include_weekend=true" \
+            --max-time 30 \
+            -o start_result.json
+          cat start_result.json
+          echo ""
+          STATUS=$(python3 -c "import json; d=json.load(open('start_result.json')); print(d.get('status','unknown'))")
+          echo "Start status: $STATUS"
+          if [ "$STATUS" != "started" ] && [ "$STATUS" != "already_running" ]; then
+            echo "Failed to start workflow: $STATUS"
+            exit 1
+          fi
 
-      - name: Show Result Summary
+      - name: Poll for Result (max 30 min)
         run: |
-          echo "=== Workflow Status ==="
-          cat result.json | python3 -c "
-          import json, sys
-          d = json.load(sys.stdin)
-          print('Status:', d.get('status', 'unknown'))
-          qa = d.get('qa_result', {})
-          print('QA:', qa.get('status', 'N/A'))
-          " 2>/dev/null || echo "Could not parse result"
+          echo "=== Polling /workflow/status ==="
+          MAX_ATTEMPTS=60   # 60 × 30s = 30 นาที
+          ATTEMPT=0
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep 30
+            echo "--- Poll #$ATTEMPT ($(date -u '+%H:%M:%S UTC')) ---"
+            curl -s https://ai-stock-analyzer-msli.onrender.com/workflow/status \
+              --max-time 15 \
+              -o poll_result.json 2>/dev/null || continue
+
+            WF_STATUS=$(python3 -c "import json; d=json.load(open('poll_result.json')); print(d.get('status','unknown'))" 2>/dev/null)
+            echo "Workflow status: $WF_STATUS"
+
+            if [ "$WF_STATUS" = "completed" ]; then
+              echo "=== Workflow COMPLETED ==="
+              python3 -c "
+          import json
+          d = json.load(open('poll_result.json'))
+          result = d.get('result', {})
+          qa = result.get('qa_result', {}) or {}
+          print('QA Status:', qa.get('status', 'N/A'))
+          issues = qa.get('issues', [])
+          print(f'QA Issues: {len(issues)}')
+          for i in issues[:3]:
+              print(' -', i.get('issue','') if isinstance(i, dict) else str(i))
+          "
+              exit 0
+            fi
+
+            if [ "$WF_STATUS" = "error" ]; then
+              echo "=== Workflow ERROR ==="
+              python3 -c "import json; d=json.load(open('poll_result.json')); print('Error:', d.get('error','unknown'))"
+              exit 1
+            fi
+
+            if [ "$WF_STATUS" = "BUDGET_EXCEEDED" ]; then
+              echo "=== BUDGET EXCEEDED — skipped ==="
+              exit 0
+            fi
+          done
+          echo "=== TIMEOUT: workflow did not complete within 30 minutes ==="
+          exit 1
