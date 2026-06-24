@@ -790,7 +790,161 @@ class TestUpdateDatabase(unittest.TestCase):
 
 
 # ============================================================
-# Run
+# SECTION 8: Fix #1 — Market Cap unit display
 # ============================================================
+class TestMarketCapUnit(unittest.TestCase):
+    """mcap_text ต้องมีหน่วย M USD เสมอ"""
+
+    def setUp(self):
+        self.orc = make_orchestrator()
+
+    def _build_prompt(self, market_cap):
+        mcap_text = f"${market_cap:,.0f}M USD" if market_cap is not None else "N/A"
+        return mcap_text
+
+    def test_mcap_has_M_USD_suffix(self):
+        self.assertIn("M USD", self._build_prompt(3_000_000))
+
+    def test_mcap_none_shows_na(self):
+        self.assertIn("N/A", self._build_prompt(None))
+        self.assertNotIn("M USD", self._build_prompt(None))
+
+    def test_mcap_small_value(self):
+        text = self._build_prompt(500)
+        self.assertIn("M USD", text)
+        self.assertIn("500", text)
+
+
+class TestNewHighFlag(unittest.TestCase):
+    """price > 52week_high → at_new_high=True + high อัปเดตเป็น price"""
+
+    def _run_sanity(self, price, week52_high, week52_low):
+        at_new_high = False
+        if week52_high and price > week52_high * 1.05:
+            week52_high = None
+            week52_low  = None
+        elif week52_high and price > week52_high:
+            week52_high = price
+            at_new_high = True
+        elif week52_low and price < week52_low * 0.95:
+            week52_high = None
+            week52_low  = None
+        return week52_high, week52_low, at_new_high
+
+    def test_new_high_flag_set(self):
+        h, l, flag = self._run_sanity(price=1778, week52_high=1711, week52_low=800)
+        self.assertTrue(flag)
+        self.assertEqual(h, 1778)
+        self.assertEqual(l, 800)
+
+    def test_within_range_no_flag(self):
+        h, l, flag = self._run_sanity(price=150, week52_high=200, week52_low=100)
+        self.assertFalse(flag)
+        self.assertEqual(h, 200)
+
+    def test_big_gap_clears_range(self):
+        h, l, flag = self._run_sanity(price=2000, week52_high=1000, week52_low=500)
+        self.assertIsNone(h)
+        self.assertIsNone(l)
+        self.assertFalse(flag)
+
+    def test_price_below_low_clears_range(self):
+        h, l, flag = self._run_sanity(price=80, week52_high=200, week52_low=100)
+        self.assertIsNone(h)
+        self.assertIsNone(l)
+
+
+class TestMudRecommendationFormat(unittest.TestCase):
+    """prompt มด ต้องบังคับ PASS/FAIL เท่านั้น — ตรวจจาก source file โดยตรง"""
+
+    def _read_agents_src(self):
+        src_path = os.path.join(os.path.dirname(__file__), "agents.py")
+        with open(src_path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_pass_fail_only_constraint_in_source(self):
+        src = self._read_agents_src()
+        # หา mud system_prompt section
+        mud_start = src.find("def mud_cross_validate")
+        mud_end   = src.find("def ", mud_start + 1)
+        mud_src   = src[mud_start:mud_end]
+        self.assertIn("PASS", mud_src)
+        self.assertIn("FAIL", mud_src)
+        # ต้องมี constraint ห้ามค่าอื่น
+        self.assertTrue(
+            "no other" in mud_src.lower() or "not valid" in mud_src.lower(),
+            "agents.py mud prompt ต้องมี constraint ห้าม PASS_WITH_WARNING"
+        )
+
+    def test_pass_with_warning_not_allowed(self):
+        src = self._read_agents_src()
+        mud_start = src.find("def mud_cross_validate")
+        mud_end   = src.find("def ", mud_start + 1)
+        mud_src   = src[mud_start:mud_end]
+        self.assertNotIn('"PASS_WITH_WARNING"', mud_src)
+
+
+class TestCrossCurrencyTickers(unittest.TestCase):
+    """ASML, TSM, BRK.B ต้อง clear 52w range จาก Finnhub เสมอ"""
+
+    CROSS = {'ASML', 'TSM', 'BRK.B'}
+
+    def _apply(self, ticker, data):
+        if ticker in self.CROSS and data.get("52week_high") is not None:
+            data["52week_high"] = None
+            data["52week_low"]  = None
+        return data
+
+    def test_asml_cleared(self):
+        d = self._apply("ASML", {"52week_high": 1600, "52week_low": 800})
+        self.assertIsNone(d["52week_high"])
+
+    def test_tsm_cleared(self):
+        d = self._apply("TSM", {"52week_high": 900, "52week_low": 100})
+        self.assertIsNone(d["52week_high"])
+
+    def test_brkb_cleared(self):
+        d = self._apply("BRK.B", {"52week_high": 550, "52week_low": 350})
+        self.assertIsNone(d["52week_high"])
+
+    def test_aapl_not_affected(self):
+        d = self._apply("AAPL", {"52week_high": 200, "52week_low": 150})
+        self.assertEqual(d["52week_high"], 200)
+
+    def test_already_none_no_error(self):
+        d = self._apply("ASML", {"52week_high": None, "52week_low": None})
+        self.assertIsNone(d["52week_high"])
+
+
+class Test529Retry(unittest.TestCase):
+    """agents.py ต้องมี sleep(30) เมื่อเจอ 529 — ตรวจจาก source"""
+
+    def _read_claude_call_src(self):
+        src_path = os.path.join(os.path.dirname(__file__), "agents.py")
+        with open(src_path, encoding="utf-8") as f:
+            src = f.read()
+        start = src.find("def claude_call(")
+        end   = src.find("\n    def ", start + 1)
+        return src[start:end]
+
+    def test_529_triggers_sleep_in_source(self):
+        src = self._read_claude_call_src()
+        self.assertIn("529", src, "ต้องมีการตรวจ 529 ใน claude_call")
+        self.assertIn("time.sleep(30)", src, "ต้องมี time.sleep(30) สำหรับ 529")
+
+    def test_overloaded_keyword_checked(self):
+        src = self._read_claude_call_src()
+        self.assertIn("overloaded", src.lower(), "ต้องตรวจ overloaded keyword ด้วย")
+
+    def test_sleep_only_for_529_not_general(self):
+        """sleep(30) ต้องอยู่ใน if 529 block เท่านั้น ไม่ใช่ทุก error"""
+        src = self._read_claude_call_src()
+        # หา position ของ 529 check และ sleep(30)
+        pos_529   = src.find('"529"')
+        pos_sleep = src.find("time.sleep(30)")
+        # sleep(30) ต้องอยู่หลัง 529 check (ไม่ใช่ก่อน)
+        self.assertGreater(pos_sleep, pos_529, "time.sleep(30) ต้องอยู่ภายใน if 529 block")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
