@@ -160,6 +160,10 @@ class AgentOrchestrator:
             except Exception as e:
                 error_msg = str(e)
                 self.log_action(agent_name, f"Claude call error on Key #{self.current_key_index + 1}: {error_msg}", "ERROR")
+                # 529 Overloaded — รอก่อน rotate (ไม่ใช่ key ผิด แต่ server busy)
+                if "529" in error_msg or "overloaded" in error_msg.lower():
+                    self.log_action(agent_name, "⏳ 529 Overloaded — waiting 30s before retry...", "WARNING")
+                    time.sleep(30)
                 attempt += 1
                 if attempt < max_attempts:
                     self.log_action(agent_name, f"Trying next API key ({attempt}/{max_attempts})...", "WARNING")
@@ -241,10 +245,16 @@ class AgentOrchestrator:
 
             # ✅ Sanity check: ราคาต้องอยู่ใน 52-week range
             # ถ้าไม่ใช่ = Finnhub mix currency หรือ share class ผิด (เช่น TSM TWD, ASML Amsterdam)
+            at_new_high = False
             if week52_high and price > week52_high * 1.05:
                 self.log_action("นัตตี้", f"⚠️ {ticker}: price ${price} > 52w_high ${week52_high} — range data unreliable (currency/class mismatch?)", "WARNING")
                 week52_high = None
                 week52_low  = None
+            elif week52_high and price > week52_high:
+                # ราคาทำ New High จริง (เกิน 52w แต่ < 5% = ไม่ใช่ currency mismatch)
+                self.log_action("นัตตี้", f"📈 {ticker}: NEW HIGH — price ${price} > 52w_high ${week52_high} → updating high", "INFO")
+                week52_high = price
+                at_new_high = True
             elif week52_low and price < week52_low * 0.95:
                 self.log_action("นัตตี้", f"⚠️ {ticker}: price ${price} < 52w_low ${week52_low} — range data unreliable (currency/class mismatch?)", "WARNING")
                 week52_high = None
@@ -255,7 +265,8 @@ class AgentOrchestrator:
                 "price":       price,
                 "52week_high": week52_high,
                 "52week_low":  week52_low,
-                "pe_ratio":    self._safe_float(metric.get("peNormalizedAnnual")),        # ✅ ลบได้
+                "at_new_high": at_new_high,
+                "pe_ratio":    self._safe_float(metric.get("peNormalizedAnnual")),
                 "market_cap":  self._safe_positive_float(metric.get("marketCapitalization")),
                 "source":      "finnhub"
             }
@@ -455,6 +466,14 @@ class AgentOrchestrator:
                     # → ดึง Alpha Vantage OVERVIEW มา patch เฉพาะ field ที่ขาด (ประหยัด AV quota)
                     # Condition: 52w range ถูก sanity check ล้างออก หรือ market_cap น้อยกว่า price
                     # (Finnhub market_cap หน่วยเป็น ล้าน USD — ถ้า < price ใน USD = implied shares < 1M = ผิดแน่)
+
+                    # หุ้ที่ Finnhub ส่ง 52w range สกุลเงินผิด → บังคับใช้ AV แทนเสมอ
+                    CROSS_CURRENCY_TICKERS = {'ASML', 'TSM', 'BRK.B'}
+                    if ticker in CROSS_CURRENCY_TICKERS and data.get("52week_high") is not None:
+                        self.log_action("นัตตี้", f"[Cross-currency] {ticker}: forcing AV 52w range (Finnhub may be wrong currency)", "INFO")
+                        data["52week_high"] = None
+                        data["52week_low"]  = None
+
                     mcap = data.get("market_cap")
                     price_now = data.get("price", 0)
                     mcap_suspect = mcap is not None and price_now > 0 and mcap < price_now
@@ -471,13 +490,14 @@ class AgentOrchestrator:
                         if range_missing and ov.get("52week_high") and ov.get("52week_low"):
                             av_h = ov["52week_high"]
                             av_l = ov["52week_low"]
-                            # sanity check ก่อน patch
-                            if av_l <= price_now <= av_h * 1.05 or av_l * 0.95 <= price_now:
+                            # sanity check: AV ส่ง USD ตรง — ยอมรับถ้า price ไม่ห่างจาก range เกิน 10%
+                            price_in_range = av_l * 0.90 <= price_now <= av_h * 1.10
+                            if price_in_range:
                                 data["52week_high"] = av_h
                                 data["52week_low"]  = av_l
                                 self.log_action("นัตตี้", f"[AV patch ✅] {ticker}: 52w range → ${av_l:.2f}–${av_h:.2f}", "SUCCESS")
                             else:
-                                self.log_action("นัตตี้", f"[AV patch ⚠️] {ticker}: AV 52w range also unreliable — skipping", "WARNING")
+                                self.log_action("นัตตี้", f"[AV patch ⚠️] {ticker}: AV 52w range also unreliable (price=${price_now:.2f} vs ${av_l:.2f}–${av_h:.2f}) — skipping", "WARNING")
 
                         # Patch market_cap (AV คืน full USD → หาร 1M ให้ตรง unit Finnhub)
                         if mcap_suspect and ov.get("market_cap") and ov["market_cap"] > price_now * 1_000_000:
@@ -579,7 +599,7 @@ Return ONLY JSON format:
                     pe_text = "N/A (ไม่มีข้อมูล)"
 
                 mcap_display = data.get('market_cap')
-                mcap_text = f"${mcap_display:,.0f}" if mcap_display is not None else "N/A (ไม่มีข้อมูล)"
+                mcap_text = f"${mcap_display:,.0f}M USD" if mcap_display is not None else "N/A (ไม่มีข้อมูล)"
 
                 source = data.get('source', 'unknown')
                 source_note = {
@@ -596,10 +616,12 @@ Return ONLY JSON format:
                     if avg_sentiment is not None else "Market Sentiment Score: N/A"
                 )
 
+                new_high_note = "\n- ⚠️ ราคาทำ NEW 52-WEEK HIGH — ไม่มีแนวต้านชัดเจนด้านบน ให้ระบุใน reasoning และระวัง overextension" if data.get('at_new_high') else ""
+
                 user_message = f"""Analyze this stock:
 Symbol: {ticker}
 Current Price: ${data.get('price', 0)}
-52-week High: ${data.get('52week_high') or 'N/A'}
+52-week High: ${data.get('52week_high') or 'N/A'}{'  ← NEW HIGH (ราคาปัจจุบัน = 52w high)' if data.get('at_new_high') else ''}
 52-week Low: ${data.get('52week_low') or 'N/A'}
 P/E Ratio: {pe_text}
 Market Cap: {mcap_text}
@@ -613,7 +635,7 @@ Note:
 - ถ้า P/E หรือ Market Cap เป็น N/A ให้วิเคราะห์จาก price และ 52-week range แทน และลด confidence
 - ถ้า P/E ติดลบ = บริษัทขาดทุน ให้ factor นี้เข้าใน signal
 - ถ้า sentiment score ต่ำกว่า -0.3 ให้ระวัง อาจปรับ signal เป็น HOLD/SELL
-- ถ้า Data Source เป็น lower reliability ให้ลด confidence อย่างน้อย 0.15
+- ถ้า Data Source เป็น lower reliability ให้ลด confidence อย่างน้อย 0.15{new_high_note}
 
 Provide analysis in JSON format."""
 
@@ -672,7 +694,9 @@ Return JSON:
     "is_valid": true,
     "issues": [],
     "recommendation": "PASS"
-}"""
+}
+
+IMPORTANT: "recommendation" must be exactly "PASS" or "FAIL" — no other values allowed (e.g. PASS_WITH_WARNING is NOT valid)."""
             validated_results = {}
 
             for ticker, analysis in analysis_results.items():
