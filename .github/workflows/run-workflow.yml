@@ -12,12 +12,22 @@ jobs:
   run-workflow:
     runs-on: ubuntu-latest
     steps:
+      - name: Wake up Render
+        run: |
+          echo "=== Waking up Render (cold start may take 60s) ==="
+          for i in 1 2 3; do
+            STATUS=$(curl -s --max-time 60 https://ai-stock-analyzer-msli.onrender.com/health | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+            echo "Health check #$i: $STATUS"
+            if [ "$STATUS" = "ok" ]; then break; fi
+            sleep 10
+          done
+
       - name: Start Workflow (Tue-Fri or manual)
         if: github.event.schedule == '0 15 * * 2-5' || github.event_name == 'workflow_dispatch'
         run: |
           echo "=== Starting workflow (regular mode) ==="
           curl -s -X POST https://ai-stock-analyzer-msli.onrender.com/workflow \
-            --max-time 30 \
+            --max-time 90 \
             -o start_result.json
           cat start_result.json
           echo ""
@@ -33,7 +43,7 @@ jobs:
         run: |
           echo "=== Starting workflow (Monday/weekend mode) ==="
           curl -s -X POST "https://ai-stock-analyzer-msli.onrender.com/workflow?include_weekend=true" \
-            --max-time 30 \
+            --max-time 90 \
             -o start_result.json
           cat start_result.json
           echo ""
