@@ -169,8 +169,25 @@ export default function DashboardV4() {
             borderRadius: '6px',
             display: 'flex',
             justifyContent: 'space-between',
-            alignItems: 'center'
+            alignItems: 'center',
+            position: 'relative'
           }}>
+            {stock.at_new_high && (
+              <span style={{
+                position: 'absolute', top: '10px', right: '10px',
+                background: '#16a34a', color: '#fff',
+                fontSize: '11px', fontWeight: 'bold',
+                padding: '3px 9px', borderRadius: '6px', letterSpacing: '0.5px'
+              }}>ATH</span>
+            )}
+            {stock.at_new_low && (
+              <span style={{
+                position: 'absolute', top: '10px', right: '10px',
+                background: '#dc2626', color: '#fff',
+                fontSize: '11px', fontWeight: 'bold',
+                padding: '3px 9px', borderRadius: '6px', letterSpacing: '0.5px'
+              }}>ATL</span>
+            )}
             <div style={{ flex: 1 }}>
               <h3 style={{ color: '#fff', fontWeight: 'bold' }}>{stock.ticker}</h3>
               <p style={{ color: colors.neutral, fontSize: '12px' }}>
