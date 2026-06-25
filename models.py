@@ -16,6 +16,8 @@ class Stock(Base):
     s1 = Column(Float, default=0.0)
     s2 = Column(Float, default=0.0)
     s3 = Column(Float, default=0.0)
+    at_new_high = Column(Boolean, default=False)
+    at_new_low  = Column(Boolean, default=False)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 class Trade(Base):

@@ -246,19 +246,27 @@ class AgentOrchestrator:
             # ✅ Sanity check: ราคาต้องอยู่ใน 52-week range
             # ถ้าไม่ใช่ = Finnhub mix currency หรือ share class ผิด (เช่น TSM TWD, ASML Amsterdam)
             at_new_high = False
+            at_new_low  = False
             if week52_high and price > week52_high * 1.05:
+                # currency/class mismatch — data ไม่น่าเชื่อถือ
                 self.log_action("นัตตี้", f"⚠️ {ticker}: price ${price} > 52w_high ${week52_high} — range data unreliable (currency/class mismatch?)", "WARNING")
                 week52_high = None
                 week52_low  = None
             elif week52_high and price > week52_high:
-                # ราคาทำ New High จริง (เกิน 52w แต่ < 5% = ไม่ใช่ currency mismatch)
-                self.log_action("นัตตี้", f"📈 {ticker}: NEW HIGH — price ${price} > 52w_high ${week52_high} → updating high", "INFO")
+                # ATH: ราคาทำ New High จริง (เกิน 52w แต่ < 5% = ไม่ใช่ currency mismatch)
+                self.log_action("นัตตี้", f"📈 {ticker}: ATH — price ${price} > 52w_high ${week52_high} → updating high", "INFO")
                 week52_high = price
                 at_new_high = True
             elif week52_low and price < week52_low * 0.95:
+                # currency/class mismatch — data ไม่น่าเชื่อถือ
                 self.log_action("นัตตี้", f"⚠️ {ticker}: price ${price} < 52w_low ${week52_low} — range data unreliable (currency/class mismatch?)", "WARNING")
                 week52_high = None
                 week52_low  = None
+            elif week52_low and price < week52_low:
+                # ATL: ราคาทำ New Low จริง (ต่ำกว่า 52w แต่ไม่เกิน 5% = ไม่ใช่ currency mismatch)
+                self.log_action("นัตตี้", f"📉 {ticker}: ATL — price ${price} < 52w_low ${week52_low} → updating low", "INFO")
+                week52_low = price
+                at_new_low = True
 
             return {
                 "symbol":      ticker,
@@ -266,6 +274,7 @@ class AgentOrchestrator:
                 "52week_high": week52_high,
                 "52week_low":  week52_low,
                 "at_new_high": at_new_high,
+                "at_new_low":  at_new_low,
                 "pe_ratio":    self._safe_float(metric.get("peNormalizedAnnual")),
                 "market_cap":  self._safe_positive_float(metric.get("marketCapitalization")),
                 "source":      "finnhub"
@@ -530,6 +539,29 @@ class AgentOrchestrator:
                 self.log_action("นัตตี้", f"❌ All tiers failed for {ticker} — skipping (ไม่วิเคราะห์ด้วยข้อมูลไม่ครบ)", "ERROR")
                 continue
 
+            # ===== ATH/ATL sanity check สำหรับ yfinance / Alpha Vantage (Finnhub จัดการใน _fetch_finnhub_full แล้ว) =====
+            if "at_new_high" not in data:
+                p   = data.get("price", 0)
+                w52h = data.get("52week_high")
+                w52l = data.get("52week_low")
+                ath, atl = False, False
+                if w52h and w52l:
+                    if p > w52h * 1.05 or p < w52l * 0.95:
+                        data["52week_high"] = None
+                        data["52week_low"]  = None
+                    elif p > w52h:
+                        data["52week_high"] = p
+                        ath = True
+                        self.log_action("นัตตี้", f"📈 {ticker}: ATH — price ${p} > 52w_high ${w52h} → updating high", "INFO")
+                    elif p < w52l:
+                        data["52week_low"] = p
+                        atl = True
+                        self.log_action("นัตตี้", f"📉 {ticker}: ATL — price ${p} < 52w_low ${w52l} → updating low", "INFO")
+                data["at_new_high"] = ath
+                data["at_new_low"]  = atl
+            elif "at_new_low" not in data:
+                data["at_new_low"] = False
+
             # log เตือนถ้าขาด P/E (หนุ่มจะได้รับแจ้งใน prompt)
             if data.get("pe_ratio") is None:
                 self.log_action("นัตตี้", f"⚠️  {ticker}: P/E unavailable (loss-making co. หรือ API ไม่มีข้อมูล)", "WARNING")
@@ -616,13 +648,14 @@ Return ONLY JSON format:
                     if avg_sentiment is not None else "Market Sentiment Score: N/A"
                 )
 
-                new_high_note = "\n- ⚠️ ราคาทำ NEW 52-WEEK HIGH — ไม่มีแนวต้านชัดเจนด้านบน ให้ระบุใน reasoning และระวัง overextension" if data.get('at_new_high') else ""
+                new_high_note = "\n- ⚠️ ATH: ราคาทำ NEW 52-WEEK HIGH — ไม่มีแนวต้านชัดเจนด้านบน ให้ระบุใน reasoning และระวัง overextension" if data.get('at_new_high') else ""
+                new_low_note  = "\n- ⚠️ ATL: ราคาทำ NEW 52-WEEK LOW — momentum เป็นลบ ให้ระบุใน reasoning ว่าเป็น capitulation หรือ breakdown" if data.get('at_new_low') else ""
 
                 user_message = f"""Analyze this stock:
 Symbol: {ticker}
 Current Price: ${data.get('price', 0)}
-52-week High: ${data.get('52week_high') or 'N/A'}{'  ← NEW HIGH (ราคาปัจจุบัน = 52w high)' if data.get('at_new_high') else ''}
-52-week Low: ${data.get('52week_low') or 'N/A'}
+52-week High: ${data.get('52week_high') or 'N/A'}{'  ← ATH (ราคาปัจจุบัน = 52w high)' if data.get('at_new_high') else ''}
+52-week Low: ${data.get('52week_low') or 'N/A'}{'  ← ATL (ราคาปัจจุบัน = 52w low)' if data.get('at_new_low') else ''}
 P/E Ratio: {pe_text}
 Market Cap: {mcap_text}
 Data Source: {source_note}
@@ -635,7 +668,7 @@ Note:
 - ถ้า P/E หรือ Market Cap เป็น N/A ให้วิเคราะห์จาก price และ 52-week range แทน และลด confidence
 - ถ้า P/E ติดลบ = บริษัทขาดทุน ให้ factor นี้เข้าใน signal
 - ถ้า sentiment score ต่ำกว่า -0.3 ให้ระวัง อาจปรับ signal เป็น HOLD/SELL
-- ถ้า Data Source เป็น lower reliability ให้ลด confidence อย่างน้อย 0.15{new_high_note}
+- ถ้า Data Source เป็น lower reliability ให้ลด confidence อย่างน้อย 0.15{new_high_note}{new_low_note}
 
 Provide analysis in JSON format."""
 
@@ -652,6 +685,10 @@ Provide analysis in JSON format."""
                             self.log_action("หนุ่ม", f"{ticker}: invalid signal '{result.get('signal')}' → defaulting HOLD", "WARNING")
                             result['signal'] = 'HOLD'
 
+                        # Merge นัตตี้ flags เข้า result เพื่อ flow ต่อไปถึง DB
+                        result['price']       = data.get('price', 0)
+                        result['at_new_high'] = data.get('at_new_high', False)
+                        result['at_new_low']  = data.get('at_new_low', False)
                         analysis_results[ticker] = result
 
                     except json.JSONDecodeError:
@@ -866,7 +903,8 @@ CRITICAL REGULATORY RULES:
   "approval_reason": "..."
 }
 2. The 'approval_reason' and all items inside 'issues' MUST be written ONLY as short, clean plain descriptive Thai text strings.
-3. STRICT WARNING: NEVER copy, paste, embed, replicate, or leak raw HTML code strings, layout blocks, table chunks, script templates, or tags (such as <td>, <tr>, <div>, <style>) into any JSON string fields. Keep all output exclusively as plain descriptive text characters."""
+3. STRICT WARNING: NEVER copy, paste, embed, replicate, or leak raw HTML code strings, layout blocks, table chunks, script templates, or tags (such as <td>, <tr>, <div>, <style>) into any JSON string fields. Keep all output exclusively as plain descriptive text characters.
+4. ATH/ATL RULE: ถ้าหุ้นมี at_new_high=true หรือ at_new_low=true แสดงว่าระบบตรวจสอบแล้วว่าเป็น market condition จริง ไม่ใช่ data error — ห้าม REJECT เพราะราคาอยู่นอก 52-week range ในกรณีนี้"""
 
             raw_report = report.get('summary', '')
             clean_report_text = re.sub(r'<style[^>]*>.*?</style>', '', raw_report, flags=re.DOTALL)
@@ -880,13 +918,15 @@ CRITICAL REGULATORY RULES:
 
             qa_summary = {
                 ticker: {
-                    "signal":     data.get("signal"),
-                    "confidence": data.get("confidence"),
-                    "s1":         data.get("s1"),
-                    "s2":         data.get("s2"),
-                    "s3":         data.get("s3"),
-                    "reasoning":  data.get("reasoning"),
-                    "validation": data.get("validation", {}).get("recommendation")
+                    "signal":       data.get("signal"),
+                    "confidence":   data.get("confidence"),
+                    "s1":           data.get("s1"),
+                    "s2":           data.get("s2"),
+                    "s3":           data.get("s3"),
+                    "reasoning":    data.get("reasoning"),
+                    "validation":   data.get("validation", {}).get("recommendation"),
+                    "at_new_high":  data.get("at_new_high", False),
+                    "at_new_low":   data.get("at_new_low", False),
                 }
                 for ticker, data in analysis_results.items()
             }
@@ -1408,6 +1448,8 @@ Fix the top issues found in the logs. Return the complete updated agents.py."""
                     stock.s1            = analysis.get('s1', stock.current_price)
                     stock.s2            = analysis.get('s2', stock.current_price)
                     stock.s3            = analysis.get('s3', stock.current_price)
+                    stock.at_new_high   = analysis.get('at_new_high', False)
+                    stock.at_new_low    = analysis.get('at_new_low', False)
                     stock.updated_at    = datetime.now()
                     updated.append(ticker)
 

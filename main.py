@@ -196,6 +196,8 @@ async def get_stocks(db: Session = Depends(get_db)):
                 "confidence": s.confidence,
                 "price": s.current_price,
                 "fair_price": s.fair_price,
+                "at_new_high": s.at_new_high or False,
+                "at_new_low":  s.at_new_low or False,
                 "updated_at": s.updated_at
             }
             for s in stocks
