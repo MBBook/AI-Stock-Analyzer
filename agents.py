@@ -837,6 +837,7 @@ Create professional Thai report."""
                 "summary":      response,
                 "total_stocks": len(analysis_results),
                 "buy_signals":  sum(1 for a in analysis_results.values() if a.get('signal') == 'BUY'),
+                "hold_signals": sum(1 for a in analysis_results.values() if a.get('signal') == 'HOLD'),
                 "sell_signals": sum(1 for a in analysis_results.values() if a.get('signal') == 'SELL'),
             }
             self.log_action("เจน", "Report generated", "SUCCESS")

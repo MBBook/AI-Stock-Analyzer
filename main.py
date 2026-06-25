@@ -66,8 +66,28 @@ _job: dict = {
 _job_lock = threading.Lock()
 
 
+def _keepalive_ping():
+    """Ping /health ตัวเองทุก 10 นาที ป้องกัน Render kill dyno กลางคัน"""
+    import time
+    host = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:8000").rstrip("/")
+    while True:
+        time.sleep(600)  # 10 นาที
+        with _job_lock:
+            if _job["status"] != "running":
+                break
+        try:
+            requests.get(f"{host}/health", timeout=10)
+            print("[KEEPALIVE] Ping sent — dyno ยังตื่นอยู่")
+        except Exception as e:
+            print(f"[KEEPALIVE] Ping failed: {e}")
+
+
 def _run_workflow_bg(stocks: list, include_weekend: bool):
     """รัน workflow ใน background thread แล้วเก็บผลใน _job"""
+    # ===== KEEPALIVE: ป้องกัน Render sleep กลางคัน =====
+    keepalive = threading.Thread(target=_keepalive_ping, daemon=True)
+    keepalive.start()
+
     try:
         result = orchestrator.run_workflow(stocks=stocks, include_weekend=include_weekend)
         wf_status = result.get("status", "UNKNOWN")
@@ -98,12 +118,11 @@ def _run_workflow_bg(stocks: list, include_weekend: bool):
             )
         else:
             # COMPLETE หรือ REJECTED
-            report    = result.get("report", {}) or {}
-            summaries = report.get("stock_summaries", []) or []
-            buy_count  = sum(1 for s in summaries if s.get("signal") == "BUY")
-            hold_count = sum(1 for s in summaries if s.get("signal") == "HOLD")
-            sell_count = sum(1 for s in summaries if s.get("signal") == "SELL")
-            signal_line = f"📈 BUY: {buy_count}  ⚖️ HOLD: {hold_count}  📉 SELL: {sell_count}" if summaries else ""
+            report     = result.get("report", {}) or {}
+            buy_count  = report.get("buy_signals", 0)
+            hold_count = report.get("hold_signals", 0)
+            sell_count = report.get("sell_signals", 0)
+            signal_line = f"📈 BUY: {buy_count}  ⚖️ HOLD: {hold_count}  📉 SELL: {sell_count}"
 
             icon = "✅" if wf_status == "COMPLETE" else "❌"
             msg = (
