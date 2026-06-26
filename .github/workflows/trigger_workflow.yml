@@ -1,0 +1,61 @@
+name: Trigger Stock Workflow
+
+on:
+  schedule:
+    - cron: '0 15 * * 1-5'  # 22:00 Bangkok (UTC+7) = 15:00 UTC, Mon–Fri
+  workflow_dispatch:          # manual trigger จาก GitHub UI
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Wake up Render server
+        run: |
+          echo "⏰ Waking up Render..."
+          for i in {1..15}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "${{ secrets.RENDER_URL }}/health")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Server is awake!"
+              break
+            fi
+            if [ "$i" -eq 15 ]; then
+              echo "❌ Server failed to wake after 15 attempts (~2.5 min)"
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Trigger workflow
+        run: |
+          DAY=$(date +%u)   # 1=Mon, 2=Tue, ... 5=Fri
+          if [ "$DAY" = "1" ]; then
+            ENDPOINT="${{ secrets.RENDER_URL }}/workflow?include_weekend=true"
+            echo "📅 Monday mode — include_weekend=true"
+          else
+            ENDPOINT="${{ secrets.RENDER_URL }}/workflow"
+            echo "📅 Regular mode (day $DAY)"
+          fi
+
+          echo "POST $ENDPOINT"
+          RESPONSE=$(curl -s -X POST "$ENDPOINT" --max-time 30)
+          echo "Response: $RESPONSE"
+
+          STATUS=$(echo "$RESPONSE" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('status', 'unknown'))
+except Exception:
+    print('parse_error')
+")
+          echo "Workflow status: $STATUS"
+
+          if [ "$STATUS" = "started" ] || [ "$STATUS" = "already_running" ]; then
+            echo "✅ Workflow triggered successfully"
+          else
+            echo "❌ Unexpected status: $STATUS"
+            exit 1
+          fi
