@@ -1,4 +1,4 @@
-name: Trigger Stock Workflow
+name: AI Stock Workflow
 
 on:
   schedule:
