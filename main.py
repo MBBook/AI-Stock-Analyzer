@@ -168,6 +168,22 @@ async def startup():
             print("[MIGRATION] at_new_high / at_new_low columns ready")
         except Exception as e:
             print(f"[MIGRATION] {e}")
+        try:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS nik_suggestions (
+                    id SERIAL PRIMARY KEY,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    summary TEXT NOT NULL,
+                    diff_text TEXT NOT NULL,
+                    status VARCHAR(20) DEFAULT 'pending',
+                    error_message TEXT,
+                    applied_at TIMESTAMP
+                )
+            """))
+            conn.commit()
+            print("[MIGRATION] nik_suggestions table ready")
+        except Exception as e:
+            print(f"[MIGRATION] {e}")
     setup_scheduler()
 
 @app.on_event("shutdown")
@@ -352,6 +368,71 @@ async def get_workflow_logs():
     return {
         "logs": orchestrator.workflow_log,
         "timestamp": datetime.utcnow()
+    }
+
+
+@app.post("/workflow/resume")
+async def resume_workflow(db: Session = Depends(get_db)):
+    """รันเฉพาะ ticker ที่ยังไม่ได้วิเคราะห์วันนี้ — ใช้โดย cron-job.org ทุก 15 นาที 22:00-23:59"""
+    with _job_lock:
+        if _job["status"] == "running":
+            return {"status": "already_running", "message": "Workflow is already running"}
+
+    today = datetime.now().date()
+    all_stocks = db.query(Stock).all()
+    pending = [s.ticker for s in all_stocks
+               if not s.updated_at or s.updated_at.date() < today]
+
+    if not pending:
+        return {"status": "already_complete", "message": "All stocks analyzed today"}
+
+    with _job_lock:
+        job_id = str(uuid.uuid4())[:8]
+        _job["job_id"]      = job_id
+        _job["status"]      = "running"
+        _job["started_at"]  = datetime.utcnow().isoformat()
+        _job["finished_at"] = None
+        _job["result"]      = None
+        _job["error"]       = None
+
+    include_weekend = datetime.now().weekday() == 0
+    t = threading.Thread(
+        target=_run_workflow_bg,
+        args=(pending, include_weekend),
+        daemon=True
+    )
+    t.start()
+
+    return {
+        "status": "resumed",
+        "job_id": job_id,
+        "pending_stocks": len(pending),
+        "tickers": pending,
+        "message": f"Resuming workflow for {len(pending)} remaining stocks"
+    }
+
+
+@app.get("/nik/suggestions")
+async def get_nik_suggestions(db: Session = Depends(get_db)):
+    """ดู suggestion ของนิก 10 รายการล่าสุด"""
+    from models import NikSuggestion
+    from sqlalchemy import desc
+    items = db.query(NikSuggestion).order_by(desc(NikSuggestion.created_at)).limit(10).all()
+    return {
+        "count": len(items),
+        "pending_count": sum(1 for i in items if i.status == "pending"),
+        "suggestions": [
+            {
+                "id":            i.id,
+                "created_at":    i.created_at,
+                "summary":       i.summary,
+                "diff_text":     i.diff_text,
+                "status":        i.status,
+                "error_message": i.error_message,
+                "applied_at":    i.applied_at,
+            }
+            for i in items
+        ]
     }
 
 

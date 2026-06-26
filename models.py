@@ -56,3 +56,15 @@ class WorkflowLog(Base):
     summary         = Column(Text,    nullable=True)  # เอ สรุปด้วย Haiku
     include_weekend = Column(Boolean, default=False)  # True = Monday mode
     cost_usd        = Column(Float,   default=0.0)    # ค่าใช้จ่าย API ของ run นี้ (USD)
+
+class NikSuggestion(Base):
+    """บันทึก suggestion ของนิก — รอ MBBook อนุมัติ แล้วให้ Cow apply"""
+    __tablename__ = "nik_suggestions"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+    summary       = Column(Text,    nullable=False)  # สรุปสั้นว่านิกอยากแก้อะไร
+    diff_text     = Column(Text,    nullable=False)  # diff จริงที่นิกสร้าง
+    status        = Column(String,  default="pending")  # pending / complete / failed
+    error_message = Column(Text,    nullable=True)   # เหตุผลที่ fail (ถ้ามี)
+    applied_at    = Column(DateTime, nullable=True)  # เวลาที่ apply สำเร็จ

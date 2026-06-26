@@ -13,6 +13,7 @@ export default function DashboardV4() {
   const [loading, setLoading] = useState(false);
   const [portfolioData, setPortfolioData] = useState(null);
   const [historyData, setHistoryData] = useState(null);
+  const [nikSuggestions, setNikSuggestions] = useState(null);
 
   const colors = {
     surface: '#121212',
@@ -41,6 +42,7 @@ export default function DashboardV4() {
     fetchStocks();
     fetchPortfolio();
     fetchHistory();
+    fetchNikSuggestions();
   }, []);
 
   const fetchStocks = async () => {
@@ -70,6 +72,16 @@ export default function DashboardV4() {
       setHistoryData(data);
     } catch (error) {
       console.error('Error fetching history:', error);
+    }
+  };
+
+  const fetchNikSuggestions = async () => {
+    try {
+      const response = await fetch(`${API_URL}/nik/suggestions`);
+      const data = await response.json();
+      setNikSuggestions(data);
+    } catch (error) {
+      console.error('Error fetching nik suggestions:', error);
     }
   };
 
@@ -410,6 +422,65 @@ export default function DashboardV4() {
             )}
           </div>
         )}
+
+        {/* นิก Suggestions */}
+        <div style={{ padding: '20px', backgroundColor: colors.surface2, borderRadius: '8px', border: `1px solid ${colors.secondary}` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+            <h3 style={{ color: colors.primary, margin: 0 }}>🤖 นิก — Code Suggestions</h3>
+            {nikSuggestions?.pending_count > 0 && (
+              <span style={{ backgroundColor: '#ffb74d22', color: colors.warning, fontSize: '12px', padding: '3px 10px', borderRadius: '12px', border: `1px solid ${colors.warning}` }}>
+                {nikSuggestions.pending_count} pending
+              </span>
+            )}
+          </div>
+
+          {!nikSuggestions && (
+            <p style={{ color: colors.neutral, fontSize: '13px' }}>Loading...</p>
+          )}
+
+          {nikSuggestions?.suggestions?.length === 0 && (
+            <p style={{ color: colors.neutral, fontSize: '13px' }}>ยังไม่มี suggestion จากนิก</p>
+          )}
+
+          {nikSuggestions?.suggestions?.map(s => {
+            const statusColor = s.status === 'complete' ? colors.success : s.status === 'failed' ? colors.error : colors.warning;
+            const statusLabel = s.status === 'complete' ? '✅ Complete' : s.status === 'failed' ? '❌ Failed' : '⏳ Pending';
+            const dateStr = new Date(s.created_at).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'short', timeStyle: 'short' });
+            return (
+              <div key={s.id} style={{ padding: '12px', backgroundColor: colors.surface3, borderRadius: '6px', marginBottom: '10px', border: `1px solid ${statusColor}33` }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '6px' }}>
+                  <p style={{ color: '#fff', fontSize: '13px', fontWeight: 'bold', margin: 0, flex: 1, paddingRight: '12px' }}>{s.summary}</p>
+                  <span style={{ color: statusColor, fontSize: '12px', whiteSpace: 'nowrap' }}>{statusLabel}</span>
+                </div>
+                <p style={{ color: colors.neutral, fontSize: '11px', margin: '0 0 8px 0' }}>{dateStr}</p>
+                {s.status === 'failed' && s.error_message && (
+                  <p style={{ color: colors.error, fontSize: '11px', margin: '0 0 8px 0' }}>⚠️ {s.error_message}</p>
+                )}
+                {s.status === 'complete' && s.applied_at && (
+                  <p style={{ color: colors.neutral, fontSize: '11px', margin: '0 0 8px 0' }}>
+                    applied {new Date(s.applied_at).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'short', timeStyle: 'short' })}
+                  </p>
+                )}
+                {s.status === 'pending' && (
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      onClick={() => { navigator.clipboard.writeText(`ดู diff ของ นิก suggestion id=${s.id}: ${s.summary}`); }}
+                      style={{ fontSize: '11px', padding: '4px 10px', backgroundColor: 'transparent', border: `1px solid ${colors.neutral}`, color: colors.neutral, borderRadius: '4px', cursor: 'pointer' }}
+                    >
+                      📋 Copy สำหรับขอ Cow ดู diff
+                    </button>
+                    <button
+                      onClick={() => { navigator.clipboard.writeText(`apply นิก suggestion id=${s.id}: ${s.summary}`); }}
+                      style={{ fontSize: '11px', padding: '4px 10px', backgroundColor: 'transparent', border: `1px solid ${colors.primary}`, color: colors.primary, borderRadius: '4px', cursor: 'pointer' }}
+                    >
+                      ✅ Copy สำหรับขอ Cow apply
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
     );
   };

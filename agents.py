@@ -1095,80 +1095,82 @@ If you cannot parse, return {"error": "reason"}."""
 
     # ==================== AGENT 10: นิก (Code Optimizer — Every Friday) ====================
     def nik_optimize_code(self):
-        """นิก: อ่าน WorkflowLog 5 วัน → วิเคราะห์ → แก้ agents.py → push GitHub → Render auto-deploy"""
-        self.log_action("นิก", "Starting weekly code optimization...", "INFO")
+        """นิก: อ่าน WorkflowLog 5 วัน → วิเคราะห์ → สร้าง diff → บันทึกลง DB รอ MBBook อนุมัติ
+        ไม่ push GitHub โดยตรง — Cow เป็นคน apply หลัง MBBook กดอนุมัติบน webapp"""
+        self.log_action("นิก", "Starting weekly code optimization (diff mode)...", "INFO")
         try:
-            github_token = os.getenv("GITHUB_TOKEN")
-            github_repo  = os.getenv("GITHUB_REPO", "MBBook/ai-stock-analyzer")
-
-            if not github_token:
-                self.log_action("นิก", "GITHUB_TOKEN not set — cannot push. Set it in Render ENV.", "WARNING")
-                return None
-
-            # ===== Step 1: ดึง WorkflowLog ย้อนหลัง 5 วัน จาก DB =====
             from datetime import timedelta
+
+            # ===== Step 1: ดึง WorkflowLog ย้อนหลัง 5 วัน =====
             db = None
             db_logs = []
             try:
                 db = SessionLocal()
-                try:
-                    from models import WorkflowLog
-                    since = datetime.now() - timedelta(days=5)
-                    db_logs = db.query(WorkflowLog).filter(
-                        WorkflowLog.timestamp >= since
-                    ).order_by(WorkflowLog.timestamp.desc()).all()
-                    self.log_action("นิก", f"Loaded {len(db_logs)} runs from DB", "INFO")
-                except ImportError:
-                    self.log_action("นิก", "WorkflowLog not in models.py — using session logs", "WARNING")
+                from models import WorkflowLog
+                since = datetime.now() - timedelta(days=5)
+                db_logs = db.query(WorkflowLog).filter(
+                    WorkflowLog.timestamp >= since
+                ).order_by(WorkflowLog.timestamp.desc()).all()
+                self.log_action("นิก", f"Loaded {len(db_logs)} runs from DB", "INFO")
             except Exception as e:
                 self.log_action("นิก", f"DB read failed: {str(e)}", "WARNING")
             finally:
                 if db:
                     db.close()
 
-            # สร้าง history context
-            if db_logs:
-                history = json.dumps([{
-                    "timestamp":    l.timestamp.isoformat(),
-                    "status":       l.status,
-                    "stocks":       l.stocks_analyzed,
-                    "buy":          l.buy_signals,
-                    "sell":         l.sell_signals,
-                    "needs_review": l.needs_review,
-                    "summary":      l.summary,
-                } for l in db_logs], ensure_ascii=False)
-            else:
-                error_logs = [l for l in self.workflow_log if l.get('status') in ('ERROR', 'WARNING')]
-                history = json.dumps(error_logs[-50:], ensure_ascii=False)
+            history = json.dumps([{
+                "timestamp":    l.timestamp.isoformat(),
+                "status":       l.status,
+                "stocks":       l.stocks_analyzed,
+                "buy":          l.buy_signals,
+                "sell":         l.sell_signals,
+                "needs_review": l.needs_review,
+                "summary":      l.summary,
+            } for l in db_logs], ensure_ascii=False) if db_logs else json.dumps(
+                [l for l in self.workflow_log if l.get('status') in ('ERROR', 'WARNING')][-50:],
+                ensure_ascii=False
+            )
 
             session_errors = [l for l in self.workflow_log if l.get('status') in ('ERROR', 'WARNING')]
             session_text = json.dumps(session_errors[-30:], ensure_ascii=False) if session_errors else "ไม่มี error"
 
-            # ===== Step 2: ดึง agents.py ปัจจุบันจาก GitHub =====
-            current_code, sha = self._nik_get_current_agents_py(github_token, github_repo)
+            # ===== Step 2: Pre-flight — ตรวจขนาด agents.py ก่อนส่ง Claude =====
+            github_token = os.getenv("GITHUB_TOKEN")
+            github_repo  = os.getenv("GITHUB_REPO", "MBBook/ai-stock-analyzer")
+            current_code = None
+            if github_token:
+                current_code, _ = self._nik_get_current_agents_py(github_token, github_repo)
             if not current_code:
-                self.log_action("นิก", "Cannot fetch agents.py from GitHub — aborting", "ERROR")
+                self.log_action("นิก", "Cannot read agents.py — aborting", "ERROR")
+                return None
+            if len(current_code) > 80000:
+                self.log_action("นิก", f"agents.py ใหญ่เกินไป ({len(current_code)} chars) — ข้าม optimization รอบนี้", "WARNING")
                 return None
 
-            # ===== Step 3: นิก วิเคราะห์ + แก้ code =====
-            system_prompt = """You are นิก (Nik), an expert Python developer maintaining an AI stock analyzer system.
+            # ===== Step 3: ให้ Claude วิเคราะห์ + สร้าง diff =====
+            system_prompt = """You are นิก (Nik), an expert Python developer.
 
-You will receive:
-1. Workflow history (past 5 days) — showing what's failing
-2. Current session error logs
-3. The current agents.py code
+You will receive workflow error logs and the current agents.py.
 
 Your job:
-1. Identify the TOP 3 most impactful issues from the logs
-2. Make MINIMAL, SAFE fixes to agents.py (do NOT rewrite everything)
-3. Focus on: error handling, retry logic, prompt improvements, timeout issues
-4. Add comments explaining each change
+1. Identify TOP 3 issues from the logs
+2. For each fix, output a DIFF block in this exact format:
 
-CRITICAL RULES:
-- Return the COMPLETE updated agents.py — every line, no truncation
-- Keep all existing functionality intact
-- Only fix what the logs show is actually broken
-- Do NOT change model names, API keys, or database schema"""
+<<<DIFF>>>
+SUMMARY: one-line description of this change
+FILE: agents.py
+FIND:
+<exact lines to replace — copy verbatim, include enough context to be unique>
+REPLACE:
+<new lines>
+<<<END_DIFF>>>
+
+RULES:
+- Output ONLY diff blocks, no explanations outside them
+- Each FIND block must be unique in the file (include enough context lines)
+- Make MINIMAL changes — do not rewrite functions entirely
+- Do NOT change model names, API keys, or database schema
+- Max 3 diff blocks total"""
 
             user_message = f"""=== Workflow History (5 days) ===
 {history}
@@ -1176,65 +1178,54 @@ CRITICAL RULES:
 === Current Session Errors ===
 {session_text}
 
-=== Current agents.py ===
-{current_code}
+=== Current agents.py (first 8000 chars for context) ===
+{current_code[:8000]}
 
-Fix the top issues found in the logs. Return the complete updated agents.py."""
+Identify top issues and output diff blocks."""
 
-            self.log_action("นิก", "Analyzing logs and improving agents.py with Sonnet...", "INFO")
-            improved_code = self.claude_call(
+            self.log_action("นิก", "Analyzing logs and generating diff...", "INFO")
+            diff_output = self.claude_call(
                 system_prompt, user_message, "นิก",
                 model=self.MODEL_SONNET,
-                max_tokens=16000  # agents.py ~25k chars ≈ 8k tokens output — Sonnet handles this
+                max_tokens=4096
             )
 
-            # ตรวจว่าได้ Python code จริง (ไม่ใช่ response เปล่า)
-            if "class AgentOrchestrator" not in improved_code:
-                self.log_action("นิก", "Response doesn't look like valid agents.py — aborting push", "ERROR")
-                # Push report แทน
-                self._nik_push_recommendations(improved_code, github_token, github_repo)
-                return improved_code
+            # ===== Step 4: ตรวจ diff มีอยู่จริง =====
+            if "<<<DIFF>>>" not in diff_output:
+                self.log_action("นิก", "No valid diff blocks found in response — aborting", "WARNING")
+                return None
 
-            # ===== Step 4: Push agents.py ไป GitHub → Render auto-deploy =====
-            self.log_action("นิก", "Pushing improved agents.py to GitHub...", "INFO")
-            success = self._nik_push_agents_py(improved_code, sha, github_token, github_repo)
+            # สรุป summary จาก diff แรก
+            summary_line = "ไม่ระบุ"
+            for line in diff_output.split("\n"):
+                if line.startswith("SUMMARY:"):
+                    summary_line = line.replace("SUMMARY:", "").strip()
+                    break
 
-            if success:
-                self.log_action("นิก", "✅ agents.py updated on GitHub → Render will auto-deploy in ~3 min", "SUCCESS")
-            else:
-                self.log_action("นิก", "Push failed — saving as report instead", "WARNING")
-                self._nik_push_recommendations(improved_code, github_token, github_repo)
+            # ===== Step 5: บันทึกลง NikSuggestion DB รอ MBBook อนุมัติ =====
+            db2 = None
+            try:
+                db2 = SessionLocal()
+                from models import NikSuggestion
+                suggestion = NikSuggestion(
+                    summary=summary_line,
+                    diff_text=diff_output,
+                    status="pending"
+                )
+                db2.add(suggestion)
+                db2.commit()
+                self.log_action("นิก", f"✅ Suggestion saved to DB (pending) — รอ MBBook อนุมัติบน webapp", "SUCCESS")
+            except Exception as e:
+                self.log_action("นิก", f"Cannot save suggestion to DB: {str(e)}", "ERROR")
+            finally:
+                if db2:
+                    db2.close()
 
-            return improved_code
+            return diff_output
 
         except Exception as e:
             self.log_action("นิก", f"Optimization failed: {str(e)}", "ERROR")
             return None
-
-    def _nik_push_recommendations(self, recommendations, github_token, repo):
-        """นิก push improvement report ไป GitHub เป็น markdown file"""
-        try:
-            import base64
-            filename = f"nik_reports/optimization_{datetime.now().strftime('%Y%m%d')}.md"
-            content  = f"# นิก Optimization Report — {datetime.now().strftime('%Y-%m-%d')}\n\n{recommendations}"
-            encoded  = base64.b64encode(content.encode()).decode()
-
-            url = f"https://api.github.com/repos/{repo}/contents/{filename}"
-            headers = {
-                "Authorization": f"token {github_token}",
-                "Accept":        "application/vnd.github.v3+json"
-            }
-            payload = {
-                "message": f"นิก: Weekly optimization report {datetime.now().strftime('%Y-%m-%d')}",
-                "content": encoded
-            }
-            res = requests.put(url, headers=headers, json=payload, timeout=15)
-            if res.status_code in (200, 201):
-                self.log_action("นิก", f"Report pushed to GitHub: {filename}", "SUCCESS")
-            else:
-                self.log_action("นิก", f"GitHub push failed: {res.status_code} {res.text[:100]}", "ERROR")
-        except Exception as e:
-            self.log_action("นิก", f"GitHub push error: {str(e)}", "ERROR")
 
     def _nik_get_current_agents_py(self, github_token, repo):
         """ดึง agents.py ปัจจุบันจาก GitHub"""
@@ -1254,32 +1245,6 @@ Fix the top issues found in the logs. Return the complete updated agents.py."""
         except Exception as e:
             self.log_action("นิก", f"Could not fetch agents.py from GitHub: {str(e)}", "ERROR")
             return None, None
-
-    def _nik_push_agents_py(self, new_content, sha, github_token, repo):
-        """นิก push agents.py ที่แก้แล้วไป GitHub → Render auto-deploy"""
-        try:
-            import base64
-            encoded = base64.b64encode(new_content.encode("utf-8")).decode()
-            url = f"https://api.github.com/repos/{repo}/contents/agents.py"
-            headers = {
-                "Authorization": f"token {github_token}",
-                "Accept": "application/vnd.github.v3+json"
-            }
-            payload = {
-                "message": f"นิก: Auto-optimize agents.py {datetime.now().strftime('%Y-%m-%d')}",
-                "content": encoded,
-                "sha": sha  # จำเป็นสำหรับ update file ที่มีอยู่แล้ว
-            }
-            res = requests.put(url, headers=headers, json=payload, timeout=30)
-            if res.status_code in (200, 201):
-                self.log_action("นิก", "✅ agents.py pushed to GitHub → Render auto-deploy started", "SUCCESS")
-                return True
-            else:
-                self.log_action("นิก", f"Push agents.py failed: {res.status_code} {res.text[:200]}", "ERROR")
-                return False
-        except Exception as e:
-            self.log_action("นิก", f"Push agents.py error: {str(e)}", "ERROR")
-            return False
 
     # ==================== MAIN WORKFLOW ====================
     def run_workflow(self, stocks=None, portfolio=None, include_weekend=False):
@@ -1357,6 +1322,10 @@ Fix the top issues found in the logs. Return the complete updated agents.py."""
             # Step 3: มด Cross-Validate
             validated_results = self.mud_cross_validate(analysis_results)
 
+            # ✅ CHECKPOINT: บันทึก signal ทีละตัวหลัง มด validate เสร็จ
+            # ถ้า Render ล่มกลางทาง ข้อมูลที่วิเคราะห์แล้วจะยังอยู่ใน DB
+            self._checkpoint_database(validated_results)
+
             # Step 4: แฮรี่ Monitor Portfolio
             portfolio_status = self.harry_monitor_portfolio(validated_results)
 
@@ -1417,6 +1386,36 @@ Fix the top issues found in the logs. Return the complete updated agents.py."""
             self.log_action("SYSTEM", f"❌ Workflow failed: {str(e)}", "ERROR")
             raise
 
+    def _checkpoint_database(self, analysis_results):
+        """CHECKPOINT: บันทึก signal ทีละตัวทันทีหลัง มด validate — ป้องกันข้อมูลหายถ้า Render ล่ม
+        ใช้ flag checkpoint=True เพื่อแยกจาก _update_database ที่รันตอน QA pass เท่านั้น"""
+        db = None
+        try:
+            db = SessionLocal()
+            saved = []
+            for ticker, analysis in analysis_results.items():
+                if analysis.get('s1') is None or analysis.get('confidence', 0) == 0.0:
+                    continue
+                validation = analysis.get('validation', {})
+                if validation.get('recommendation') == 'NEEDS_REVIEW':
+                    continue
+                stock = db.query(Stock).filter(Stock.ticker == ticker).first()
+                if stock:
+                    stock.signal        = analysis.get('signal', 'HOLD')
+                    stock.confidence    = analysis.get('confidence', 0.5)
+                    stock.current_price = analysis.get('price', stock.current_price) or stock.current_price
+                    stock.at_new_high   = analysis.get('at_new_high', False)
+                    stock.at_new_low    = analysis.get('at_new_low', False)
+                    stock.updated_at    = datetime.now()
+                    saved.append(ticker)
+            db.commit()
+            self.log_action("CHECKPOINT", f"Saved {len(saved)} tickers to DB: {saved}", "INFO")
+        except Exception as e:
+            self.log_action("CHECKPOINT", f"Checkpoint save failed: {str(e)}", "WARNING")
+        finally:
+            if db is not None:
+                db.close()
+
     def _update_database(self, analysis_results):
         """อัพเดต Database ด้วยผลลัพธ์
         ✅ FIXED: ข้าม ticker ที่ มด flag เป็น NEEDS_REVIEW (ยังไม่ผ่านการตรวจสอบจริง)
@@ -1444,7 +1443,7 @@ Fix the top issues found in the logs. Return the complete updated agents.py."""
                     stock.signal        = analysis.get('signal', 'HOLD')
                     stock.confidence    = analysis.get('confidence', 0.5)
                     stock.current_price = analysis.get('price', stock.current_price) or stock.current_price
-                    stock.fair_price    = analysis.get('fair_price', stock.current_price)
+                    stock.fair_price    =                     stock.fair_price    = analysis.get('fair_price', stock.current_price)
                     stock.s1            = analysis.get('s1', stock.current_price)
                     stock.s2            = analysis.get('s2', stock.current_price)
                     stock.s3            = analysis.get('s3', stock.current_price)
