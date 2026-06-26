@@ -355,6 +355,32 @@ async def get_workflow_logs():
     }
 
 
+@app.get("/workflow/history")
+async def get_workflow_history(limit: int = 30, db: Session = Depends(get_db)):
+    """ดู workflow run history + cost จาก DB (ล่าสุดก่อน)"""
+    from models import WorkflowLog
+    from sqlalchemy import desc
+    logs = db.query(WorkflowLog).order_by(desc(WorkflowLog.timestamp)).limit(limit).all()
+    total_cost = sum(l.cost_usd or 0 for l in logs)
+    return {
+        "count": len(logs),
+        "total_cost_usd": round(total_cost, 4),
+        "runs": [
+            {
+                "id":              l.id,
+                "timestamp":       l.timestamp,
+                "status":          l.status,
+                "stocks_analyzed": l.stocks_analyzed,
+                "buy_signals":     l.buy_signals,
+                "hold_signals":    l.hold_signals,
+                "sell_signals":    l.sell_signals,
+                "cost_usd":        l.cost_usd,
+            }
+            for l in logs
+        ]
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

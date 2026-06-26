@@ -12,6 +12,7 @@ export default function DashboardV4() {
   const [tradeInput, setTradeInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [portfolioData, setPortfolioData] = useState(null);
+  const [historyData, setHistoryData] = useState(null);
 
   const colors = {
     surface: '#121212',
@@ -39,6 +40,7 @@ export default function DashboardV4() {
   useEffect(() => {
     fetchStocks();
     fetchPortfolio();
+    fetchHistory();
   }, []);
 
   const fetchStocks = async () => {
@@ -58,6 +60,16 @@ export default function DashboardV4() {
       setPortfolioData(data);
     } catch (error) {
       console.error('Error fetching portfolio:', error);
+    }
+  };
+
+  const fetchHistory = async () => {
+    try {
+      const response = await fetch(`${API_URL}/workflow/history?limit=30`);
+      const data = await response.json();
+      setHistoryData(data);
+    } catch (error) {
+      console.error('Error fetching history:', error);
     }
   };
 
@@ -341,34 +353,66 @@ export default function DashboardV4() {
     </div>
   );
 
-  const StatusTab = () => (
-    <div className="space-y-6">
-      <div style={{ padding: '20px', backgroundColor: colors.surface2, borderRadius: '8px', border: `1px solid ${colors.primaryLight}` }}>
-        <h3 style={{ color: colors.primary, marginBottom: '15px' }}>Token Usage</h3>
-        <div style={{ width: '100%', height: '8px', backgroundColor: colors.surface3, borderRadius: '4px', overflow: 'hidden' }}>
-          <div style={{ width: '82%', height: '100%', backgroundColor: colors.primary }}></div>
-        </div>
-        <p style={{ color: colors.neutral, fontSize: '12px', marginTop: '8px' }}>
-          Daily: 40,850 / 50,000 (82%)
-        </p>
-      </div>
+  const StatusTab = () => {
+    const totalCost = historyData?.total_cost_usd ?? 0;
+    const runs = historyData?.runs ?? [];
+    const budget = 30;
+    const budgetUsedPct = Math.min((totalCost / budget) * 100, 100).toFixed(0);
+    const lastRun = runs[0];
+    const passCount = runs.filter(r => r.status === 'COMPLETE').length;
+    const rejectCount = runs.filter(r => r.status === 'REJECTED').length;
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px', padding: '15px', backgroundColor: colors.surface2, borderRadius: '8px' }}>
-        <div>
-          <p style={{ color: colors.neutral, fontSize: '12px', margin: '0 0 8px 0' }}>Today</p>
-          <p style={{ color: colors.primary, fontSize: '18px', fontWeight: 'bold', margin: 0 }}>$0.31</p>
+    return (
+      <div className="space-y-6">
+        {/* Budget usage */}
+        <div style={{ padding: '20px', backgroundColor: colors.surface2, borderRadius: '8px', border: `1px solid ${colors.primaryLight}` }}>
+          <h3 style={{ color: colors.primary, marginBottom: '15px' }}>💰 Budget Usage</h3>
+          <div style={{ width: '100%', height: '8px', backgroundColor: colors.surface3, borderRadius: '4px', overflow: 'hidden' }}>
+            <div style={{ width: `${budgetUsedPct}%`, height: '100%', backgroundColor: totalCost > 25 ? colors.error : colors.primary }}></div>
+          </div>
+          <p style={{ color: colors.neutral, fontSize: '12px', marginTop: '8px' }}>
+            ${totalCost.toFixed(2)} / ${budget} ({budgetUsedPct}%) — {historyData ? `${runs.length} runs` : 'Loading...'}
+          </p>
         </div>
-        <div>
-          <p style={{ color: colors.neutral, fontSize: '12px', margin: '0 0 8px 0' }}>Month</p>
-          <p style={{ color: colors.primary, fontSize: '18px', fontWeight: 'bold', margin: 0 }}>$9.35</p>
+
+        {/* Cost summary */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px', padding: '15px', backgroundColor: colors.surface2, borderRadius: '8px' }}>
+          <div>
+            <p style={{ color: colors.neutral, fontSize: '12px', margin: '0 0 8px 0' }}>Total Spent</p>
+            <p style={{ color: colors.primary, fontSize: '18px', fontWeight: 'bold', margin: 0 }}>${totalCost.toFixed(2)}</p>
+          </div>
+          <div>
+            <p style={{ color: colors.neutral, fontSize: '12px', margin: '0 0 8px 0' }}>PASS / REJECT</p>
+            <p style={{ color: colors.success, fontSize: '18px', fontWeight: 'bold', margin: 0 }}>
+              {passCount} / <span style={{ color: colors.error }}>{rejectCount}</span>
+            </p>
+          </div>
+          <div>
+            <p style={{ color: colors.neutral, fontSize: '12px', margin: '0 0 8px 0' }}>Budget Left</p>
+            <p style={{ color: budget - totalCost < 5 ? colors.error : colors.success, fontSize: '18px', fontWeight: 'bold', margin: 0 }}>
+              ${(budget - totalCost).toFixed(2)}
+            </p>
+          </div>
         </div>
-        <div>
-          <p style={{ color: colors.neutral, fontSize: '12px', margin: '0 0 8px 0' }}>Budget</p>
-          <p style={{ color: colors.success, fontSize: '18px', fontWeight: 'bold', margin: 0 }}>$30</p>
-        </div>
+
+        {/* Last run */}
+        {lastRun && (
+          <div style={{ padding: '15px', backgroundColor: colors.surface2, borderRadius: '8px', border: `1px solid ${colors.secondary}` }}>
+            <p style={{ color: colors.neutral, fontSize: '12px', margin: '0 0 8px 0' }}>Last Run</p>
+            <p style={{ color: '#fff', fontSize: '13px', margin: '4px 0' }}>
+              {new Date(lastRun.timestamp).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' })}
+            </p>
+            <p style={{ color: lastRun.status === 'COMPLETE' ? colors.success : colors.error, fontSize: '13px', margin: '4px 0' }}>
+              {lastRun.status} — 📈 {lastRun.buy_signals} BUY / ⚖️ {lastRun.hold_signals} HOLD / 📉 {lastRun.sell_signals} SELL
+            </p>
+            {lastRun.cost_usd > 0 && (
+              <p style={{ color: colors.neutral, fontSize: '12px', margin: '4px 0' }}>Cost: ${lastRun.cost_usd?.toFixed(4)}</p>
+            )}
+          </div>
+        )}
       </div>
-    </div>
-  );
+    );
+  };
 
   const renderTab = () => {
     switch(activeTab) {

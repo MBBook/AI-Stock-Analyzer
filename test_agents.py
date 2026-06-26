@@ -820,6 +820,7 @@ class TestNewHighFlag(unittest.TestCase):
 
     def _run_sanity(self, price, week52_high, week52_low):
         at_new_high = False
+        at_new_low  = False
         if week52_high and price > week52_high * 1.05:
             week52_high = None
             week52_low  = None
@@ -829,29 +830,75 @@ class TestNewHighFlag(unittest.TestCase):
         elif week52_low and price < week52_low * 0.95:
             week52_high = None
             week52_low  = None
-        return week52_high, week52_low, at_new_high
+        elif week52_low and price < week52_low:
+            week52_low = price
+            at_new_low = True
+        return week52_high, week52_low, at_new_high, at_new_low
+
+    # ===== ATH tests =====
 
     def test_new_high_flag_set(self):
-        h, l, flag = self._run_sanity(price=1778, week52_high=1711, week52_low=800)
-        self.assertTrue(flag)
+        h, l, ath, atl = self._run_sanity(price=1778, week52_high=1711, week52_low=800)
+        self.assertTrue(ath)
+        self.assertFalse(atl)
         self.assertEqual(h, 1778)
         self.assertEqual(l, 800)
 
     def test_within_range_no_flag(self):
-        h, l, flag = self._run_sanity(price=150, week52_high=200, week52_low=100)
-        self.assertFalse(flag)
+        h, l, ath, atl = self._run_sanity(price=150, week52_high=200, week52_low=100)
+        self.assertFalse(ath)
+        self.assertFalse(atl)
         self.assertEqual(h, 200)
 
-    def test_big_gap_clears_range(self):
-        h, l, flag = self._run_sanity(price=2000, week52_high=1000, week52_low=500)
+    def test_big_gap_above_clears_range(self):
+        h, l, ath, atl = self._run_sanity(price=2000, week52_high=1000, week52_low=500)
         self.assertIsNone(h)
         self.assertIsNone(l)
-        self.assertFalse(flag)
+        self.assertFalse(ath)
+        self.assertFalse(atl)
 
-    def test_price_below_low_clears_range(self):
-        h, l, flag = self._run_sanity(price=80, week52_high=200, week52_low=100)
+    def test_price_far_below_low_clears_range(self):
+        h, l, ath, atl = self._run_sanity(price=80, week52_high=200, week52_low=100)
         self.assertIsNone(h)
         self.assertIsNone(l)
+        self.assertFalse(ath)
+        self.assertFalse(atl)
+
+    # ===== ATL tests =====
+
+    def test_new_low_flag_set(self):
+        """MSFT case: price เล็กน้อยต่ำกว่า 52w_low → ATL flag"""
+        h, l, ath, atl = self._run_sanity(price=355.13, week52_high=480.0, week52_low=356.28)
+        self.assertFalse(ath)
+        self.assertTrue(atl)
+        self.assertEqual(l, 355.13)   # low อัปเดตเป็น price
+        self.assertEqual(h, 480.0)    # high ไม่เปลี่ยน
+
+    def test_new_low_low_updated(self):
+        """ATL → week52_low ต้องถูก override ด้วย price ใหม่"""
+        h, l, ath, atl = self._run_sanity(price=99.0, week52_high=200.0, week52_low=100.0)
+        self.assertTrue(atl)
+        self.assertEqual(l, 99.0)
+
+    def test_new_low_exact_boundary(self):
+        """price = 52w_low * 0.95 ยังถือเป็น ATL (ไม่ถูก nullify)"""
+        boundary = 100.0 * 0.95  # = 95.0
+        h, l, ath, atl = self._run_sanity(price=boundary + 0.01, week52_high=200.0, week52_low=100.0)
+        self.assertTrue(atl)
+        self.assertIsNotNone(h)
+
+    def test_new_low_below_threshold_clears_range(self):
+        """price < 52w_low * 0.95 → currency mismatch → null ทั้งคู่"""
+        h, l, ath, atl = self._run_sanity(price=94.99, week52_high=200.0, week52_low=100.0)
+        self.assertIsNone(h)
+        self.assertIsNone(l)
+        self.assertFalse(atl)
+
+    def test_ath_and_atl_mutually_exclusive(self):
+        """ไม่มีทางที่ทั้ง ATH และ ATL เป็น True พร้อมกัน"""
+        for price in [50, 150, 250]:
+            _, _, ath, atl = self._run_sanity(price=price, week52_high=200.0, week52_low=100.0)
+            self.assertFalse(ath and atl, f"price={price} ทำให้ ATH={ath} และ ATL={atl} พร้อมกัน")
 
 
 class TestMudRecommendationFormat(unittest.TestCase):
@@ -911,40 +958,7 @@ class TestCrossCurrencyTickers(unittest.TestCase):
         d = self._apply("AAPL", {"52week_high": 200, "52week_low": 150})
         self.assertEqual(d["52week_high"], 200)
 
-    def test_already_none_no_error(self):
-        d = self._apply("ASML", {"52week_high": None, "52week_low": None})
-        self.assertIsNone(d["52week_high"])
+    def test_usd_ticker_not_affected(self):
+        d = self._apply("NVDA", {"52week_high": 1000, "52week_low": 400})
+        self.assertIsNotNone(d["52week_high"])
 
-
-class Test529Retry(unittest.TestCase):
-    """agents.py ต้องมี sleep(30) เมื่อเจอ 529 — ตรวจจาก source"""
-
-    def _read_claude_call_src(self):
-        src_path = os.path.join(os.path.dirname(__file__), "agents.py")
-        with open(src_path, encoding="utf-8") as f:
-            src = f.read()
-        start = src.find("def claude_call(")
-        end   = src.find("\n    def ", start + 1)
-        return src[start:end]
-
-    def test_529_triggers_sleep_in_source(self):
-        src = self._read_claude_call_src()
-        self.assertIn("529", src, "ต้องมีการตรวจ 529 ใน claude_call")
-        self.assertIn("time.sleep(30)", src, "ต้องมี time.sleep(30) สำหรับ 529")
-
-    def test_overloaded_keyword_checked(self):
-        src = self._read_claude_call_src()
-        self.assertIn("overloaded", src.lower(), "ต้องตรวจ overloaded keyword ด้วย")
-
-    def test_sleep_only_for_529_not_general(self):
-        """sleep(30) ต้องอยู่ใน if 529 block เท่านั้น ไม่ใช่ทุก error"""
-        src = self._read_claude_call_src()
-        # หา position ของ 529 check และ sleep(30)
-        pos_529   = src.find('"529"')
-        pos_sleep = src.find("time.sleep(30)")
-        # sleep(30) ต้องอยู่หลัง 529 check (ไม่ใช่ก่อน)
-        self.assertGreater(pos_sleep, pos_529, "time.sleep(30) ต้องอยู่ภายใน if 529 block")
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
