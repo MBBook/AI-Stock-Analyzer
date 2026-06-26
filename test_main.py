@@ -391,3 +391,104 @@ class TestWorkflowBackground(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ============================================================
+# 6. GET /nik/suggestions
+# ============================================================
+class TestNikSuggestionsEndpoint(unittest.TestCase):
+
+    def setUp(self):
+        self.client = TestClient(app_module.app)
+        # test_agents.py set sys.modules["models"] = MagicMock() ตลอด session
+        # desc(NikSuggestion.created_at) ใน endpoint ต้องการ Column จริง ไม่ใช่ Mock
+        # restore real models ชั่วคราวระหว่าง test class นี้
+        import importlib
+        self._orig_models = sys.modules.get("models")
+        # ต้อง pop ก่อน ไม่งั้น import_module คืน cache MagicMock เดิม
+        sys.modules.pop("models", None)
+        try:
+            sys.modules["models"] = importlib.import_module("models")
+        except Exception:
+            if self._orig_models:
+                sys.modules["models"] = self._orig_models
+
+    def tearDown(self):
+        if self._orig_models is not None:
+            sys.modules["models"] = self._orig_models
+
+    def _make_suggestion(self, id, status="pending", summary="แก้ timeout", diff="<<<DIFF>>>"):
+        from datetime import datetime as dt
+        s = MagicMock()
+        s.id            = id
+        s.created_at    = dt(2026, 6, 26, 10, 0, 0)
+        s.summary       = summary
+        s.diff_text     = diff
+        s.status        = status
+        s.error_message = None
+        s.applied_at    = None
+        return s
+
+    def test_empty_db_returns_zero_count(self):
+        """ไม่มี suggestion ใน DB → count=0, suggestions=[]"""
+        db = MagicMock()
+        db.query.return_value.order_by.return_value.limit.return_value.all.return_value = []
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        resp = self.client.get("/nik/suggestions")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["count"], 0)
+        self.assertEqual(resp.json()["suggestions"], [])
+
+    def test_response_has_required_fields(self):
+        """response ต้องมี count, pending_count, suggestions"""
+        db = MagicMock()
+        db.query.return_value.order_by.return_value.limit.return_value.all.return_value = [
+            self._make_suggestion(1, status="pending")
+        ]
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        resp = self.client.get("/nik/suggestions")
+        data = resp.json()
+        self.assertIn("count",         data)
+        self.assertIn("pending_count", data)
+        self.assertIn("suggestions",   data)
+
+    def test_pending_count_correct(self):
+        """pending_count นับเฉพาะ status=pending"""
+        db = MagicMock()
+        db.query.return_value.order_by.return_value.limit.return_value.all.return_value = [
+            self._make_suggestion(1, status="pending"),
+            self._make_suggestion(2, status="complete"),
+            self._make_suggestion(3, status="pending"),
+        ]
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        resp = self.client.get("/nik/suggestions")
+        self.assertEqual(resp.json()["pending_count"], 2)
+        self.assertEqual(resp.json()["count"], 3)
+
+    def test_suggestion_item_has_required_fields(self):
+        """แต่ละ item ใน suggestions ต้องมีฟิลด์ครบ"""
+        db = MagicMock()
+        db.query.return_value.order_by.return_value.limit.return_value.all.return_value = [
+            self._make_suggestion(1, status="pending", summary="แก้ timeout")
+        ]
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        resp = self.client.get("/nik/suggestions")
+        item = resp.json()["suggestions"][0]
+        for field in ["id", "created_at", "summary", "diff_text", "status",
+                      "error_message", "applied_at"]:
+            self.assertIn(field, item, f"Missing field: {field}")
+
+    def test_limit_10_records(self):
+        """ต้อง limit 10 เท่านั้น — ไม่ดึงทั้งหมด"""
+        db = MagicMock()
+        limit_mock = MagicMock()
+        limit_mock.all.return_value = []
+        db.query.return_value.order_by.return_value.limit.return_value = limit_mock
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        self.client.get("/nik/suggestions")
+        db.query.return_value.order_by.return_value.limit.assert_called_with(10)
