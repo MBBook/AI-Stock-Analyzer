@@ -1,0 +1,391 @@
+"""
+test_main.py — ทดสอบ FastAPI endpoints ใน main.py
+ครอบคลุม: /health, POST /workflow, LINE notification
+ไม่ต่อ DB จริง / ไม่ยิง Claude API จริง
+"""
+
+import sys
+import os
+import unittest
+from unittest.mock import patch, MagicMock, PropertyMock
+import importlib
+import threading
+import time
+
+# ===== MOCK DB + AGENTS ก่อน import main =====
+# ป้องกัน main.py ไปต่อ PostgreSQL จริงตอน import
+
+def _make_db_mock():
+    mock_db = MagicMock()
+    mock_db.__enter__ = lambda s: s
+    mock_db.__exit__ = MagicMock(return_value=False)
+    return mock_db
+
+# Mock engine ก่อน import
+engine_mock = MagicMock()
+engine_mock.connect.return_value = _make_db_mock()
+
+# Mock orchestrator ก่อน import
+orchestrator_mock = MagicMock()
+orchestrator_mock.workflow_log = []
+
+_db_mock_module  = MagicMock(get_db=MagicMock(), engine=engine_mock)
+_ag_mock_module  = MagicMock(orchestrator=orchestrator_mock)
+_sc_mock_module  = MagicMock(setup_scheduler=MagicMock(), shutdown_scheduler=MagicMock())
+
+with patch.dict("sys.modules", {
+    "database": _db_mock_module,
+    "agents":   _ag_mock_module,
+    "scheduler": _sc_mock_module,
+}):
+    import main as app_module
+    from fastapi.testclient import TestClient
+
+# patch.dict restores sys.modules on exit → main + deps ถูก remove ออก
+# ต้อง re-inject เพื่อให้ patch("main.requests.post") หา module เจอ
+sys.modules["main"]     = app_module
+sys.modules["database"] = _db_mock_module
+sys.modules["agents"]   = _ag_mock_module
+sys.modules["scheduler"] = _sc_mock_module
+
+# Reset _job state ก่อนแต่ละ test
+def _reset_job():
+    with app_module._job_lock:
+        app_module._job.update({
+            "job_id": None,
+            "status": "idle",
+            "started_at": None,
+            "finished_at": None,
+            "result": None,
+            "error": None,
+        })
+
+# DB override — คืน mock session แทน real DB
+def _override_get_db():
+    db = MagicMock()
+    try:
+        yield db
+    finally:
+        pass
+
+app_module.app.dependency_overrides[app_module.get_db] = _override_get_db
+
+
+# ============================================================
+# 1. GET /health
+# ============================================================
+class TestHealth(unittest.TestCase):
+
+    def setUp(self):
+        self.client = TestClient(app_module.app)
+
+    def test_health_returns_200(self):
+        """GET /health ต้องได้ HTTP 200 เสมอ"""
+        resp = self.client.get("/health")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_health_returns_ok_status(self):
+        """GET /health body ต้องมี status=ok"""
+        resp = self.client.get("/health")
+        self.assertEqual(resp.json().get("status"), "ok")
+
+    def test_health_is_fast(self):
+        """GET /health ต้องตอบกลับภายใน 1 วินาที"""
+        start = time.time()
+        self.client.get("/health")
+        elapsed = time.time() - start
+        self.assertLess(elapsed, 1.0, "Health endpoint ช้าเกินไป")
+
+
+# ============================================================
+# 2. POST /workflow
+# ============================================================
+class TestWorkflowEndpoint(unittest.TestCase):
+
+    def setUp(self):
+        self.client = TestClient(app_module.app)
+        _reset_job()
+
+    def _make_db_with_stocks(self, tickers=None):
+        """คืน mock DB ที่มีหุ้นอยู่ใน list"""
+        if tickers is None:
+            tickers = ["AAPL", "MSFT", "GOOGL"]
+        db = MagicMock()
+        stocks = [MagicMock(ticker=t) for t in tickers]
+        db.query.return_value.all.return_value = stocks
+        db.query.return_value.filter.return_value.first.return_value = None
+        return db
+
+    def test_workflow_starts_immediately_no_blocking(self):
+        """POST /workflow ต้องตอบกลับทันที ไม่รอ workflow เสร็จ"""
+        app_module.app.dependency_overrides[app_module.get_db] = \
+            lambda: (yield self._make_db_with_stocks())
+
+        with patch.object(app_module, "_run_workflow_bg"):
+            with patch("threading.Thread") as mock_thread:
+                mock_thread.return_value = MagicMock()
+                start = time.time()
+                resp = self.client.post("/workflow")
+                elapsed = time.time() - start
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "started")
+        self.assertLess(elapsed, 2.0, "POST /workflow blocking — ไม่ควรรอ workflow เสร็จ")
+
+    def test_workflow_normal_mode_flag_false(self):
+        """POST /workflow ไม่ส่ง include_weekend → thread รันด้วย include_weekend=False"""
+        app_module.app.dependency_overrides[app_module.get_db] = \
+            lambda: (yield self._make_db_with_stocks())
+
+        captured = {}
+        original_thread = threading.Thread
+
+        def capture_thread(**kwargs):
+            captured["args"] = kwargs.get("args", ())
+            t = MagicMock()
+            t.start = MagicMock()
+            return t
+
+        with patch("threading.Thread", side_effect=capture_thread):
+            resp = self.client.post("/workflow")
+
+        self.assertEqual(resp.json()["status"], "started")
+        # args = (stocks, include_weekend)
+        if captured.get("args"):
+            self.assertFalse(captured["args"][1], "include_weekend ควรเป็น False")
+
+    def test_workflow_monday_mode_flag_true(self):
+        """POST /workflow?include_weekend=true → thread รันด้วย include_weekend=True"""
+        app_module.app.dependency_overrides[app_module.get_db] = \
+            lambda: (yield self._make_db_with_stocks())
+
+        captured = {}
+
+        def capture_thread(**kwargs):
+            captured["args"] = kwargs.get("args", ())
+            t = MagicMock()
+            t.start = MagicMock()
+            return t
+
+        with patch("threading.Thread", side_effect=capture_thread):
+            resp = self.client.post("/workflow?include_weekend=true")
+
+        self.assertEqual(resp.json()["status"], "started")
+        if captured.get("args"):
+            self.assertTrue(captured["args"][1], "include_weekend ควรเป็น True (Monday mode)")
+
+    def test_workflow_already_running_returns_already_running(self):
+        """POST /workflow ขณะที่ workflow กำลังรันอยู่ → ต้องได้ already_running"""
+        with app_module._job_lock:
+            app_module._job["status"] = "running"
+            app_module._job["job_id"] = "test-001"
+            app_module._job["started_at"] = "2026-06-26T22:00:00"
+
+        resp = self.client.post("/workflow")
+        self.assertEqual(resp.json()["status"], "already_running")
+
+    def test_workflow_no_stocks_returns_no_stocks(self):
+        """POST /workflow เมื่อไม่มีหุ้นใน DB → ต้องได้ no_stocks"""
+        db_empty = MagicMock()
+        db_empty.query.return_value.all.return_value = []
+        app_module.app.dependency_overrides[app_module.get_db] = \
+            lambda: (yield db_empty)
+
+        resp = self.client.post("/workflow")
+        self.assertEqual(resp.json()["status"], "no_stocks")
+
+    def test_workflow_response_has_job_id(self):
+        """POST /workflow response ต้องมี job_id"""
+        app_module.app.dependency_overrides[app_module.get_db] = \
+            lambda: (yield self._make_db_with_stocks())
+
+        with patch("threading.Thread") as mock_thread:
+            mock_thread.return_value = MagicMock()
+            resp = self.client.post("/workflow")
+
+        self.assertIn("job_id", resp.json())
+        self.assertIsNotNone(resp.json()["job_id"])
+
+    def test_workflow_sets_status_to_running(self):
+        """POST /workflow ต้องเปลี่ยน _job status เป็น running"""
+        app_module.app.dependency_overrides[app_module.get_db] = \
+            lambda: (yield self._make_db_with_stocks())
+
+        with patch("threading.Thread") as mock_thread:
+            mock_thread.return_value = MagicMock()
+            self.client.post("/workflow")
+
+        with app_module._job_lock:
+            self.assertEqual(app_module._job["status"], "running")
+
+
+# ============================================================
+# 3. POST /workflow/resume
+# ============================================================
+class TestWorkflowResume(unittest.TestCase):
+
+    def setUp(self):
+        self.client = TestClient(app_module.app)
+        _reset_job()
+
+    def test_resume_already_running_skips(self):
+        """POST /workflow/resume ขณะที่ workflow รันอยู่ → already_running"""
+        with app_module._job_lock:
+            app_module._job["status"] = "running"
+
+        db = MagicMock()
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        resp = self.client.post("/workflow/resume")
+        self.assertEqual(resp.json()["status"], "already_running")
+
+    def test_resume_all_done_today_returns_complete(self):
+        """POST /workflow/resume เมื่อทุกตัว updated_at=today → already_complete"""
+        from datetime import date
+        today_dt = MagicMock()
+        today_dt.date.return_value = date.today()
+
+        db = MagicMock()
+        stocks = [MagicMock(ticker="AAPL", updated_at=today_dt),
+                  MagicMock(ticker="MSFT", updated_at=today_dt)]
+        db.query.return_value.all.return_value = stocks
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        resp = self.client.post("/workflow/resume")
+        self.assertEqual(resp.json()["status"], "already_complete")
+
+    def test_resume_pending_stocks_starts_workflow(self):
+        """POST /workflow/resume เมื่อมีหุ้นค้างอยู่ → ต้องได้ resumed"""
+        db = MagicMock()
+        # updated_at = None หมายถึงยังไม่เคยวิเคราะห์
+        stocks = [MagicMock(ticker="AAPL", updated_at=None),
+                  MagicMock(ticker="MSFT", updated_at=None)]
+        db.query.return_value.all.return_value = stocks
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        with patch("threading.Thread") as mock_thread:
+            mock_thread.return_value = MagicMock()
+            resp = self.client.post("/workflow/resume")
+
+        self.assertEqual(resp.json()["status"], "resumed")
+        self.assertEqual(resp.json()["pending_stocks"], 2)
+
+
+# ============================================================
+# 4. LINE Notification — เซิร์ฟเวอร์ต้องไม่พัง
+# ============================================================
+class TestLineNotification(unittest.TestCase):
+
+    def test_no_token_no_crash(self):
+        """ไม่มี LINE_CHANNEL_ACCESS_TOKEN → ฟังก์ชันต้องไม่ raise"""
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("LINE_CHANNEL_ACCESS_TOKEN", None)
+            os.environ.pop("LINE_USER_ID", None)
+            try:
+                app_module._send_line_notification("test message")
+            except Exception as e:
+                self.fail(f"_send_line_notification raise unexpected: {e}")
+
+    def test_network_error_no_crash(self):
+        """requests.post raise ConnectionError → เซิร์ฟเวอร์ต้องไม่พัง"""
+        with patch.dict(os.environ, {
+            "LINE_CHANNEL_ACCESS_TOKEN": "fake-token",
+            "LINE_USER_ID": "fake-user"
+        }):
+            with patch("main.requests.post", side_effect=ConnectionError("network down")):
+                try:
+                    app_module._send_line_notification("test")
+                except Exception as e:
+                    self.fail(f"Server crashed on network error: {e}")
+
+    def test_timeout_no_crash(self):
+        """requests.post raise Timeout → เซิร์ฟเวอร์ต้องไม่พัง"""
+        import requests as req
+        with patch.dict(os.environ, {
+            "LINE_CHANNEL_ACCESS_TOKEN": "fake-token",
+            "LINE_USER_ID": "fake-user"
+        }):
+            with patch("main.requests.post", side_effect=req.exceptions.Timeout):
+                try:
+                    app_module._send_line_notification("test")
+                except Exception as e:
+                    self.fail(f"Server crashed on timeout: {e}")
+
+    def test_api_400_no_crash(self):
+        """LINE API คืน 400 Bad Request → เซิร์ฟเวอร์ต้องไม่พัง"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 400
+        mock_resp.text = "Invalid token"
+        with patch.dict(os.environ, {
+            "LINE_CHANNEL_ACCESS_TOKEN": "bad-token",
+            "LINE_USER_ID": "fake-user"
+        }):
+            with patch("main.requests.post", return_value=mock_resp):
+                try:
+                    app_module._send_line_notification("test")
+                except Exception as e:
+                    self.fail(f"Server crashed on 400 response: {e}")
+
+    def test_api_500_no_crash(self):
+        """LINE API คืน 500 Server Error → เซิร์ฟเวอร์ต้องไม่พัง"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.text = "Internal Server Error"
+        with patch.dict(os.environ, {
+            "LINE_CHANNEL_ACCESS_TOKEN": "fake-token",
+            "LINE_USER_ID": "fake-user"
+        }):
+            with patch("main.requests.post", return_value=mock_resp):
+                try:
+                    app_module._send_line_notification("test")
+                except Exception as e:
+                    self.fail(f"Server crashed on 500 response: {e}")
+
+    def test_empty_message_no_crash(self):
+        """ส่ง message ว่าง → ต้องไม่พัง"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch.dict(os.environ, {
+            "LINE_CHANNEL_ACCESS_TOKEN": "fake-token",
+            "LINE_USER_ID": "fake-user"
+        }):
+            with patch("main.requests.post", return_value=mock_resp):
+                try:
+                    app_module._send_line_notification("")
+                except Exception as e:
+                    self.fail(f"Server crashed on empty message: {e}")
+
+
+# ============================================================
+# 5. Bonus: _run_workflow_bg error handling
+# ============================================================
+class TestWorkflowBackground(unittest.TestCase):
+
+    def setUp(self):
+        _reset_job()
+
+    def test_bg_exception_sets_error_status(self):
+        """ถ้า orchestrator.run_workflow raise → _job status ต้องเป็น error ไม่ crash"""
+        app_module.orchestrator.run_workflow.side_effect = RuntimeError("Claude API down")
+
+        with patch("main._send_line_notification"):
+            app_module._run_workflow_bg(["AAPL"], False)
+
+        with app_module._job_lock:
+            self.assertEqual(app_module._job["status"], "error")
+            self.assertIn("Claude API down", app_module._job["error"])
+
+    def test_bg_exception_sends_line_notification(self):
+        """ถ้า workflow พัง → ต้องส่ง LINE แจ้ง MBBook เสมอ"""
+        app_module.orchestrator.run_workflow.side_effect = RuntimeError("crash")
+
+        with patch("main._send_line_notification") as mock_line:
+            app_module._run_workflow_bg(["AAPL"], False)
+
+        mock_line.assert_called_once()
+        call_msg = mock_line.call_args[0][0]
+        self.assertIn("ล้มเหลว", call_msg)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

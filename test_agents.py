@@ -962,3 +962,397 @@ class TestCrossCurrencyTickers(unittest.TestCase):
         d = self._apply("NVDA", {"52week_high": 1000, "52week_low": 400})
         self.assertIsNotNone(d["52week_high"])
 
+
+# ============================================================
+# SECTION 8: แฮรี่ — Portfolio Monitor
+# ============================================================
+class TestHarryPortfolio(unittest.TestCase):
+
+    def setUp(self):
+        self.orc = make_orchestrator()
+
+    def _holding(self, ticker, shares):
+        h = MagicMock()
+        h.ticker = ticker
+        h.shares = shares
+        return h
+
+    @patch("agents.SessionLocal")
+    def test_empty_portfolio_returns_zero_holdings(self, mock_sl):
+        """Portfolio ว่าง → total_holdings=0, alignment list ว่าง"""
+        db = MagicMock()
+        db.query.return_value.all.return_value = []
+        mock_sl.return_value = db
+
+        result = self.orc.harry_monitor_portfolio({"AAPL": {"signal": "BUY"}})
+        self.assertEqual(result["total_holdings"], 0)
+        self.assertEqual(result["portfolio_alignment"], [])
+
+    @patch("agents.SessionLocal")
+    def test_ticker_not_in_analysis_skipped(self, mock_sl):
+        """Holding ticker ไม่อยู่ใน analysis_results → ข้าม"""
+        db = MagicMock()
+        db.query.return_value.all.return_value = [self._holding("TSLA", 10)]
+        mock_sl.return_value = db
+
+        result = self.orc.harry_monitor_portfolio({"AAPL": {"signal": "BUY"}})
+        self.assertEqual(result["portfolio_alignment"], [])
+
+    @patch("agents.SessionLocal")
+    def test_sell_signal_with_shares_is_misaligned(self, mock_sl):
+        """SELL + ถือหุ้น → is_aligned=False, action=CONSIDER_SELLING"""
+        db = MagicMock()
+        db.query.return_value.all.return_value = [self._holding("AAPL", 50)]
+        mock_sl.return_value = db
+
+        result = self.orc.harry_monitor_portfolio({"AAPL": {"signal": "SELL"}})
+        a = result["portfolio_alignment"][0]
+        self.assertFalse(a["is_aligned"])
+        self.assertEqual(a["action"], "CONSIDER_SELLING")
+
+    @patch("agents.SessionLocal")
+    def test_buy_signal_with_zero_shares_is_misaligned(self, mock_sl):
+        """BUY + ไม่ถือ → is_aligned=False, action=CONSIDER_BUYING"""
+        db = MagicMock()
+        db.query.return_value.all.return_value = [self._holding("AAPL", 0)]
+        mock_sl.return_value = db
+
+        result = self.orc.harry_monitor_portfolio({"AAPL": {"signal": "BUY"}})
+        a = result["portfolio_alignment"][0]
+        self.assertFalse(a["is_aligned"])
+        self.assertEqual(a["action"], "CONSIDER_BUYING")
+
+    @patch("agents.SessionLocal")
+    def test_buy_signal_with_shares_is_aligned(self, mock_sl):
+        """BUY + ถือหุ้นอยู่ → is_aligned=True"""
+        db = MagicMock()
+        db.query.return_value.all.return_value = [self._holding("AAPL", 100)]
+        mock_sl.return_value = db
+
+        result = self.orc.harry_monitor_portfolio({"AAPL": {"signal": "BUY"}})
+        self.assertTrue(result["portfolio_alignment"][0]["is_aligned"])
+
+    @patch("agents.SessionLocal")
+    def test_sell_with_zero_shares_is_aligned(self, mock_sl):
+        """SELL + ไม่ถือ (shares=0) → aligned (ไม่มีอะไรต้องขาย)"""
+        db = MagicMock()
+        db.query.return_value.all.return_value = [self._holding("AAPL", 0)]
+        mock_sl.return_value = db
+
+        result = self.orc.harry_monitor_portfolio({"AAPL": {"signal": "SELL"}})
+        self.assertTrue(result["portfolio_alignment"][0]["is_aligned"])
+
+    def test_check_alignment_all_cases(self):
+        """unit test _check_alignment โดยตรง — ครอบทุก branch"""
+        self.assertFalse(self.orc._check_alignment("SELL", 100))  # SELL + has shares
+        self.assertFalse(self.orc._check_alignment("BUY",  0))    # BUY  + no shares
+        self.assertTrue (self.orc._check_alignment("BUY",  100))  # BUY  + has shares
+        self.assertTrue (self.orc._check_alignment("SELL", 0))    # SELL + no shares
+        self.assertTrue (self.orc._check_alignment("HOLD", 50))   # HOLD always aligned
+
+    def test_get_action_all_cases(self):
+        """unit test _get_action โดยตรง"""
+        self.assertEqual(self.orc._get_action("BUY",  0),   "CONSIDER_BUYING")
+        self.assertEqual(self.orc._get_action("SELL", 100), "CONSIDER_SELLING")
+        self.assertEqual(self.orc._get_action("HOLD", 50),  "HOLD")
+        self.assertEqual(self.orc._get_action("BUY",  100), "HOLD")  # ถือแล้ว ไม่ต้องซื้อ
+        self.assertEqual(self.orc._get_action("SELL", 0),   "HOLD")  # ไม่มีของขาย
+
+    @patch("agents.SessionLocal")
+    def test_db_exception_propagates(self, mock_sl):
+        """DB ล้มเหลว → แฮรี่ re-raise (ไม่ swallow)"""
+        mock_sl.side_effect = Exception("DB connection failed")
+        with self.assertRaises(Exception):
+            self.orc.harry_monitor_portfolio({"AAPL": {"signal": "BUY"}})
+
+
+# ============================================================
+# SECTION 9: เอ — Record Improvements
+# ============================================================
+class TestARecordImprovements(unittest.TestCase):
+
+    def setUp(self):
+        self.orc = make_orchestrator()
+
+    def _make_results(self, buy=2, sell=1, hold=3, needs_review=1):
+        results = {}
+        for i in range(buy):
+            results[f"BUY_{i}"]  = {"signal": "BUY",  "validation": {"recommendation": "PASS"}}
+        for i in range(sell):
+            results[f"SELL_{i}"] = {"signal": "SELL", "validation": {"recommendation": "PASS"}}
+        for i in range(hold):
+            results[f"HOLD_{i}"] = {"signal": "HOLD", "validation": {"recommendation": "PASS"}}
+        for i in range(needs_review):
+            results[f"NR_{i}"]   = {"signal": "HOLD", "validation": {"recommendation": "NEEDS_REVIEW"}}
+        return results
+
+    @patch("agents.SessionLocal")
+    def test_signal_counts_passed_to_claude(self, mock_sl):
+        """เอส่ง BUY/SELL/HOLD/NEEDS_REVIEW ที่นับถูกต้องเข้า Claude"""
+        db = MagicMock()
+        mock_sl.return_value = db
+        captured = {}
+
+        def capture(system, user, agent_name, **kwargs):
+            captured["user"] = user
+            return "สรุป"
+        self.orc.claude_call = capture
+
+        self.orc.a_record_improvements(
+            {"qa_result": {"status": "PASS"}, "include_weekend": False},
+            self._make_results(buy=2, sell=1, hold=3, needs_review=1)
+        )
+        self.assertIn("BUY signals: 2",  captured["user"])
+        self.assertIn("SELL signals: 1", captured["user"])
+        # NR ticker มี signal=HOLD ด้วย → HOLD count รวม NR = 4
+        self.assertIn("HOLD signals: 4", captured["user"])
+        self.assertIn("NEEDS_REVIEW: 1", captured["user"])
+
+    @patch("agents.SessionLocal")
+    def test_haiku_model_used(self, mock_sl):
+        """เอต้องใช้ Haiku — ไม่ใช้ Sonnet (ประหยัด token)"""
+        db = MagicMock()
+        mock_sl.return_value = db
+        models_used = []
+
+        def capture(system, user, agent_name, model=None, **kwargs):
+            models_used.append(model or "")
+            return "สรุป"
+        self.orc.claude_call = capture
+
+        self.orc.a_record_improvements(
+            {"qa_result": {"status": "PASS"}, "include_weekend": False},
+            self._make_results()
+        )
+        self.assertTrue(any("haiku" in m.lower() for m in models_used),
+                        f"Expected Haiku, got: {models_used}")
+
+    @patch("agents.SessionLocal")
+    def test_db_error_no_crash(self, mock_sl):
+        """DB ล้มเหลว → เอต้องไม่ crash — swallow ด้วย warning"""
+        mock_sl.side_effect = Exception("DB down")
+        self.orc.claude_call = MagicMock(return_value="สรุป")
+        try:
+            self.orc.a_record_improvements(
+                {"qa_result": {"status": "PASS"}, "include_weekend": False},
+                self._make_results()
+            )
+        except Exception as e:
+            self.fail(f"a_record_improvements raised: {e}")
+
+    @patch("agents.SessionLocal")
+    def test_empty_results_no_crash(self, mock_sl):
+        """validated_results ว่าง → นับ 0 ทุกตัว ไม่ crash"""
+        db = MagicMock()
+        mock_sl.return_value = db
+        self.orc.claude_call = MagicMock(return_value="ไม่มีข้อมูล")
+        try:
+            self.orc.a_record_improvements(
+                {"qa_result": {"status": "PASS"}, "include_weekend": False}, {}
+            )
+        except Exception as e:
+            self.fail(f"Empty results caused crash: {e}")
+
+
+# ============================================================
+# SECTION 10: นิก — Code Optimizer (Diff Mode)
+# ============================================================
+class TestNikOptimizeCode(unittest.TestCase):
+
+    def setUp(self):
+        self.orc = make_orchestrator()
+        self.sample_code = "def run_workflow():\n    pass\n" * 100  # ~3000 chars
+
+    @patch("agents.SessionLocal")
+    def test_no_github_token_returns_none(self, mock_sl):
+        """ไม่มี GITHUB_TOKEN → abort → return None"""
+        env = {k: v for k, v in os.environ.items() if k != "GITHUB_TOKEN"}
+        with patch.dict(os.environ, env, clear=True):
+            result = self.orc.nik_optimize_code()
+        self.assertIsNone(result)
+
+    @patch("agents.SessionLocal")
+    @patch.object(AgentOrchestrator, "_nik_get_current_agents_py")
+    def test_agents_py_too_large_returns_none(self, mock_get_code, mock_sl):
+        """agents.py > 80000 chars → skip → return None"""
+        db = MagicMock()
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+        mock_sl.return_value = db
+        mock_get_code.return_value = ("X" * 80001, "sha")
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test"}):
+            result = self.orc.nik_optimize_code()
+        self.assertIsNone(result)
+
+    @patch("agents.SessionLocal")
+    @patch.object(AgentOrchestrator, "_nik_get_current_agents_py")
+    def test_no_diff_blocks_returns_none(self, mock_get_code, mock_sl):
+        """Claude ไม่ return <<<DIFF>>> → return None"""
+        db = MagicMock()
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+        mock_sl.return_value = db
+        mock_get_code.return_value = (self.sample_code, "sha")
+        self.orc.claude_call = MagicMock(return_value="ระบบปกติดี ไม่มีอะไรต้องแก้")
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test"}):
+            result = self.orc.nik_optimize_code()
+        self.assertIsNone(result)
+
+    @patch("agents.SessionLocal")
+    @patch.object(AgentOrchestrator, "_nik_get_current_agents_py")
+    def test_valid_diff_saves_to_db_and_returns(self, mock_get_code, mock_sl):
+        """Claude return diff ถูก format → บันทึก NikSuggestion → return diff"""
+        db = MagicMock()
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+        mock_sl.return_value = db
+        mock_get_code.return_value = (self.sample_code, "sha")
+
+        fake_diff = (
+            "<<<DIFF>>>\n"
+            "SUMMARY: แก้ timeout ใน API call\n"
+            "FILE: agents.py\n"
+            "FIND:\n    timeout=5\n"
+            "REPLACE:\n    timeout=15\n"
+            "<<<END_DIFF>>>"
+        )
+        self.orc.claude_call = MagicMock(return_value=fake_diff)
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test"}):
+            result = self.orc.nik_optimize_code()
+
+        self.assertIsNotNone(result)
+        self.assertIn("<<<DIFF>>>", result)
+        db.add.assert_called_once()
+        db.commit.assert_called()
+
+    @patch("agents.SessionLocal")
+    @patch.object(AgentOrchestrator, "_nik_get_current_agents_py")
+    def test_summary_extracted_from_first_summary_line(self, mock_get_code, mock_sl):
+        """summary ที่ save ลง DB ต้องมาจาก SUMMARY: บรรทัดแรก"""
+        db = MagicMock()
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+        mock_sl.return_value = db
+        mock_get_code.return_value = (self.sample_code, "sha")
+
+        fake_diff = (
+            "<<<DIFF>>>\n"
+            "SUMMARY: แก้ timeout ใน API call\n"
+            "FILE: agents.py\n"
+            "FIND:\n    x\nREPLACE:\n    y\n"
+            "<<<END_DIFF>>>"
+        )
+        self.orc.claude_call = MagicMock(return_value=fake_diff)
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test"}):
+            self.orc.nik_optimize_code()
+
+        # NikSuggestion เป็น MagicMock — ตรวจ constructor kwargs แทน
+        nik_cls = sys.modules["models"].NikSuggestion
+        call_kwargs = nik_cls.call_args[1]
+        self.assertEqual(call_kwargs["summary"], "แก้ timeout ใน API call")
+        self.assertEqual(call_kwargs["status"], "pending")
+
+    @patch("agents.SessionLocal")
+    @patch.object(AgentOrchestrator, "_nik_get_current_agents_py")
+    def test_db_save_fails_no_crash(self, mock_get_code, mock_sl):
+        """DB save suggestion ล้มเหลว → นิกต้องไม่ crash"""
+        db_read = MagicMock()
+        db_read.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+        db_save = MagicMock()
+        db_save.add.side_effect = Exception("DB full")
+        mock_sl.side_effect = [db_read, db_save]
+        mock_get_code.return_value = (self.sample_code, "sha")
+
+        fake_diff = "<<<DIFF>>>\nSUMMARY: t\nFILE: agents.py\nFIND:\nx\nREPLACE:\ny\n<<<END_DIFF>>>"
+        self.orc.claude_call = MagicMock(return_value=fake_diff)
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test"}):
+            try:
+                self.orc.nik_optimize_code()
+            except Exception as e:
+                self.fail(f"nik_optimize_code crashed on DB save failure: {e}")
+
+
+# ============================================================
+# SECTION 11: _checkpoint_database — Checkpoint บันทึกทีละตัว
+# ============================================================
+class TestCheckpointDatabase(unittest.TestCase):
+
+    def setUp(self):
+        self.orc = make_orchestrator()
+
+    def _valid(self, signal="BUY"):
+        return {
+            "s1": 185.0, "confidence": 0.8, "signal": signal,
+            "price": 190.0, "at_new_high": False, "at_new_low": False,
+            "validation": {"recommendation": "PASS"},
+        }
+
+    @patch("agents.SessionLocal")
+    def test_saves_valid_ticker_and_commits(self, mock_sl):
+        """ticker valid → stock.signal updated + commit ถูกเรียก"""
+        db = MagicMock()
+        stock = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = stock
+        mock_sl.return_value = db
+
+        self.orc._checkpoint_database({"AAPL": self._valid()})
+
+        self.assertEqual(stock.signal, "BUY")
+        db.commit.assert_called_once()
+
+    @patch("agents.SessionLocal")
+    def test_skips_zero_confidence(self, mock_sl):
+        """confidence == 0.0 → ข้าม ไม่ query DB"""
+        db = MagicMock()
+        mock_sl.return_value = db
+
+        self.orc._checkpoint_database({
+            "AAPL": {"s1": 185.0, "confidence": 0.0, "signal": "HOLD",
+                     "validation": {"recommendation": "PASS"}}
+        })
+        db.query.assert_not_called()
+
+    @patch("agents.SessionLocal")
+    def test_skips_none_s1(self, mock_sl):
+        """s1 is None → ข้าม ไม่ query DB"""
+        db = MagicMock()
+        mock_sl.return_value = db
+
+        self.orc._checkpoint_database({
+            "AAPL": {"s1": None, "confidence": 0.8, "signal": "BUY",
+                     "validation": {"recommendation": "PASS"}}
+        })
+        db.query.assert_not_called()
+
+    @patch("agents.SessionLocal")
+    def test_skips_needs_review(self, mock_sl):
+        """NEEDS_REVIEW → ข้าม ไม่ query DB"""
+        db = MagicMock()
+        mock_sl.return_value = db
+
+        self.orc._checkpoint_database({
+            "AAPL": {"s1": 185.0, "confidence": 0.8, "signal": "BUY",
+                     "validation": {"recommendation": "NEEDS_REVIEW"}}
+        })
+        db.query.assert_not_called()
+
+    @patch("agents.SessionLocal")
+    def test_db_error_no_crash(self, mock_sl):
+        """DB ล้มเหลว → ต้องไม่ raise — log warning แล้วจบ"""
+        mock_sl.side_effect = Exception("connection pool exhausted")
+        try:
+            self.orc._checkpoint_database({"AAPL": self._valid()})
+        except Exception as e:
+            self.fail(f"_checkpoint_database crashed: {e}")
+
+    @patch("agents.SessionLocal")
+    def test_commit_called_once_for_batch(self, mock_sl):
+        """หลาย ticker → commit ครั้งเดียว (batch) ไม่ทำทีละตัว"""
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = MagicMock()
+        mock_sl.return_value = db
+
+        results = {t: self._valid() for t in ["AAPL", "MSFT", "GOOGL"]}
+        self.orc._checkpoint_database(results)
+        db.commit.assert_called_once()
