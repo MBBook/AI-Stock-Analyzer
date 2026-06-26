@@ -1,12 +1,3 @@
-Looking at the logs, I can identify the **TOP 3 issues**:
-
-1. **Yahoo Finance 429 Rate Limiting** — Tier 1 fails for nearly every stock due to `Too Many Requests`. The current `time.sleep(1.2)` + `LimiterSession(per_second=2)` is not enough for cloud IPs. Need exponential backoff retry within Tier 1 before falling to Tier 2.
-
-2. **Tier 2 (Finnhub) Not Being Triggered Fast Enough** — When Tier 1 gets 429, code falls through to Tier 2 correctly, but there's no backoff/retry on the 429 itself before giving up on Tier 1. Many stocks that *could* succeed with a brief wait are being handed off unnecessarily.
-
-3. **MarketAux "no news" Warnings Are Expected But Flood Logs** — The WARNING status for "no news found" is not an error, it's a normal market condition. Logging it as WARNING pollutes the error log and makes real issues harder to spot.
-
-```python
 """
 AI Stock Analyzer V4 - Agent System with Multi-Key Fallback
 Sequential Workflow with auto-fallback to next API key if current fails
@@ -354,9 +345,7 @@ class AgentOrchestrator:
             articles = res.get("data", [])
 
             if not articles:
-                # ✅ FIX #3: "no news" เป็น normal market condition ไม่ใช่ error
-                # ลด log level จาก WARNING → INFO เพื่อไม่ให้ flood error dashboard
-                self.log_action("นัตตี้", f"MarketAux: no news for {ticker} since {published_after}", "INFO")
+                self.log_action("นัตตี้", f"MarketAux: no news for {ticker} since {published_after}", "WARNING")
                 return []
 
             news = []
@@ -435,9 +424,7 @@ class AgentOrchestrator:
 
         news_data = {}
 
-        # ✅ FIX #1a: ลด per_second จาก 2 → 1 เพื่อลด 429 rate จาก Yahoo Finance
-        # Cloud IP โดน throttle ง่ายกว่า residential — conservative rate ช่วยได้
-        session = LimiterSession(per_second=1)
+        session = LimiterSession(per_second=2)
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         })
@@ -449,55 +436,32 @@ class AgentOrchestrator:
             data = None
 
             # ===== TIER 1: yfinance =====
-            # ✅ FIX #1b: เพิ่ม retry loop สำหรับ 429 ใน Tier 1 ด้วย exponential backoff
-            # แทนที่จะ fail ทันทีและ fallback ไป Tier 2 ทุกครั้ง
-            # 429 = rate limited ชั่วคราว — รอแล้วลองใหม่มักสำเร็จ
-            YFINANCE_MAX_RETRIES = 3
-            YFINANCE_BACKOFF_BASE = 5  # วินาที — 5s, 10s, 20s
-            for yf_attempt in range(YFINANCE_MAX_RETRIES):
-                try:
-                    # ✅ FIX #1c: เพิ่ม sleep ก่อน attempt แรกเป็น 2s (แทน 1.2s)
-                    # เพราะ log แสดงว่า 1.2s ไม่พอสำหรับ cloud IP
-                    sleep_time = YFINANCE_BACKOFF_BASE * (2 ** yf_attempt) if yf_attempt > 0 else 2.0
-                    time.sleep(sleep_time)
+            try:
+                time.sleep(1.2)
+                self.log_action("นัตตี้", f"[Tier 1] Fetching {ticker} via yfinance...", "INFO")
+                stock_obj = yf.Ticker(ticker, session=session)
 
-                    self.log_action("นัตตี้", f"[Tier 1] Fetching {ticker} via yfinance (attempt {yf_attempt + 1}/{YFINANCE_MAX_RETRIES})...", "INFO")
-                    stock_obj = yf.Ticker(ticker, session=session)
+                if not stock_obj.info or 'currentPrice' not in stock_obj.info:
+                    raise Exception("yfinance: no currentPrice returned")
 
-                    if not stock_obj.info or 'currentPrice' not in stock_obj.info:
-                        raise Exception("yfinance: no currentPrice returned")
+                info  = stock_obj.info
+                price = self._safe_positive_float(info.get('currentPrice'))
+                if not price:
+                    raise Exception("yfinance: currentPrice is 0 or None")
 
-                    info  = stock_obj.info
-                    price = self._safe_positive_float(info.get('currentPrice'))
-                    if not price:
-                        raise Exception("yfinance: currentPrice is 0 or None")
+                data = {
+                    "symbol":      ticker,
+                    "price":       price,
+                    "52week_high": self._safe_positive_float(info.get('fiftyTwoWeekHigh')),
+                    "52week_low":  self._safe_positive_float(info.get('fiftyTwoWeekLow')),
+                    "pe_ratio":    self._safe_float(info.get('trailingPE')),         # ✅ ลบได้
+                    "market_cap":  self._safe_positive_float(info.get('marketCap')),
+                    "source":      "yfinance"
+                }
+                self.log_action("นัตตี้", f"[Tier 1] ✅ {ticker} OK (price={price})", "SUCCESS")
 
-                    data = {
-                        "symbol":      ticker,
-                        "price":       price,
-                        "52week_high": self._safe_positive_float(info.get('fiftyTwoWeekHigh')),
-                        "52week_low":  self._safe_positive_float(info.get('fiftyTwoWeekLow')),
-                        "pe_ratio":    self._safe_float(info.get('trailingPE')),         # ✅ ลบได้
-                        "market_cap":  self._safe_positive_float(info.get('marketCap')),
-                        "source":      "yfinance"
-                    }
-                    self.log_action("นัตตี้", f"[Tier 1] ✅ {ticker} OK (price={price})", "SUCCESS")
-                    break  # ✅ สำเร็จ — ออกจาก retry loop
-
-                except Exception as e:
-                    err_str = str(e)
-                    is_429 = "429" in err_str or "Too Many Requests" in err_str
-
-                    if is_429 and yf_attempt < YFINANCE_MAX_RETRIES - 1:
-                        # ✅ FIX #1d: 429 ไม่ใช่ fatal error — log เป็น INFO ไม่ใช่ WARNING
-                        # เพื่อไม่ให้ flood error dashboard (ทุก ticker ก็ 429 ตลอด)
-                        next_wait = YFINANCE_BACKOFF_BASE * (2 ** (yf_attempt + 1))
-                        self.log_action("นัตตี้", f"[Tier 1] {ticker} 429 rate-limited — waiting {next_wait}s before retry...", "INFO")
-                        # ไม่ต้อง sleep ที่นี่ — loop จะ sleep ที่ต้นลูปถัดไป
-                    else:
-                        # ล้มเหลวถาวร (ไม่ใช่ 429) หรือ exhausted retries
-                        self.log_action("นัตตี้", f"[Tier 1] {ticker} failed: {err_str}", "WARNING")
-                        break  # ออก retry loop → ลอง Tier 2
+            except Exception as e:
+                self.log_action("นัตตี้", f"[Tier 1] {ticker} failed: {str(e)}", "WARNING")
 
             # ===== TIER 2: Finnhub (ถ้า Tier 1 fail) =====
             if data is None and FINNHUB_KEY:
@@ -599,10 +563,8 @@ class AgentOrchestrator:
                 data["at_new_low"] = False
 
             # log เตือนถ้าขาด P/E (หนุ่มจะได้รับแจ้งใน prompt)
-            # ✅ FIX #2: ลด P/E warning เป็น INFO — ปกติมากสำหรับ growth/loss-making stocks
-            # ZS, OKTA เป็นบริษัทที่ขาดทุนอยู่แล้ว การ log WARNING ทุกครั้งทำให้ noise สูง
             if data.get("pe_ratio") is None:
-                self.log_action("นัตตี้", f"ℹ️  {ticker}: P/E unavailable (loss-making co. หรือ API ไม่มีข้อมูล)", "INFO")
+                self.log_action("นัตตี้", f"⚠️  {ticker}: P/E unavailable (loss-making co. หรือ API ไม่มีข้อมูล)", "WARNING")
 
             # ✅ P3: ดึงข่าวจาก MarketAux (sentiment score สำเร็จรูป ไม่ต้องสรุปด้วย Haiku)
             if MARKETAUX_KEY:
@@ -897,4 +859,612 @@ CRITICAL RULES:
                 for ticker, data in analysis_results.items()
             }
 
-            retry_section = f"\n\nFEEDBACK FROM PREVIOUS ATTEMPT:\n{retry_hint}\nPlease address the above issues in this report." if retry
+            retry_section = f"\n\nFEEDBACK FROM PREVIOUS ATTEMPT:\n{retry_hint}\nPlease address the above issues in this report." if retry_hint else ""
+
+            user_message = f"""Generate report based on this data:
+Analysis Results: {json.dumps(jen_summary, ensure_ascii=False)}
+Portfolio Status: {json.dumps(portfolio_status, ensure_ascii=False)}
+{retry_section}
+Create professional Thai report."""
+
+            response = self.claude_call(system_prompt, user_message, "เจน",
+                                        model=self.MODEL_SONNET, use_cache=True, max_tokens=16000)
+            report = {
+                "timestamp":    datetime.now().isoformat(),
+                "summary":      response,
+                "total_stocks": len(analysis_results),
+                "buy_signals":  sum(1 for a in analysis_results.values() if a.get('signal') == 'BUY'),
+                "hold_signals": sum(1 for a in analysis_results.values() if a.get('signal') == 'HOLD'),
+                "sell_signals": sum(1 for a in analysis_results.values() if a.get('signal') == 'SELL'),
+            }
+            self.log_action("เจน", "Report generated", "SUCCESS")
+            return report
+        except Exception as e:
+            self.log_action("เจน", f"Report generation failed: {str(e)}", "ERROR")
+            raise
+            
+    # ==================== AGENT 6: นน (QA Manager Check) ====================
+    def nan_qa_check(self, analysis_results, report):
+        """นน: ตรวจสอบคุณภาพก่อนส่ง — Sonnet + caching"""
+        self.log_action("นน", "QA checking...", "INFO")
+        try:
+            system_prompt = """You are นน (Non), QA Manager.
+Review the analysis and report:
+1. Data consistency
+2. Logic soundness
+3. Report quality
+4. Risk assessment
+
+CRITICAL REGULATORY RULES:
+1. Return strictly a JSON object matching this structure:
+{
+  "status": "PASS" or "REJECT",
+  "issues": [],
+  "approval_reason": "..."
+}
+2. The 'approval_reason' and all items inside 'issues' MUST be written ONLY as short, clean plain descriptive Thai text strings.
+3. STRICT WARNING: NEVER copy, paste, embed, replicate, or leak raw HTML code strings, layout blocks, table chunks, script templates, or tags (such as <td>, <tr>, <div>, <style>) into any JSON string fields. Keep all output exclusively as plain descriptive text characters.
+4. ATH/ATL RULE: ถ้าหุ้นมี at_new_high=true หรือ at_new_low=true แสดงว่าระบบตรวจสอบแล้วว่าเป็น market condition จริง ไม่ใช่ data error — ห้าม REJECT เพราะราคาอยู่นอก 52-week range ในกรณีนี้"""
+
+            raw_report = report.get('summary', '')
+            clean_report_text = re.sub(r'<style[^>]*>.*?</style>', '', raw_report, flags=re.DOTALL)
+            clean_report_text = re.sub(r'<[^>]+>', ' ', clean_report_text)
+            clean_report_text = re.sub(r'\s+', ' ', clean_report_text).strip()
+
+            MAX_REPORT_CHARS = 8000
+            if len(clean_report_text) > MAX_REPORT_CHARS:
+                cut = clean_report_text[:MAX_REPORT_CHARS].rsplit(' ', 1)[0]
+                clean_report_text = cut + "... [ข้อความถูกย่อเพื่อประสิทธิภาพ QA]"
+
+            qa_summary = {
+                ticker: {
+                    "signal":       data.get("signal"),
+                    "confidence":   data.get("confidence"),
+                    "s1":           data.get("s1"),
+                    "s2":           data.get("s2"),
+                    "s3":           data.get("s3"),
+                    "reasoning":    data.get("reasoning"),
+                    "validation":   data.get("validation", {}).get("recommendation"),
+                    "at_new_high":  data.get("at_new_high", False),
+                    "at_new_low":   data.get("at_new_low", False),
+                }
+                for ticker, data in analysis_results.items()
+            }
+
+            user_message = f"""QA Review:
+Analysis Summary: {json.dumps(qa_summary, ensure_ascii=False)}
+Report Content: {clean_report_text}
+
+Check if everything is correct and consistent."""
+
+            response = self.claude_call(system_prompt, user_message, "นน",
+                                        model=self.MODEL_SONNET, use_cache=True)
+            try:
+                qa_result = json.loads(response[response.find('{'):response.rfind('}')+1])
+                if isinstance(qa_result.get("approval_reason"), str):
+                    qa_result["approval_reason"] = re.sub(r'<[^>]+>', '', qa_result["approval_reason"]).strip()
+                if isinstance(qa_result.get("issues"), list):
+                    qa_result["issues"] = [re.sub(r'<[^>]+>', '', i).strip() if isinstance(i, str) else i for i in qa_result["issues"]]
+            except json.JSONDecodeError:
+                self.log_action("นน", "Could not parse QA response — defaulting to REJECT for safety", "WARNING")
+                qa_result = {"status": "REJECT", "issues": ["QA response could not be parsed"], "approval_reason": "Auto-rejected: unparseable QA response"}
+
+        except Exception as e:
+            self.log_action("นน", f"QA check failed: {str(e)}", "ERROR")
+            return {"status": "REJECT", "issues": [f"QA call failed: {str(e)}"], "approval_reason": "Auto-rejected: QA system error"}
+
+        self.log_action("นน", f"QA Status: {qa_result.get('status', 'UNKNOWN')}", "INFO")
+        return qa_result
+
+    # ==================== AGENT 7: เก้า (Retry Logic) ====================
+    def kao_retry(self, agent_name, error_msg, attempt=1):
+        """เก้า: Retry Assistant — Haiku เพียงพอสำหรับแนะนำ 2-3 ประโยค"""
+        if attempt > self.max_retries:
+            self.log_action("เก้า", f"Max retries exceeded for {agent_name}", "ERROR")
+            return None
+        self.log_action("เก้า", f"Analyzing failure for {agent_name} (Attempt {attempt})", "INFO")
+        try:
+            system_prompt = """You are เก้า (Kao), Retry Assistant.
+Analyze the QA failure and provide specific, actionable guidance for the report writer.
+Be concise — 2-3 sentences max. Focus on what the report writer should fix or avoid."""
+
+            user_message = f"""The report was REJECTED by QA with this issue:
+{error_msg}
+
+What specific changes should the report writer make in the next attempt?
+Reply in Thai, 2-3 sentences only."""
+
+            response = self.claude_call(system_prompt, user_message, "เก้า",
+                                        model=self.MODEL_HAIKU)  # ✅ Haiku เพียงพอ
+            self.log_action("เก้า", f"Retry hint: {response[:80]}...", "SUCCESS")
+            return response
+        except Exception as e:
+            self.log_action("เก้า", f"Retry hint failed: {str(e)}", "ERROR")
+            return None
+
+    # ==================== AGENT 8: เอ (Record Improvements) ====================
+    def a_record_improvements(self, workflow_result, validated_results):
+        """เอ: บันทึก improvement log หลัง workflow pass — Haiku เพียงพอ"""
+        self.log_action("เอ", "Recording workflow improvements...", "INFO")
+        try:
+            buy_count  = sum(1 for a in validated_results.values() if a.get('signal') == 'BUY')
+            sell_count = sum(1 for a in validated_results.values() if a.get('signal') == 'SELL')
+            hold_count = sum(1 for a in validated_results.values() if a.get('signal') == 'HOLD')
+            needs_review = sum(1 for a in validated_results.values()
+                               if a.get('validation', {}).get('recommendation') == 'NEEDS_REVIEW')
+
+            system_prompt = """You are เอ (A), a workflow recorder.
+Summarize the workflow run in 2-3 Thai sentences.
+Focus on: signal distribution, data quality issues, and any notable patterns."""
+
+            user_message = f"""Summarize this workflow run:
+- Total stocks analyzed: {len(validated_results)}
+- BUY signals: {buy_count}
+- SELL signals: {sell_count}
+- HOLD signals: {hold_count}
+- NEEDS_REVIEW: {needs_review}
+- QA result: {workflow_result.get('qa_result', {}).get('status', 'UNKNOWN')}
+
+Write 2-3 sentences in Thai summarizing key observations."""
+
+            summary = self.claude_call(system_prompt, user_message, "เอ",
+                                       model=self.MODEL_HAIKU)
+
+            # บันทึกลง DB
+            db = None
+            try:
+                db = SessionLocal()
+                try:
+                    from models import WorkflowLog
+                    log_entry = WorkflowLog(
+                        timestamp=datetime.now(),
+                        status=workflow_result.get('qa_result', {}).get('status', 'UNKNOWN'),
+                        stocks_analyzed=len(validated_results),
+                        buy_signals=buy_count,
+                        sell_signals=sell_count,
+                        hold_signals=hold_count,
+                        needs_review=needs_review,
+                        summary=summary,
+                        include_weekend=workflow_result.get('include_weekend', False),
+                        cost_usd=round(self.session_cost_usd, 6)  # ✅ BUDGET: บันทึก cost จริงของ run นี้
+                    )
+                    db.add(log_entry)
+                    db.commit()
+                    self.log_action("เอ", f"Improvement log saved to DB ✅", "SUCCESS")
+                except ImportError:
+                    # WorkflowLog ยังไม่ได้เพิ่มใน models.py — log เฉยๆ ไม่ fail
+                    self.log_action("เอ", "WorkflowLog model not found — add it to models.py (see workflow_log_model.py)", "WARNING")
+                    self.log_action("เอ", f"Summary: {summary[:150]}", "INFO")
+            except Exception as db_err:
+                self.log_action("เอ", f"DB error: {str(db_err)}", "WARNING")
+            finally:
+                if db:
+                    db.close()
+
+        except Exception as e:
+            self.log_action("เอ", f"Record failed: {str(e)}", "ERROR")
+
+    # ==================== AGENT 9: โคลสัน (Manual Trade Update) ====================
+    def colson_parse_trade(self, trade_text):
+        """โคลสัน: รับ trade text จาก user → parse → บันทึก DB — Haiku เพียงพอ"""
+        self.log_action("โคลสัน", f"Parsing trade: {trade_text[:50]}...", "INFO")
+        try:
+            system_prompt = """You are โคลสัน (Colson), a trade recorder.
+Parse the trade instruction and return ONLY JSON:
+{
+    "ticker": "AAPL",
+    "action": "BUY" or "SELL",
+    "shares": 100,
+    "price": 150.25
+}
+If you cannot parse, return {"error": "reason"}."""
+
+            response = self.claude_call(system_prompt, trade_text, "โคลสัน",
+                                        model=self.MODEL_HAIKU)
+            try:
+                trade_data = json.loads(response[response.find('{'):response.rfind('}')+1])
+                if "error" in trade_data:
+                    self.log_action("โคลสัน", f"Parse error: {trade_data['error']}", "WARNING")
+                    return None
+
+                # บันทึกลง DB
+                db = None
+                try:
+                    db = SessionLocal()
+                    trade = Trade(
+                        ticker=trade_data.get("ticker", "").upper(),
+                        action=trade_data.get("action", ""),
+                        shares=int(trade_data.get("shares", 0)),
+                        price=float(trade_data.get("price", 0))
+                    )
+                    db.add(trade)
+                    db.commit()
+                    self.log_action("โคลสัน", f"Trade recorded: {trade_data}", "SUCCESS")
+                    return trade_data
+                finally:
+                    if db:
+                        db.close()
+
+            except json.JSONDecodeError:
+                self.log_action("โคลสัน", "Could not parse trade response", "ERROR")
+                return None
+
+        except Exception as e:
+            self.log_action("โคลสัน", f"Trade parse failed: {str(e)}", "ERROR")
+            return None
+
+    # ==================== AGENT 10: นิก (Code Optimizer — Every Friday) ====================
+    def nik_optimize_code(self):
+        """นิก: อ่าน WorkflowLog 5 วัน → วิเคราะห์ → แก้ agents.py → push GitHub → Render auto-deploy"""
+        self.log_action("นิก", "Starting weekly code optimization...", "INFO")
+        try:
+            github_token = os.getenv("GITHUB_TOKEN")
+            github_repo  = os.getenv("GITHUB_REPO", "MBBook/ai-stock-analyzer")
+
+            if not github_token:
+                self.log_action("นิก", "GITHUB_TOKEN not set — cannot push. Set it in Render ENV.", "WARNING")
+                return None
+
+            # ===== Step 1: ดึง WorkflowLog ย้อนหลัง 5 วัน จาก DB =====
+            from datetime import timedelta
+            db = None
+            db_logs = []
+            try:
+                db = SessionLocal()
+                try:
+                    from models import WorkflowLog
+                    since = datetime.now() - timedelta(days=5)
+                    db_logs = db.query(WorkflowLog).filter(
+                        WorkflowLog.timestamp >= since
+                    ).order_by(WorkflowLog.timestamp.desc()).all()
+                    self.log_action("นิก", f"Loaded {len(db_logs)} runs from DB", "INFO")
+                except ImportError:
+                    self.log_action("นิก", "WorkflowLog not in models.py — using session logs", "WARNING")
+            except Exception as e:
+                self.log_action("นิก", f"DB read failed: {str(e)}", "WARNING")
+            finally:
+                if db:
+                    db.close()
+
+            # สร้าง history context
+            if db_logs:
+                history = json.dumps([{
+                    "timestamp":    l.timestamp.isoformat(),
+                    "status":       l.status,
+                    "stocks":       l.stocks_analyzed,
+                    "buy":          l.buy_signals,
+                    "sell":         l.sell_signals,
+                    "needs_review": l.needs_review,
+                    "summary":      l.summary,
+                } for l in db_logs], ensure_ascii=False)
+            else:
+                error_logs = [l for l in self.workflow_log if l.get('status') in ('ERROR', 'WARNING')]
+                history = json.dumps(error_logs[-50:], ensure_ascii=False)
+
+            session_errors = [l for l in self.workflow_log if l.get('status') in ('ERROR', 'WARNING')]
+            session_text = json.dumps(session_errors[-30:], ensure_ascii=False) if session_errors else "ไม่มี error"
+
+            # ===== Step 2: ดึง agents.py ปัจจุบันจาก GitHub =====
+            current_code, sha = self._nik_get_current_agents_py(github_token, github_repo)
+            if not current_code:
+                self.log_action("นิก", "Cannot fetch agents.py from GitHub — aborting", "ERROR")
+                return None
+
+            # ===== Step 3: นิก วิเคราะห์ + แก้ code =====
+            system_prompt = """You are นิก (Nik), an expert Python developer maintaining an AI stock analyzer system.
+
+You will receive:
+1. Workflow history (past 5 days) — showing what's failing
+2. Current session error logs
+3. The current agents.py code
+
+Your job:
+1. Identify the TOP 3 most impactful issues from the logs
+2. Make MINIMAL, SAFE fixes to agents.py (do NOT rewrite everything)
+3. Focus on: error handling, retry logic, prompt improvements, timeout issues
+4. Add comments explaining each change
+
+CRITICAL RULES:
+- Return the COMPLETE updated agents.py — every line, no truncation
+- Keep all existing functionality intact
+- Only fix what the logs show is actually broken
+- Do NOT change model names, API keys, or database schema"""
+
+            user_message = f"""=== Workflow History (5 days) ===
+{history}
+
+=== Current Session Errors ===
+{session_text}
+
+=== Current agents.py ===
+{current_code}
+
+Fix the top issues found in the logs. Return the complete updated agents.py."""
+
+            self.log_action("นิก", "Analyzing logs and improving agents.py with Sonnet...", "INFO")
+            improved_code = self.claude_call(
+                system_prompt, user_message, "นิก",
+                model=self.MODEL_SONNET,
+                max_tokens=16000  # agents.py ~25k chars ≈ 8k tokens output — Sonnet handles this
+            )
+
+            # ตรวจว่าได้ Python code จริง (ไม่ใช่ response เปล่า)
+            if "class AgentOrchestrator" not in improved_code:
+                self.log_action("นิก", "Response doesn't look like valid agents.py — aborting push", "ERROR")
+                # Push report แทน
+                self._nik_push_recommendations(improved_code, github_token, github_repo)
+                return improved_code
+
+            # ===== Step 4: Push agents.py ไป GitHub → Render auto-deploy =====
+            self.log_action("นิก", "Pushing improved agents.py to GitHub...", "INFO")
+            success = self._nik_push_agents_py(improved_code, sha, github_token, github_repo)
+
+            if success:
+                self.log_action("นิก", "✅ agents.py updated on GitHub → Render will auto-deploy in ~3 min", "SUCCESS")
+            else:
+                self.log_action("นิก", "Push failed — saving as report instead", "WARNING")
+                self._nik_push_recommendations(improved_code, github_token, github_repo)
+
+            return improved_code
+
+        except Exception as e:
+            self.log_action("นิก", f"Optimization failed: {str(e)}", "ERROR")
+            return None
+
+    def _nik_push_recommendations(self, recommendations, github_token, repo):
+        """นิก push improvement report ไป GitHub เป็น markdown file"""
+        try:
+            import base64
+            filename = f"nik_reports/optimization_{datetime.now().strftime('%Y%m%d')}.md"
+            content  = f"# นิก Optimization Report — {datetime.now().strftime('%Y-%m-%d')}\n\n{recommendations}"
+            encoded  = base64.b64encode(content.encode()).decode()
+
+            url = f"https://api.github.com/repos/{repo}/contents/{filename}"
+            headers = {
+                "Authorization": f"token {github_token}",
+                "Accept":        "application/vnd.github.v3+json"
+            }
+            payload = {
+                "message": f"นิก: Weekly optimization report {datetime.now().strftime('%Y-%m-%d')}",
+                "content": encoded
+            }
+            res = requests.put(url, headers=headers, json=payload, timeout=15)
+            if res.status_code in (200, 201):
+                self.log_action("นิก", f"Report pushed to GitHub: {filename}", "SUCCESS")
+            else:
+                self.log_action("นิก", f"GitHub push failed: {res.status_code} {res.text[:100]}", "ERROR")
+        except Exception as e:
+            self.log_action("นิก", f"GitHub push error: {str(e)}", "ERROR")
+
+    def _nik_get_current_agents_py(self, github_token, repo):
+        """ดึง agents.py ปัจจุบันจาก GitHub"""
+        try:
+            url = f"https://api.github.com/repos/{repo}/contents/agents.py"
+            headers = {
+                "Authorization": f"token {github_token}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            res = requests.get(url, headers=headers, timeout=15).json()
+            if "content" in res:
+                import base64
+                content = base64.b64decode(res["content"]).decode("utf-8")
+                sha = res.get("sha", "")
+                return content, sha
+            return None, None
+        except Exception as e:
+            self.log_action("นิก", f"Could not fetch agents.py from GitHub: {str(e)}", "ERROR")
+            return None, None
+
+    def _nik_push_agents_py(self, new_content, sha, github_token, repo):
+        """นิก push agents.py ที่แก้แล้วไป GitHub → Render auto-deploy"""
+        try:
+            import base64
+            encoded = base64.b64encode(new_content.encode("utf-8")).decode()
+            url = f"https://api.github.com/repos/{repo}/contents/agents.py"
+            headers = {
+                "Authorization": f"token {github_token}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            payload = {
+                "message": f"นิก: Auto-optimize agents.py {datetime.now().strftime('%Y-%m-%d')}",
+                "content": encoded,
+                "sha": sha  # จำเป็นสำหรับ update file ที่มีอยู่แล้ว
+            }
+            res = requests.put(url, headers=headers, json=payload, timeout=30)
+            if res.status_code in (200, 201):
+                self.log_action("นิก", "✅ agents.py pushed to GitHub → Render auto-deploy started", "SUCCESS")
+                return True
+            else:
+                self.log_action("นิก", f"Push agents.py failed: {res.status_code} {res.text[:200]}", "ERROR")
+                return False
+        except Exception as e:
+            self.log_action("นิก", f"Push agents.py error: {str(e)}", "ERROR")
+            return False
+
+    # ==================== MAIN WORKFLOW ====================
+    def run_workflow(self, stocks=None, portfolio=None, include_weekend=False):
+        """Execute complete 10-agent workflow — Sequential
+        นัตตี้ → หนุ่ม → มด → แฮรี่ → เจน → นน → (เก้า retry) → เอ → นิก(ศุกร์)
+        Args:
+            stocks: Stock list to analyze
+            include_weekend: True for Monday (Sat-Sun-Mon news), False for Tue-Fri (24h news)
+        """
+        if not stocks:
+            stocks = ["AAPL", "GOOGL", "MSFT", "TSLA", "AMZN"]
+
+        self.workflow_log = []
+        self.session_cost_usd = 0.0  # reset ทุก run ใหม่
+
+        # ===== BUDGET GUARD: ตรวจก่อนเริ่มเสมอ =====
+        db_budget = None
+        try:
+            db_budget = SessionLocal()
+            budget_ok, today_spent, daily_limit = self._check_daily_budget(db_budget)
+            self.log_action("BUDGET", f"Today spent: ${today_spent:.4f} / Limit: ${daily_limit:.2f}", "INFO")
+            if not budget_ok:
+                self.log_action("BUDGET",
+                    f"⚠️  Daily budget exceeded (${today_spent:.4f} >= ${daily_limit:.2f}) — workflow skipped to protect monthly cap",
+                    "ERROR")
+                return {
+                    "status": "BUDGET_EXCEEDED",
+                    "reason": f"Daily limit ${daily_limit:.2f} reached (spent ${today_spent:.4f} today). Workflow skipped.",
+                    "workflow_log": self.workflow_log,
+                    "qa_result": None,
+                    "report": None
+                }
+        finally:
+            if db_budget:
+                db_budget.close()
+
+        if include_weekend:
+            self.log_action("SYSTEM", "🔄 Monday mode: Fetching Sat-Sun-Mon news...", "INFO")
+        else:
+            self.log_action("SYSTEM", "📰 Regular mode: Fetching 24-hour news...", "INFO")
+
+        try:
+            # Step 1: นัตตี้ Get News + ราคา
+            news_data = self.natty_get_news(
+                stocks,
+                days=3 if include_weekend else 1,
+                include_weekend=include_weekend
+            )
+
+            # ✅ FIX #A: early exit ถ้าไม่มีข้อมูลหุ้นเลย ไม่ให้ workflow รันต่อแบบ COMPLETE ปลอม
+            if not news_data:
+                self.log_action("SYSTEM", "❌ No stock data fetched from any source — aborting workflow", "ERROR")
+                return {
+                    "status": "ABORTED",
+                    "reason": "All data sources failed — yfinance, Finnhub, and Alpha Vantage all returned no data",
+                    "workflow_log": self.workflow_log,
+                    "qa_result": None,
+                    "report": None
+                }
+
+            # Step 2: หนุ่ม Analyze
+            analysis_results = self.num_analyze_stocks(news_data, stocks)
+
+            # ✅ FIX #H: early exit ถ้า Claude วิเคราะห์ไม่ได้เลย ไม่ให้เจน/นน เสีย token โดยเปล่าประโยชน์
+            if not analysis_results:
+                self.log_action("SYSTEM", "❌ No analysis results from หนุ่ม — aborting workflow", "ERROR")
+                return {
+                    "status": "ABORTED",
+                    "reason": "หนุ่ม could not analyze any stocks — all Claude calls failed",
+                    "workflow_log": self.workflow_log,
+                    "qa_result": None,
+                    "report": None
+                }
+
+            # Step 3: มด Cross-Validate
+            validated_results = self.mud_cross_validate(analysis_results)
+
+            # Step 4: แฮรี่ Monitor Portfolio
+            portfolio_status = self.harry_monitor_portfolio(validated_results)
+
+            # ========== REPORT + QA LOOP (real retry up to max_retries) ==========
+            report = None
+            qa_result = None
+            qa_passed = False
+            retry_hint = None  # ✅ FIX #C: เก็บ hint จากเก้าเพื่อส่งให้เจนในรอบถัดไป
+
+            for attempt in range(1, self.max_retries + 1):
+                # Step 5: เจน Generate Report (ส่ง retry_hint ถ้ามี)
+                report = self.jen_generate_report(validated_results, portfolio_status, retry_hint=retry_hint)
+
+                # Step 6: นน QA Check
+                qa_result = self.nan_qa_check(validated_results, report)
+
+                if qa_result.get('status') == 'PASS':
+                    qa_passed = True
+                    break
+
+                # ❌ REJECT — เก้า วิเคราะห์ failure และคืน hint ให้เจนรอบถัดไป
+                self.log_action("SYSTEM", f"❌ QA REJECTED (attempt {attempt}/{self.max_retries})", "ERROR")
+                issue_msg = qa_result.get('issues', ['Unknown error'])[0] if qa_result.get('issues') else 'Unknown error'
+
+                # ✅ FIX #C: เก็บ hint จากเก้าเพื่อส่งต่อให้เจน (ไม่เสีย token เปล่า)
+                retry_hint = self.kao_retry("เจน+นน", issue_msg, attempt)
+
+                if attempt < self.max_retries:
+                    self.log_action("SYSTEM", f"🔄 Retrying report generation + QA (attempt {attempt + 1}/{self.max_retries})...", "INFO")
+            
+            # Step 7: Final Decision
+            if qa_passed:
+                self.log_action("SYSTEM", "✅ Workflow PASSED - Updating database...", "SUCCESS")
+                self._update_database(validated_results)
+
+                # ✅ เอ: บันทึก improvement log
+                self.a_record_improvements({"qa_result": qa_result}, validated_results)
+
+                # ✅ นิก: ทำงานทุกวันศุกร์เท่านั้น
+                if datetime.now().weekday() == 4:  # 4 = Friday
+                    self.log_action("SYSTEM", "📅 วันศุกร์ — เรียก นิก วิเคราะห์ code optimization", "INFO")
+                    self.nik_optimize_code()
+
+                final_status = "COMPLETE"
+            else:
+                self.log_action("SYSTEM", f"❌ Workflow REJECTED after {self.max_retries} attempts - Database NOT updated", "ERROR")
+                final_status = "REJECTED"
+            
+            self.log_action("SYSTEM", f"Workflow finished with status: {final_status}", "SUCCESS" if qa_passed else "ERROR")
+            return {
+                "status": final_status,
+                "workflow_log": self.workflow_log,
+                "qa_result": qa_result,
+                "report": report
+            }
+            
+        except Exception as e:
+            self.log_action("SYSTEM", f"❌ Workflow failed: {str(e)}", "ERROR")
+            raise
+
+    def _update_database(self, analysis_results):
+        """อัพเดต Database ด้วยผลลัพธ์
+        ✅ FIXED: ข้าม ticker ที่ มด flag เป็น NEEDS_REVIEW (ยังไม่ผ่านการตรวจสอบจริง)
+        เพื่อไม่ให้ signal ที่ไม่ได้ validate หลุดเข้า DB เหมือนกับ validate ผ่านแล้ว"""
+        db = None
+        try:
+            db = SessionLocal()
+            skipped = []
+            updated = []
+
+            for ticker, analysis in analysis_results.items():
+                validation = analysis.get('validation', {})
+                if validation.get('recommendation') == 'NEEDS_REVIEW':
+                    skipped.append(ticker)
+                    self.log_action("DATABASE", f"Skipped {ticker}: flagged NEEDS_REVIEW by มด", "WARNING")
+                    continue
+
+                if analysis.get('s1') is None or analysis.get('confidence', 0) == 0.0:
+                    skipped.append(ticker)
+                    self.log_action("DATABASE", f"Skipped {ticker}: no real price data, not writing placeholder signal", "WARNING")
+                    continue
+
+                stock = db.query(Stock).filter(Stock.ticker == ticker).first()
+                if stock:
+                    stock.signal        = analysis.get('signal', 'HOLD')
+                    stock.confidence    = analysis.get('confidence', 0.5)
+                    stock.current_price = analysis.get('price', stock.current_price) or stock.current_price
+                    stock.fair_price    = analysis.get('fair_price', stock.current_price)
+                    stock.s1            = analysis.get('s1', stock.current_price)
+                    stock.s2            = analysis.get('s2', stock.current_price)
+                    stock.s3            = analysis.get('s3', stock.current_price)
+                    stock.at_new_high   = analysis.get('at_new_high', False)
+                    stock.at_new_low    = analysis.get('at_new_low', False)
+                    stock.updated_at    = datetime.now()
+                    updated.append(ticker)
+
+            db.commit()
+
+            summary = f"Updated: {updated}" if updated else "No stocks updated"
+            if skipped:
+                summary += f" | Skipped: {skipped}"
+            self.log_action("DATABASE", summary, "SUCCESS")
+        except Exception as e:
+            self.log_action("DATABASE", f"Update failed: {str(e)}", "ERROR")
+        finally:
+            if db is not None:
+                db.close()
+
+
+# Initialize orchestrator
+orchestrator = AgentOrchestrator()
