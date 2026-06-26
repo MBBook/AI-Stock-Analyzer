@@ -43,10 +43,12 @@ with patch.dict("sys.modules", {
 
 # patch.dict restores sys.modules on exit → main + deps ถูก remove ออก
 # ต้อง re-inject เพื่อให้ patch("main.requests.post") หา module เจอ
-sys.modules["main"]     = app_module
-sys.modules["database"] = _db_mock_module
-sys.modules["agents"]   = _ag_mock_module
+sys.modules["main"]      = app_module
+sys.modules["database"]  = _db_mock_module
 sys.modules["scheduler"] = _sc_mock_module
+# ไม่ re-inject "agents" — ถ้า test_agents.py โหลด real agents ไว้แล้ว
+# จะถูก overwrite ทำให้ TestHarryPortfolio/TestCheckpoint พัง
+# app_module.orchestrator ชี้ไปที่ orchestrator_mock อยู่แล้วจากตอน import
 
 # Reset _job state ก่อนแต่ละ test
 def _reset_job():
