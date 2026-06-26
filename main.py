@@ -154,6 +154,20 @@ def _run_workflow_bg(stocks: list, include_weekend: bool):
 
 @app.on_event("startup")
 async def startup():
+    # ===== DB MIGRATION: เพิ่ม column ใหม่ที่ยังไม่มีใน PostgreSQL =====
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        try:
+            conn.execute(text(
+                "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS at_new_high BOOLEAN DEFAULT FALSE"
+            ))
+            conn.execute(text(
+                "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS at_new_low BOOLEAN DEFAULT FALSE"
+            ))
+            conn.commit()
+            print("[MIGRATION] at_new_high / at_new_low columns ready")
+        except Exception as e:
+            print(f"[MIGRATION] {e}")
     setup_scheduler()
 
 @app.on_event("shutdown")
