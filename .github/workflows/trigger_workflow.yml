@@ -43,14 +43,7 @@ jobs:
           RESPONSE=$(curl -s -X POST "$ENDPOINT" --max-time 30)
           echo "Response: $RESPONSE"
 
-          STATUS=$(echo "$RESPONSE" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    print(d.get('status', 'unknown'))
-except Exception:
-    print('parse_error')
-")
+          STATUS=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','unknown'))" 2>/dev/null || echo "parse_error")
           echo "Workflow status: $STATUS"
 
           if [ "$STATUS" = "started" ] || [ "$STATUS" = "already_running" ]; then
