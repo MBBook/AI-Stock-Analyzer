@@ -1,0 +1,22 @@
+name: Render Keepalive
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'  # ทุก 10 นาที ทุกวัน
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Ping health endpoint
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "${{ secrets.RENDER_URL }}/health")
+          echo "Health: HTTP $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "⚠️ Server not healthy (HTTP $STATUS)"
+          else
+            echo "✅ OK"
+          fi

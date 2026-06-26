@@ -1,0 +1,19 @@
+name: Workflow Resume
+
+on:
+  schedule:
+    # Mon–Fri 22:15–23:45 Bangkok (UTC+7) = 15:15–16:45 UTC ทุก 15 นาที
+    # เริ่ม 22:15 (ไม่ใช่ 22:00) เพื่อให้ main trigger รันก่อน
+    - cron: '15,30,45 15,16 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  resume:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Resume stuck tickers
+        run: |
+          RESPONSE=$(curl -s -X POST "${{ secrets.RENDER_URL }}/workflow/resume" --max-time 30)
+          echo "Resume response: $RESPONSE"
