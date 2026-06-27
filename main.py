@@ -373,12 +373,24 @@ async def get_workflow_logs():
 
 @app.post("/workflow/resume")
 async def resume_workflow(db: Session = Depends(get_db)):
-    """รันเฉพาะ ticker ที่ยังไม่ได้วิเคราะห์วันนี้ — ใช้โดย cron-job.org ทุก 15 นาที 22:00-23:59"""
+    """รันเฉพาะ ticker ที่ยังไม่ได้วิเคราะห์วันนี้ — ใช้โดย GitHub Actions ทุก 15 นาที 22:15-23:45"""
     with _job_lock:
         if _job["status"] == "running":
             return {"status": "already_running", "message": "Workflow is already running"}
 
+    # ถ้า workflow วันนี้ BUDGET_EXCEEDED หรือ COMPLETE แล้ว → ไม่ต้อง resume
     today = datetime.now().date()
+    try:
+        from models import WorkflowLog
+        last_log = db.query(WorkflowLog).order_by(WorkflowLog.timestamp.desc()).first()
+        if last_log and last_log.timestamp.date() == today:
+            if last_log.status in ("BUDGET_EXCEEDED", "COMPLETE", "ABORTED"):
+                return {
+                    "status": "skipped",
+                    "reason": f"Today's workflow already ended with status: {last_log.status}"
+                }
+    except Exception:
+        pass  # ถ้าเช็ค log ไม่ได้ → ให้รันต่อ (fail-open)
     all_stocks = db.query(Stock).all()
     pending = [s.ticker for s in all_stocks
                if not s.updated_at or s.updated_at.date() < today]
