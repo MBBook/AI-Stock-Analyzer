@@ -13,10 +13,11 @@ jobs:
     steps:
       - name: Ping health endpoint
         run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "${{ secrets.RENDER_URL }}/health")
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "${{ secrets.RENDER_URL }}/health" || echo "000")
           echo "Health: HTTP $STATUS"
-          if [ "$STATUS" != "200" ]; then
-            echo "⚠️ Server not healthy (HTTP $STATUS)"
-          else
+          if [ "$STATUS" = "200" ]; then
             echo "✅ OK"
+          else
+            echo "⚠️ Server returned HTTP $STATUS (may be waking up)"
           fi
+          exit 0
