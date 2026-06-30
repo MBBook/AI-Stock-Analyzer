@@ -57,6 +57,23 @@ class WorkflowLog(Base):
     include_weekend = Column(Boolean, default=False)  # True = Monday mode
     cost_usd        = Column(Float,   default=0.0)    # ค่าใช้จ่าย API ของ run นี้ (USD)
 
+class HourlyCache(Base):
+    """Cache ราคา + fundamentals ของหุ้นแต่ละตัว — pre-fetch รายชั่วโมงโดย GitHub Actions
+    ที่ 22:00 นัตตี้อ่านจากตารางนี้แทนการ fetch live → ประหยัดเวลา 10-15 นาที"""
+    __tablename__ = "hourly_cache"
+
+    id          = Column(Integer,  primary_key=True, index=True)
+    ticker      = Column(String,   nullable=False, index=True)
+    price       = Column(Float,    nullable=True)
+    week52_high = Column(Float,    nullable=True)
+    week52_low  = Column(Float,    nullable=True)
+    pe_ratio    = Column(Float,    nullable=True)
+    market_cap  = Column(Float,    nullable=True)
+    source      = Column(String,   nullable=True)   # 'finnhub' | 'yfinance'
+    at_new_high = Column(Boolean,  default=False)
+    at_new_low  = Column(Boolean,  default=False)
+    fetched_at  = Column(DateTime, default=datetime.utcnow, index=True)
+
 class NikSuggestion(Base):
     """บันทึก suggestion ของนิก — รอ MBBook อนุมัติ แล้วให้ Cow apply"""
     __tablename__ = "nik_suggestions"

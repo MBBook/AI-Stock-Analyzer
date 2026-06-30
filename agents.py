@@ -402,14 +402,151 @@ class AgentOrchestrator:
 
         return "\n".join(lines)
 
+    def natty_prefetch_prices(self, stocks):
+        """Pre-fetch ราคา + fundamentals ผ่าน Finnhub → เก็บใน HourlyCache
+        เรียกโดย GitHub Actions ทุกชั่วโมง Mon-Fri 09:00-21:00 Bangkok
+        ที่ 22:00 natty_get_news() จะอ่านจาก cache แทนการ fetch live → เร็วขึ้น ~10 นาที
+        Returns: dict {ticker: data} ที่ fetch สำเร็จ"""
+        from models import HourlyCache
+        FINNHUB_KEY = os.getenv("FINNHUB_API_KEY")
+        if not FINNHUB_KEY:
+            self.log_action("นัตตี้-prefetch", "⚠️ FINNHUB_API_KEY not set — prefetch aborted", "ERROR")
+            return {}
+
+        self.log_action("นัตตี้-prefetch", f"Pre-fetching {len(stocks)} tickers via Finnhub...", "INFO")
+        fetched = {}
+
+        for ticker in stocks:
+            data = None
+
+            # Primary: Finnhub (no daily limit, 60 req/min)
+            fh_data = self._fetch_finnhub_full(ticker, FINNHUB_KEY)
+            if fh_data and fh_data.get("price"):
+                data = fh_data
+                self.log_action("นัตตี้-prefetch", f"✅ {ticker} OK via Finnhub (${fh_data['price']})", "INFO")
+            else:
+                # Fallback: yfinance
+                try:
+                    import time as _time
+                    _time.sleep(1.2)
+                    stock_obj = yf.Ticker(ticker)
+                    info = stock_obj.info
+                    price = self._safe_positive_float(info.get("currentPrice"))
+                    if price:
+                        data = {
+                            "price":       price,
+                            "52week_high": self._safe_positive_float(info.get("fiftyTwoWeekHigh")),
+                            "52week_low":  self._safe_positive_float(info.get("fiftyTwoWeekLow")),
+                            "pe_ratio":    self._safe_float(info.get("trailingPE")),
+                            "market_cap":  self._safe_positive_float(info.get("marketCap")),
+                            "source":      "yfinance",
+                        }
+                        # ATH/ATL
+                        p, h, l = price, data["52week_high"], data["52week_low"]
+                        data["at_new_high"] = bool(h and p >= h)
+                        data["at_new_low"]  = bool(l and p <= l)
+                        self.log_action("นัตตี้-prefetch", f"✅ {ticker} OK via yfinance (${price})", "INFO")
+                except Exception as e:
+                    self.log_action("นัตตี้-prefetch", f"❌ {ticker} failed: {str(e)}", "WARNING")
+
+            if data:
+                fetched[ticker] = data
+
+        # บันทึกลง HourlyCache
+        db = None
+        try:
+            db = SessionLocal()
+            now = datetime.now()
+            for ticker, d in fetched.items():
+                entry = HourlyCache(
+                    ticker      = ticker,
+                    price       = d.get("price"),
+                    week52_high = d.get("52week_high"),
+                    week52_low  = d.get("52week_low"),
+                    pe_ratio    = d.get("pe_ratio"),
+                    market_cap  = d.get("market_cap"),
+                    source      = d.get("source", "unknown"),
+                    at_new_high = d.get("at_new_high", False),
+                    at_new_low  = d.get("at_new_low", False),
+                    fetched_at  = now,
+                )
+                db.add(entry)
+
+            # ลบ cache เก่ากว่า 25 ชั่วโมง (เก็บแค่วันล่าสุด)
+            cutoff = now - __import__("datetime").timedelta(hours=25)
+            db.query(HourlyCache).filter(HourlyCache.fetched_at < cutoff).delete()
+            db.commit()
+            self.log_action("นัตตี้-prefetch", f"✅ Cached {len(fetched)}/{len(stocks)} tickers to HourlyCache", "SUCCESS")
+        except Exception as e:
+            self.log_action("นัตตี้-prefetch", f"DB save failed: {str(e)}", "ERROR")
+        finally:
+            if db:
+                db.close()
+
+        return fetched
+
+    def _load_hourly_cache(self, stocks, max_age_hours=2):
+        """อ่าน HourlyCache สำหรับ tickers ที่ต้องการ — คืน {ticker: data} ที่อายุไม่เกิน max_age_hours
+        ถ้า ticker ไม่มีใน cache หรือข้อมูลเก่าเกิน → คืน {} สำหรับ ticker นั้น (natty_get_news จะ fetch live แทน)"""
+        from models import HourlyCache
+        from sqlalchemy import func
+        result = {}
+        db = None
+        try:
+            db = SessionLocal()
+            cutoff = datetime.now() - __import__("datetime").timedelta(hours=max_age_hours)
+
+            # ดึง latest entry per ticker ที่อายุไม่เกิน max_age_hours
+            # subquery: max fetched_at per ticker ที่ผ่าน cutoff
+            latest_sq = (
+                db.query(HourlyCache.ticker, func.max(HourlyCache.fetched_at).label("max_at"))
+                .filter(HourlyCache.ticker.in_(stocks), HourlyCache.fetched_at >= cutoff)
+                .group_by(HourlyCache.ticker)
+                .subquery()
+            )
+            rows = (
+                db.query(HourlyCache)
+                .join(latest_sq, (HourlyCache.ticker == latest_sq.c.ticker) &
+                                 (HourlyCache.fetched_at == latest_sq.c.max_at))
+                .all()
+            )
+            for row in rows:
+                result[row.ticker] = {
+                    "price":       row.price,
+                    "52week_high": row.week52_high,
+                    "52week_low":  row.week52_low,
+                    "pe_ratio":    row.pe_ratio,
+                    "market_cap":  row.market_cap,
+                    "source":      row.source or "cache",
+                    "at_new_high": row.at_new_high or False,
+                    "at_new_low":  row.at_new_low  or False,
+                }
+            self.log_action("นัตตี้", f"HourlyCache hit: {len(result)}/{len(stocks)} tickers (≤{max_age_hours}h old)", "INFO")
+        except Exception as e:
+            self.log_action("นัตตี้", f"HourlyCache read failed: {str(e)} — will fetch live", "WARNING")
+        finally:
+            if db:
+                db.close()
+        return result
+
     def natty_get_news(self, stocks, days=1, include_weekend=False):
         """นัตตี้: ดึงข้อมูลหุ้นแบบ 3-tier fallback + ข่าวจาก MarketAux
+        ✅ HourlyCache: ถ้ามี pre-fetch ราคาล่วงหน้าไม่เกิน 2 ชั่วโมง → ข้าม Tier1/Tier2 ทันที
         Tier 1 (yfinance):      ฟรี ครบ แต่ติด 429 บน cloud IP
         Tier 2 (Finnhub):       60 req/min ไม่จำกัด daily
         Tier 3 (Alpha Vantage): 5 req/min 25/day — สำรองสุดท้าย
         ข่าว: MarketAux 6 ข่าว/ticker, sentiment score สำเร็จรูป
         include_weekend=True: วันจันทร์ — ดึงข่าวตั้งแต่ศุกร์ 22:00"""
         self.log_action("นัตตี้", f"Starting fetch ({'Monday mode' if include_weekend else 'regular mode'})...", "INFO")
+
+        # ===== ตรวจ HourlyCache ก่อน =====
+        cached_prices = self._load_hourly_cache(stocks, max_age_hours=2)
+        cache_hit  = set(cached_prices.keys())
+        cache_miss = [t for t in stocks if t not in cache_hit]
+        if cache_hit:
+            self.log_action("นัตตี้", f"✅ Using HourlyCache for {len(cache_hit)} tickers — skipping Tier1/Tier2 for those", "INFO")
+        if cache_miss:
+            self.log_action("นัตตี้", f"Cache miss for {len(cache_miss)} tickers — will fetch live: {cache_miss}", "INFO")
 
         FINNHUB_KEY       = os.getenv("FINNHUB_API_KEY")
         ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
@@ -435,33 +572,39 @@ class AgentOrchestrator:
         for ticker in stocks:
             data = None
 
-            # ===== TIER 1: yfinance =====
-            try:
-                time.sleep(1.2)
-                self.log_action("นัตตี้", f"[Tier 1] Fetching {ticker} via yfinance...", "INFO")
-                stock_obj = yf.Ticker(ticker, session=session)
+            # ===== HourlyCache HIT: ข้าม Tier1/Tier2 ทันที =====
+            if ticker in cache_hit:
+                data = cached_prices[ticker]
+                self.log_action("นัตตี้", f"[Cache] ✅ {ticker} loaded from HourlyCache (${data.get('price')})", "INFO")
 
-                if not stock_obj.info or 'currentPrice' not in stock_obj.info:
-                    raise Exception("yfinance: no currentPrice returned")
+            # ===== TIER 1: yfinance (เฉพาะ cache miss) =====
+            if data is None:
+                try:
+                    time.sleep(1.2)
+                    self.log_action("นัตตี้", f"[Tier 1] Fetching {ticker} via yfinance...", "INFO")
+                    stock_obj = yf.Ticker(ticker, session=session)
 
-                info  = stock_obj.info
-                price = self._safe_positive_float(info.get('currentPrice'))
-                if not price:
-                    raise Exception("yfinance: currentPrice is 0 or None")
+                    if not stock_obj.info or 'currentPrice' not in stock_obj.info:
+                        raise Exception("yfinance: no currentPrice returned")
 
-                data = {
-                    "symbol":      ticker,
-                    "price":       price,
-                    "52week_high": self._safe_positive_float(info.get('fiftyTwoWeekHigh')),
-                    "52week_low":  self._safe_positive_float(info.get('fiftyTwoWeekLow')),
-                    "pe_ratio":    self._safe_float(info.get('trailingPE')),         # ✅ ลบได้
-                    "market_cap":  self._safe_positive_float(info.get('marketCap')),
-                    "source":      "yfinance"
-                }
-                self.log_action("นัตตี้", f"[Tier 1] ✅ {ticker} OK (price={price})", "SUCCESS")
+                    info  = stock_obj.info
+                    price = self._safe_positive_float(info.get('currentPrice'))
+                    if not price:
+                        raise Exception("yfinance: currentPrice is 0 or None")
 
-            except Exception as e:
-                self.log_action("นัตตี้", f"[Tier 1] {ticker} failed: {str(e)}", "WARNING")
+                    data = {
+                        "symbol":      ticker,
+                        "price":       price,
+                        "52week_high": self._safe_positive_float(info.get('fiftyTwoWeekHigh')),
+                        "52week_low":  self._safe_positive_float(info.get('fiftyTwoWeekLow')),
+                        "pe_ratio":    self._safe_float(info.get('trailingPE')),
+                        "market_cap":  self._safe_positive_float(info.get('marketCap')),
+                        "source":      "yfinance"
+                    }
+                    self.log_action("นัตตี้", f"[Tier 1] ✅ {ticker} OK (price={price})", "SUCCESS")
+
+                except Exception as e:
+                    self.log_action("นัตตี้", f"[Tier 1] {ticker} failed: {str(e)}", "WARNING")
 
             # ===== TIER 2: Finnhub (ถ้า Tier 1 fail) =====
             if data is None and FINNHUB_KEY:
@@ -1233,7 +1376,6 @@ If you cannot parse, return {"error": "reason"}."""
                 from models import WorkflowLog
                 since = datetime.now() - timedelta(days=5)
                 db_logs = db.query(WorkflowLog).filter(
-                    WorkflowLog.timestamp >= since
                 ).order_by(WorkflowLog.timestamp.desc()).all()
                 self.log_action("นิก", f"Loaded {len(db_logs)} runs from DB", "INFO")
             except Exception as e:

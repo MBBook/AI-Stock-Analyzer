@@ -1,0 +1,48 @@
+name: AI_Stocks_Prefetch
+
+on:
+  schedule:
+    # ทุกชั่วโมง Mon-Fri 02:00-14:00 UTC = 09:00-21:00 Bangkok
+    # ข้อมูลพร้อมก่อน workflow หลัก (15:00 UTC = 22:00 Bangkok)
+    - cron: '0 2-14 * * 1-5'
+  workflow_dispatch:  # manual trigger สำหรับ test
+
+jobs:
+  prefetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Wake up Render server
+        run: |
+          echo "⏰ Waking up Render..."
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "${{ secrets.RENDER_URL }}/health")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Server is awake!"
+              break
+            fi
+            if [ "$i" -eq 10 ]; then
+              echo "❌ Server failed to wake — skipping prefetch"
+              exit 0  # exit 0: ไม่ fail workflow ถ้า server ไม่ตื่น
+            fi
+            sleep 10
+          done
+
+      - name: POST /prefetch
+        run: |
+          echo "📡 Triggering price pre-fetch..."
+          RESPONSE=$(curl -s -X POST "${{ secrets.RENDER_URL }}/prefetch" \
+            -H "Content-Type: application/json" \
+            --max-time 10)
+          echo "Response: $RESPONSE"
+          STATUS=$(echo "$RESPONSE" | python3 -c \
+            "import sys,json; d=json.load(sys.stdin); print(d.get('status','unknown'))" 2>/dev/null || echo "parse_error")
+          echo "Prefetch status: $STATUS"
+          if [ "$STATUS" = "prefetch_started" ]; then
+            echo "✅ Pre-fetch triggered successfully"
+          else
+            echo "⚠️ Unexpected response — check Render logs"
+            exit 0  # exit 0: ไม่ fail workflow เพราะ prefetch เป็น optional
+          fi

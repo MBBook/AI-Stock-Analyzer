@@ -184,6 +184,32 @@ async def startup():
             print("[MIGRATION] nik_suggestions table ready")
         except Exception as e:
             print(f"[MIGRATION] {e}")
+        try:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS hourly_cache (
+                    id SERIAL PRIMARY KEY,
+                    ticker VARCHAR(20) NOT NULL,
+                    price FLOAT,
+                    week52_high FLOAT,
+                    week52_low FLOAT,
+                    pe_ratio FLOAT,
+                    market_cap FLOAT,
+                    source VARCHAR(20),
+                    at_new_high BOOLEAN DEFAULT FALSE,
+                    at_new_low BOOLEAN DEFAULT FALSE,
+                    fetched_at TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_hourly_cache_ticker ON hourly_cache (ticker)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_hourly_cache_fetched_at ON hourly_cache (fetched_at)"
+            ))
+            conn.commit()
+            print("[MIGRATION] hourly_cache table ready")
+        except Exception as e:
+            print(f"[MIGRATION] {e}")
     setup_scheduler()
 
 @app.on_event("shutdown")
@@ -191,6 +217,46 @@ async def shutdown():
     shutdown_scheduler()
 
 # ===== ROUTES =====
+
+@app.post("/prefetch")
+async def prefetch_prices(background_tasks: BackgroundTasks):
+    """Pre-fetch ราคาหุ้นทั้งหมดผ่าน Finnhub → เก็บใน HourlyCache
+    เรียกโดย GitHub Actions ทุกชั่วโมง Mon-Fri 09:00-21:00 Bangkok
+    ที่ 22:00 นัตตี้จะอ่านจาก cache → ประหยัดเวลา ~10 นาที"""
+    def _run_prefetch():
+        try:
+            db = __import__("database").SessionLocal()
+            from models import Stock
+            stocks = [s.ticker for s in db.query(Stock).all()]
+            db.close()
+            if not stocks:
+                print("[PREFETCH] No stocks in DB — skipping")
+                return
+            print(f"[PREFETCH] Starting pre-fetch for {len(stocks)} tickers...")
+            orchestrator.natty_prefetch_prices(stocks)
+            print("[PREFETCH] Done")
+        except Exception as e:
+            print(f"[PREFETCH] Error: {e}")
+
+    background_tasks.add_task(_run_prefetch)
+    return {"status": "prefetch_started", "message": "Pre-fetching prices in background"}
+
+@app.get("/prefetch/status")
+async def prefetch_status():
+    """ดูจำนวน tickers ใน HourlyCache และเวลา fetch ล่าสุด"""
+    try:
+        from models import HourlyCache
+        from sqlalchemy import func
+        db_s = __import__("database").SessionLocal()
+        count = db_s.query(func.count(HourlyCache.id)).scalar() or 0
+        latest = db_s.query(func.max(HourlyCache.fetched_at)).scalar()
+        db_s.close()
+        return {
+            "cached_entries": count,
+            "latest_fetch": latest.isoformat() if latest else None,
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/")
 async def root():
