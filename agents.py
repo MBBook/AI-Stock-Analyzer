@@ -1870,6 +1870,8 @@ Identify top issues and output diff blocks."""
             else:
                 self.log_action("SYSTEM", f"❌ Workflow REJECTED after {self.max_retries} attempts - Database NOT updated", "ERROR")
                 final_status = "REJECTED"
+                # ✅ บันทึก REJECTED run ลง DB ด้วย — ไม่งั้นหายจาก history
+                self.a_record_improvements({"qa_result": qa_result, "final_status": "REJECTED"}, validated_results)
             
             self.log_action("SYSTEM", f"Workflow finished with status: {final_status}", "SUCCESS" if qa_passed else "ERROR")
             return {
