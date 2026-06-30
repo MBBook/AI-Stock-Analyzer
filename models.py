@@ -74,6 +74,17 @@ class HourlyCache(Base):
     at_new_low  = Column(Boolean,  default=False)
     fetched_at  = Column(DateTime, default=datetime.utcnow, index=True)
 
+class NewsCache(Base):
+    """Cache ข่าวของหุ้นแต่ละตัว — pre-fetch รายชั่วโมงจาก yfinance + Finnhub
+    ที่ 22:00 นัตตี้อ่านจากตารางนี้แทนการ call MarketAux live"""
+    __tablename__ = "news_cache"
+
+    id         = Column(Integer,  primary_key=True, index=True)
+    ticker     = Column(String,   nullable=False, index=True)
+    news_json  = Column(Text,     nullable=True)   # JSON list ของ news items
+    news_count = Column(Integer,  default=0)
+    fetched_at = Column(DateTime, default=datetime.utcnow, index=True)
+
 class NikSuggestion(Base):
     """บันทึก suggestion ของนิก — รอ MBBook อนุมัติ แล้วให้ Cow apply"""
     __tablename__ = "nik_suggestions"

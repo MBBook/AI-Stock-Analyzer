@@ -3,8 +3,10 @@ name: AI_Stocks_Prefetch
 on:
   schedule:
     # ทุกชั่วโมง Mon-Fri 02:00-14:00 UTC = 09:00-21:00 Bangkok
-    # ข้อมูลพร้อมก่อน workflow หลัก (15:00 UTC = 22:00 Bangkok)
     - cron: '0 2-14 * * 1-5'
+    # รอบพิเศษ 21:45 Bangkok (14:45 UTC) — pre-warm ก่อน workflow 22:00
+    # ดึงข่าวล่าสุดรอบสุดท้าย เสร็จ ~21:55 → workflow อ่าน cache อายุ <15 นาที
+    - cron: '45 14 * * 1-5'
   workflow_dispatch:  # manual trigger สำหรับ test
 
 jobs:

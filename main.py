@@ -206,8 +206,23 @@ async def startup():
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_hourly_cache_fetched_at ON hourly_cache (fetched_at)"
             ))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS news_cache (
+                    id SERIAL PRIMARY KEY,
+                    ticker VARCHAR(20) NOT NULL,
+                    news_json TEXT,
+                    news_count INTEGER DEFAULT 0,
+                    fetched_at TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_news_cache_ticker ON news_cache (ticker)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_news_cache_fetched_at ON news_cache (fetched_at)"
+            ))
             conn.commit()
-            print("[MIGRATION] hourly_cache table ready")
+            print("[MIGRATION] hourly_cache + news_cache tables ready")
         except Exception as e:
             print(f"[MIGRATION] {e}")
     setup_scheduler()
@@ -234,7 +249,9 @@ async def prefetch_prices(background_tasks: BackgroundTasks):
                 return
             print(f"[PREFETCH] Starting pre-fetch for {len(stocks)} tickers...")
             orchestrator.natty_prefetch_prices(stocks)
-            print("[PREFETCH] Done")
+            print("[PREFETCH] Prices done — starting news pre-fetch...")
+            orchestrator.natty_prefetch_news(stocks)
+            print("[PREFETCH] All done (prices + news)")
         except Exception as e:
             print(f"[PREFETCH] Error: {e}")
 
@@ -243,17 +260,19 @@ async def prefetch_prices(background_tasks: BackgroundTasks):
 
 @app.get("/prefetch/status")
 async def prefetch_status():
-    """ดูจำนวน tickers ใน HourlyCache และเวลา fetch ล่าสุด"""
+    """ดูจำนวน tickers ใน HourlyCache + NewsCache และเวลา fetch ล่าสุด"""
     try:
-        from models import HourlyCache
+        from models import HourlyCache, NewsCache
         from sqlalchemy import func
         db_s = __import__("database").SessionLocal()
-        count = db_s.query(func.count(HourlyCache.id)).scalar() or 0
-        latest = db_s.query(func.max(HourlyCache.fetched_at)).scalar()
+        price_count  = db_s.query(func.count(HourlyCache.id)).scalar() or 0
+        price_latest = db_s.query(func.max(HourlyCache.fetched_at)).scalar()
+        news_count   = db_s.query(func.count(NewsCache.id)).scalar() or 0
+        news_latest  = db_s.query(func.max(NewsCache.fetched_at)).scalar()
         db_s.close()
         return {
-            "cached_entries": count,
-            "latest_fetch": latest.isoformat() if latest else None,
+            "price_cache":  {"entries": price_count, "latest_fetch": price_latest.isoformat() if price_latest else None},
+            "news_cache":   {"entries": news_count,  "latest_fetch": news_latest.isoformat()  if news_latest  else None},
         }
     except Exception as e:
         return {"error": str(e)}

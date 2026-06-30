@@ -529,6 +529,209 @@ class AgentOrchestrator:
                 db.close()
         return result
 
+    def _dedup_news(self, news_list):
+        """ตัด duplicate news ออก — เปรียบ title 50 ตัวแรก (case-insensitive)
+        yfinance + Finnhub มักดึงข่าว Reuters/AP เดียวกัน ต้องตัดซ้ำก่อนเก็บ cache"""
+        seen  = set()
+        dedup = []
+        for item in news_list:
+            key = item.get("title", "").lower().strip()[:50]
+            if key and key not in seen:
+                seen.add(key)
+                dedup.append(item)
+        return dedup
+
+    def _fetch_alpha_vantage_news(self, ticker, api_key, max_items=6):
+        """ดึงข่าวจาก Alpha Vantage NEWS_SENTIMENT endpoint
+        ใช้เป็น fallback ตอน 22:00 ถ้า NewsCache miss + MarketAux fail
+        Quota: 25 req/day → ใช้เฉพาะกรณีจำเป็น"""
+        try:
+            resp = requests.get(
+                "https://www.alphavantage.co/query",
+                params={
+                    "function": "NEWS_SENTIMENT",
+                    "tickers":  ticker,
+                    "limit":    max_items,
+                    "apikey":   api_key
+                },
+                timeout=15
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            feed = data.get("feed", [])
+            result = []
+            for article in feed[:max_items]:
+                result.append({
+                    "title":        article.get("title", ""),
+                    "summary":      article.get("summary", "") or "",
+                    "source":       article.get("source", "alpha_vantage"),
+                    "published_at": 0,
+                    "from_source":  "alpha_vantage",
+                    "sentiment_score": float(article.get("overall_sentiment_score", 0) or 0)
+                })
+            return result
+        except Exception as e:
+            self.log_action("นัตตี้", f"AV news {ticker}: {str(e)}", "WARNING")
+            return []
+
+    def natty_prefetch_news(self, stocks):
+        """Pre-fetch ข่าวจาก yfinance + Finnhub → เก็บใน NewsCache
+        เรียกโดย GitHub Actions ทุกชั่วโมง Mon-Fri 09:00-21:00 Bangkok
+        ดึงทีละ 1 ตัว sleep 20 วินาที เพื่อหลีกเลี่ยง rate limit"""
+        from models import NewsCache
+        from datetime import timedelta
+        import json as _json
+
+        FINNHUB_KEY = os.getenv("FINNHUB_API_KEY")
+
+        # วันจันทร์: ดึง 15/source ครอบคลุม ศุกร์+เสาร์+อาทิตย์+จันทร์ (4 วัน)
+        # วันอื่น: 8/source เพียงพอสำหรับ 24h news
+        is_monday   = datetime.now().weekday() == 0  # 0 = Monday
+        news_limit  = 15 if is_monday else 8
+        days_back   = 4  if is_monday else 3
+        mode_label  = "Monday mode (15/source, 4d)" if is_monday else "regular (8/source, 3d)"
+        self.log_action("นัตตี้-prefetch", f"📰 Starting news pre-fetch for {len(stocks)} tickers [{mode_label}]...", "INFO")
+
+        fetched = []
+        for i, ticker in enumerate(stocks):
+            if i > 0:
+                time.sleep(20)  # 20s ระหว่าง ticker เพื่อไม่ติด rate limit
+
+            combined_news = []
+
+            # ===== yfinance news =====
+            try:
+                yf_ticker = yf.Ticker(ticker)
+                yf_news = yf_ticker.news or []
+                for article in yf_news[:news_limit]:
+                    combined_news.append({
+                        "title":        article.get("title", ""),
+                        "summary":      article.get("summary", "") or "",
+                        "source":       article.get("publisher", "yfinance"),
+                        "published_at": article.get("providerPublishTime", 0),
+                        "from_source":  "yfinance"
+                    })
+                if yf_news:
+                    self.log_action("นัตตี้-prefetch", f"[yf] {ticker}: {min(len(yf_news), news_limit)} news", "INFO")
+            except Exception as e:
+                self.log_action("นัตตี้-prefetch", f"[yf] {ticker} news failed: {str(e)}", "WARNING")
+
+            # ===== Finnhub company-news =====
+            if FINNHUB_KEY:
+                try:
+                    from_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+                    to_date   = datetime.now().strftime("%Y-%m-%d")
+                    resp = requests.get(
+                        "https://finnhub.io/api/v1/company-news",
+                        params={"symbol": ticker, "from": from_date, "to": to_date, "token": FINNHUB_KEY},
+                        timeout=10
+                    )
+                    fh_articles = resp.json() if resp.status_code == 200 else []
+                    for article in (fh_articles or [])[:news_limit]:
+                        combined_news.append({
+                            "title":        article.get("headline", ""),
+                            "summary":      article.get("summary", "") or "",
+                            "source":       article.get("source", "finnhub"),
+                            "published_at": article.get("datetime", 0),
+                            "from_source":  "finnhub"
+                        })
+                    if fh_articles:
+                        self.log_action("นัตตี้-prefetch", f"[fh] {ticker}: {min(len(fh_articles), news_limit)} news", "INFO")
+                except Exception as e:
+                    self.log_action("นัตตี้-prefetch", f"[fh] {ticker} news failed: {str(e)}", "WARNING")
+
+            # ===== Deduplication =====
+            combined_news = self._dedup_news(combined_news)
+
+            if not combined_news:
+                self.log_action("นัตตี้-prefetch", f"⚠️  {ticker}: no news from any source", "WARNING")
+                continue
+
+            # ===== บันทึกลง NewsCache =====
+            db = None
+            try:
+                db = SessionLocal()
+                entry = NewsCache(
+                    ticker     = ticker,
+                    news_json  = _json.dumps(combined_news, ensure_ascii=False),
+                    news_count = len(combined_news)
+                )
+                db.add(entry)
+                cutoff = datetime.utcnow() - timedelta(hours=25)
+                db.query(NewsCache).filter(
+                    NewsCache.ticker == ticker,
+                    NewsCache.fetched_at < cutoff
+                ).delete()
+                db.commit()
+                fetched.append(ticker)
+                self.log_action("นัตตี้-prefetch", f"✅ {ticker}: cached {len(combined_news)} news items", "SUCCESS")
+            except Exception as e:
+                self.log_action("นัตตี้-prefetch", f"DB save {ticker}: {str(e)}", "WARNING")
+            finally:
+                if db:
+                    db.close()
+
+        self.log_action("นัตตี้-prefetch", f"📰 News pre-fetch done: {len(fetched)}/{len(stocks)} tickers cached", "SUCCESS")
+        return fetched
+
+    def _load_news_cache(self, stocks, max_age_hours=2):
+        """อ่าน NewsCache — คืน {ticker: [news_list]} ที่อายุไม่เกิน max_age_hours"""
+        from models import NewsCache
+        from sqlalchemy import func
+        import json as _json
+        result = {}
+        db = None
+        try:
+            db = SessionLocal()
+            from datetime import timedelta
+            cutoff = datetime.now() - timedelta(hours=max_age_hours)
+            latest_sq = (
+                db.query(NewsCache.ticker, func.max(NewsCache.fetched_at).label("max_at"))
+                .filter(NewsCache.ticker.in_(stocks), NewsCache.fetched_at >= cutoff)
+                .group_by(NewsCache.ticker)
+                .subquery()
+            )
+            rows = (
+                db.query(NewsCache)
+                .join(latest_sq, (NewsCache.ticker == latest_sq.c.ticker) &
+                                 (NewsCache.fetched_at == latest_sq.c.max_at))
+                .all()
+            )
+            for row in rows:
+                try:
+                    result[row.ticker] = _json.loads(row.news_json) if row.news_json else []
+                except Exception:
+                    pass
+            self.log_action("นัตตี้", f"NewsCache hit: {len(result)}/{len(stocks)} tickers (<=2h old)", "INFO")
+        except Exception as e:
+            self.log_action("นัตตี้", f"NewsCache read failed: {str(e)} — will fetch live", "WARNING")
+        finally:
+            if db:
+                db.close()
+        return result
+
+    def _format_prefetched_news(self, ticker, news_list, max_items=8):
+        """แปลง news list จาก NewsCache (yfinance/Finnhub) เป็น text สำหรับส่งให้หนุ่ม
+        max_items=8 สำหรับวันทั่วไป, max_items=15 สำหรับวันจันทร์ (3 วันข่าว)"""
+        if not news_list:
+            return "ไม่มีข่าวล่าสุด (จาก cache)"
+        shown = news_list[:max_items]
+        lines = [f"📰 ข่าวล่าสุด {len(shown)} ข่าว (จาก NewsCache):"]
+        for n in shown:
+            src     = n.get("source", "")
+            title   = n.get("title", "")
+            summary = n.get("summary", "")
+            pub     = n.get("published_at", 0)
+            try:
+                import datetime as _dt
+                pub_str = _dt.datetime.utcfromtimestamp(pub).strftime("%Y-%m-%d") if pub else ""
+            except Exception:
+                pub_str = ""
+            lines.append(f"• [{src}] {title} {pub_str}")
+            if summary:
+                lines.append(f"  -> {summary[:120]}")
+        return "\n".join(lines)
+
+
     def natty_get_news(self, stocks, days=1, include_weekend=False):
         """นัตตี้: ดึงข้อมูลหุ้นแบบ 3-tier fallback + ข่าวจาก MarketAux
         ✅ HourlyCache: ถ้ามี pre-fetch ราคาล่วงหน้าไม่เกิน 2 ชั่วโมง → ข้าม Tier1/Tier2 ทันที
@@ -539,7 +742,7 @@ class AgentOrchestrator:
         include_weekend=True: วันจันทร์ — ดึงข่าวตั้งแต่ศุกร์ 22:00"""
         self.log_action("นัตตี้", f"Starting fetch ({'Monday mode' if include_weekend else 'regular mode'})...", "INFO")
 
-        # ===== ตรวจ HourlyCache ก่อน =====
+        # ===== ตรวจ HourlyCache (ราคา) + NewsCache (ข่าว) ก่อน =====
         cached_prices = self._load_hourly_cache(stocks, max_age_hours=2)
         cache_hit  = set(cached_prices.keys())
         cache_miss = [t for t in stocks if t not in cache_hit]
@@ -547,6 +750,10 @@ class AgentOrchestrator:
             self.log_action("นัตตี้", f"✅ Using HourlyCache for {len(cache_hit)} tickers — skipping Tier1/Tier2 for those", "INFO")
         if cache_miss:
             self.log_action("นัตตี้", f"Cache miss for {len(cache_miss)} tickers — will fetch live: {cache_miss}", "INFO")
+
+        cached_news = self._load_news_cache(stocks, max_age_hours=2)
+        if cached_news:
+            self.log_action("นัตตี้", f"✅ NewsCache hit for {len(cached_news)} tickers — skipping MarketAux for those", "INFO")
 
         FINNHUB_KEY       = os.getenv("FINNHUB_API_KEY")
         ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
@@ -709,8 +916,17 @@ class AgentOrchestrator:
             if data.get("pe_ratio") is None:
                 self.log_action("นัตตี้", f"⚠️  {ticker}: P/E unavailable (loss-making co. หรือ API ไม่มีข้อมูล)", "WARNING")
 
-            # ✅ P3: ดึงข่าวจาก MarketAux (sentiment score สำเร็จรูป ไม่ต้องสรุปด้วย Haiku)
-            if MARKETAUX_KEY:
+            # ✅ P3: ดึงข่าว — chain: NewsCache → MarketAux → Alpha Vantage → ไม่มีข่าว
+            if ticker in cached_news:
+                # Tier A: NewsCache (pre-fetched hourly จาก yfinance + Finnhub)
+                news_list_raw = cached_news[ticker]
+                max_show = 15 if include_weekend else 8
+                data["news_summary"]  = self._format_prefetched_news(ticker, news_list_raw, max_items=max_show)
+                data["news_count"]    = min(len(news_list_raw), max_show)
+                data["avg_sentiment"] = None  # pre-fetch ไม่มี sentiment score
+                self.log_action("นัตตี้", f"[NewsCache] ✅ {ticker}: {data['news_count']} items from cache (max={max_show})", "INFO")
+            elif MARKETAUX_KEY:
+                # Tier B: MarketAux (live — มี sentiment score)
                 news_list = self._fetch_marketaux_news(ticker, MARKETAUX_KEY, include_weekend=include_weekend)
                 data["news_summary"] = self._format_news_for_prompt(ticker, news_list)
                 data["news_count"]   = len(news_list)
@@ -718,8 +934,23 @@ class AgentOrchestrator:
                     sum(n["sentiment_score"] for n in news_list if n.get("sentiment_score") is not None)
                     / max(1, sum(1 for n in news_list if n.get("sentiment_score") is not None))
                 ) if news_list else None
+                self.log_action("นัตตี้", f"[MarketAux] {ticker}: fetched {len(news_list)} news live", "INFO")
+            elif ALPHA_VANTAGE_KEY:
+                # Tier C: Alpha Vantage NEWS_SENTIMENT (quota 25/day — ใช้เป็น last resort)
+                av_news = self._fetch_alpha_vantage_news(ticker, ALPHA_VANTAGE_KEY)
+                if av_news:
+                    data["news_summary"]  = self._format_prefetched_news(ticker, av_news, max_items=8)
+                    data["news_count"]    = len(av_news)
+                    data["avg_sentiment"] = (
+                        sum(n.get("sentiment_score", 0) or 0 for n in av_news) / len(av_news)
+                    )
+                    self.log_action("นัตตี้", f"[AV-news] {ticker}: fetched {len(av_news)} items (fallback)", "INFO")
+                else:
+                    data["news_summary"]  = "ไม่มีข่าว — ทุก source ล้มเหลว"
+                    data["news_count"]    = 0
+                    data["avg_sentiment"] = None
             else:
-                data["news_summary"]  = "ไม่มี MarketAux key — ไม่ได้ดึงข่าว"
+                data["news_summary"]  = "ไม่มีข่าว — ไม่มี key สำหรับ news API"
                 data["news_count"]    = 0
                 data["avg_sentiment"] = None
 
