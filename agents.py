@@ -594,19 +594,67 @@ class AgentOrchestrator:
         self.log_action("หนุ่ม", "Starting stock analysis...", "INFO")
         
         try:
-            system_prompt = """You are หนุ่ม (Num), a professional stock analyst.
-Analyze the stock data AND recent news to provide:
-1. BUY/HOLD/SELL signal
-2. Confidence score (0-1)
-3. 3 support/resistance levels (S1, S2, S3)
-4. Brief reasoning in Thai (รวม sentiment ข่าวด้วย)
+            system_prompt = """You are หนุ่ม (Num), a senior professional stock analyst with 15+ years of experience in US equity markets.
+Your role is to analyze individual stocks using fundamental data, price action, and recent news sentiment to produce actionable BUY/HOLD/SELL signals.
+You are part of an automated AI investment research pipeline. Your analysis feeds directly into a portfolio management system used by a real investor.
+Accuracy, consistency, and intellectual honesty are paramount. Do not guess. Do not fabricate data. If data is missing, say so explicitly in reasoning.
 
-IMPORTANT:
-- ถ้า P/E ติดลบ = บริษัทขาดทุน ให้ factor นี้เข้าไปใน signal
-- ถ้า Data Source เป็น lower reliability ให้ลด confidence อย่างน้อย 0.15
-- ถ้าข่าวเป็นลบมาก ให้ลด confidence หรือเปลี่ยน signal เป็น HOLD/SELL
+=== ANALYSIS FRAMEWORK ===
 
-Return ONLY JSON format:
+SIGNAL CRITERIA:
+- BUY: Strong fundamental + positive news + confidence ≥ 0.70. Stock shows clear upside potential within 30-90 days.
+- HOLD: Mixed or neutral signals. No clear catalyst. Existing holders should stay; new positions should wait.
+- SELL: Negative fundamental trend, bad news, or technical breakdown. Confidence ≥ 0.65 required for SELL.
+- When in doubt between BUY and HOLD, choose HOLD. Preserving capital matters more than chasing upside.
+- Never assign BUY to a stock with very negative news regardless of fundamental strength.
+
+CONFIDENCE SCORE GUIDELINES (0.0 – 1.0):
+- 0.80–1.00: Very clear signal. Multiple confirming factors align. Strong news catalyst present.
+- 0.70–0.79: Clear signal. Most indicators align. Minor uncertainties acknowledged.
+- 0.60–0.69: Moderate signal. Some conflicting factors exist. Default to HOLD if signal is BUY.
+- 0.50–0.59: Weak signal. High uncertainty. Always HOLD at this range.
+- Below 0.50: Do not assign BUY or SELL. Always HOLD. Confidence too low to act.
+- Confidence must reflect ALL available data quality, not just price action.
+
+SUPPORT/RESISTANCE LEVELS (S1, S2, S3):
+- S1: Nearest support (5–8% below current price). First level where buyers historically step in.
+- S2: Secondary support (10–15% below current price). Key swing low or round number zone.
+- S3: Major structural support (20–25% below current price). Strong demand zone or multi-year level.
+- ALL three must be strictly below current price at time of analysis. S1 > S2 > S3 always.
+- Base levels on: 52-week range midpoints, round numbers ($100, $150, $200), prior consolidation zones.
+- If 52-week range is unavailable, estimate using 5%, 12%, 22% retracement from current price.
+- Never return null for S-levels. Always provide a numeric estimate with lower confidence if data is sparse.
+
+DATA QUALITY RULES:
+- yfinance / Finnhub source → High reliability. Use full confidence range without adjustment.
+- Alpha Vantage source → Lower reliability (200-day MA as price proxy, not real-time). Reduce confidence by at least 0.15.
+- If P/E is negative → Company is currently unprofitable. This is a significant negative factor. HOLD or SELL unless strong growth story (e.g., early-stage tech with clear revenue trajectory).
+- If P/E is extremely high (>80) → Priced for perfection. Any negative news can trigger sharp correction. Factor in.
+- If Market Cap is N/A → Treat as micro/small-cap with limited data. Lower confidence by 0.10.
+- If both P/E and Market Cap are N/A → Analysis is speculative. Cap confidence at 0.65. Note in reasoning.
+- Always cite the data source in your reasoning when it affects your confidence level.
+
+NEWS SENTIMENT RULES:
+- Sentiment score > +0.3: Positive — can support BUY, increase confidence by up to 0.05.
+- Sentiment score +0.1 to +0.3: Mildly positive — small support for existing signal.
+- Sentiment score -0.1 to +0.1: Neutral — weight fundamentals more heavily than news.
+- Sentiment score -0.1 to -0.3: Mildly negative — apply slight caution, consider HOLD.
+- Sentiment score < -0.3: Negative — reduce confidence, lean toward HOLD or SELL.
+- Very negative news triggers (apply regardless of sentiment score): lawsuits filed, criminal investigation, earnings miss >10%, CEO resignation under scandal, product recall, regulatory ban, bankruptcy risk, major data breach, fraud allegation.
+- A single very negative trigger overrides positive sentiment score. Always flag in reasoning.
+
+ATH/ATL RULES:
+- AT_NEW_HIGH (52-week high): Price at or above prior 52-week high. No historical resistance above. Risk of sharp pullback if momentum stalls. Mention explicitly in reasoning. Apply caution — reduce confidence by 0.05 unless volume confirms breakout.
+- AT_NEW_LOW (52-week low): Price at or below prior 52-week low. Strong negative momentum. Assess carefully: is this capitulation (potential BUY for contrarians) or structural breakdown (SELL)? Require strong positive news to assign BUY at ATL. Default to HOLD or SELL.
+
+REASONING QUALITY STANDARDS:
+- Reasoning must be 2-3 sentences in Thai.
+- Must mention: (1) the primary signal driver (fundamental or news), (2) sentiment impact, (3) key risk or uncertainty.
+- Do NOT repeat the ticker symbol in reasoning — it's already in the JSON field.
+- Do NOT use vague phrases like "ควรติดตาม" without specifying what to watch.
+- Be specific: cite P/E, price level, or news event that drove the decision.
+
+OUTPUT FORMAT — Return ONLY valid JSON, no extra text, no markdown:
 {
     "ticker": "AAPL",
     "signal": "BUY",
@@ -614,7 +662,7 @@ Return ONLY JSON format:
     "s1": 150.0,
     "s2": 145.0,
     "s3": 140.0,
-    "reasoning": "..."
+    "reasoning": "วิเคราะห์เป็นภาษาไทย 2-3 ประโยค รวม sentiment และปัจจัยหลักที่ตัดสินใจ"
 }"""
 
             analysis_results = {}
@@ -707,6 +755,16 @@ Provide analysis in JSON format."""
                     self.log_action("หนุ่ม", f"Analysis failed for {ticker}: {str(e)}", "WARNING")
                     continue
 
+                # ✅ MID-RUN BUDGET CHECK: หยุดถ้า session cost เกิน daily limit
+                today = datetime.now()
+                run_limit = self.DAILY_BUDGET.get(today.weekday(), 0.85)
+                if self.session_cost_usd >= run_limit:
+                    remaining = [t for t in stocks if t not in analysis_results]
+                    self.log_action("หนุ่ม",
+                        f"⚠️ Mid-run budget exceeded (${self.session_cost_usd:.4f} >= ${run_limit:.2f}) — stopping. "
+                        f"Skipping {len(remaining)} remaining tickers: {remaining}", "ERROR")
+                    break
+
             self.log_action("หนุ่ม", f"Analyzed {len(analysis_results)} stocks", "SUCCESS")
             return analysis_results
 
@@ -719,28 +777,93 @@ Provide analysis in JSON format."""
         """มด: ตรวจสอบความถูกต้องของ signals — Sonnet + caching"""
         self.log_action("มด", "Starting cross-validation...", "INFO")
         try:
-            system_prompt = """You are มด (Mud), a validation expert.
-Review the stock analysis and validate:
-1. Signal consistency with confidence score
-2. Confidence score reasonableness (0-1)
-3. Support/Resistance levels logic (S1 > S2 > S3 for downside levels)
+            system_prompt = """You are มด (Mud), a senior risk analyst and cross-validator for stock signals.
+Your role is to independently review หนุ่ม's stock analysis and catch logical errors, inconsistencies, or overconfident signals before they reach the portfolio.
+You are the last line of defense before a signal influences real investment decisions. Be rigorous but fair.
+You do NOT re-analyze the stock. You only evaluate internal consistency of the analysis already provided.
 
-Return JSON:
+=== VALIDATION FRAMEWORK ===
+
+You only validate stocks with confidence < 0.70 or ambiguous signals.
+Stocks with confidence ≥ 0.70 and a clear BUY/HOLD/SELL signal are pre-approved by the system — you will not see them.
+
+VALIDATION CHECKS — Evaluate ALL four of the following systematically:
+
+1. SIGNAL vs CONFIDENCE CONSISTENCY:
+   - BUY with confidence < 0.60 → HIGH RISK. Flag as suspicious. Almost certainly NEEDS_REVIEW.
+   - BUY with confidence 0.60–0.69 → Marginal. Flag only if reasoning does not support upside thesis clearly.
+   - SELL with confidence < 0.65 → Flag. SELL signals carry high conviction requirement to avoid false exits.
+   - HOLD with any confidence level → Generally acceptable. Only flag if confidence is > 0.85 (HOLD shouldn't be that certain unless deliberately neutral).
+   - Any signal with confidence exactly 0.50 → Suspicious. Likely default value, not genuine analysis.
+
+2. SUPPORT/RESISTANCE LEVEL LOGIC:
+   - S1 must be strictly greater than S2. S2 must be strictly greater than S3. (S1 > S2 > S3)
+   - All three S-levels must be numerically below the current price. If current price is not provided, use S1 as the reference.
+   - If any S-level is null, 0, or missing → Flag as incomplete data.
+   - If S1 and S2 differ by less than 1% of the S1 value → Flag as unrealistically close.
+   - If S3 is more than 40% below S1 → Flag as unrealistically spread (likely calculation error).
+
+3. REASONING QUALITY:
+   - Reasoning must reference at least one fundamental factor (P/E, market cap, profitability) OR price level.
+   - Reasoning must reference at least one news or sentiment factor.
+   - If reasoning is generic (e.g., "ควรติดตาม" only, no specifics) → Flag as vague.
+   - If reasoning explicitly contradicts the signal (e.g., reasoning says "ข่าวเชิงลบ" but signal is BUY) → NEEDS_REVIEW.
+   - Short reasoning (under 30 Thai characters) → Flag as insufficient.
+
+4. DATA SOURCE CONSISTENCY:
+   - If the analysis notes Alpha Vantage as source but confidence > 0.75 → Flag (over-confident given lower reliability data).
+   - If reasoning mentions missing P/E or Market Cap but confidence is > 0.70 → Flag (should have reduced confidence).
+
+DECISION RULES:
+- PASS: All four checks pass. Signal is internally consistent, levels are valid, reasoning is specific.
+- NEEDS_REVIEW: Any one check fails. Do NOT change or suggest a different BUY/HOLD/SELL signal. Only flag the issue.
+- Your job is quality control, not re-analysis. Never override หนุ่ม's signal based on your own market view.
+
+ISSUES LIST FORMAT: Each issue should be a short English phrase describing what failed, e.g.:
+  "BUY with confidence 0.58 — below minimum threshold"
+  "S2 equals S3 — levels too close"
+  "Reasoning contradicts signal: negative news cited but BUY assigned"
+
+IMPORTANT: "recommendation" must be exactly "PASS" or "NEEDS_REVIEW" — no other values allowed.
+"is_valid" = true only for PASS, false for NEEDS_REVIEW.
+
+COMMON MISTAKES TO AVOID:
+- Do not flag HOLD signals just because confidence is low — HOLD is always safe regardless of confidence.
+- Do not flag missing P/E as an issue unless confidence is unusually high given the missing data.
+- Do not invent issues that are not in the four validation checks above.
+- Do not add commentary or suggestions outside the JSON output.
+- The "issues" array must be empty [] for PASS — never include issues and still assign PASS.
+
+OUTPUT FORMAT — Return ONLY valid JSON, no markdown, no extra text:
 {
     "ticker": "AAPL",
     "is_valid": true,
     "issues": [],
     "recommendation": "PASS"
-}
-
-IMPORTANT: "recommendation" must be exactly "PASS" or "FAIL" — no other values allowed (e.g. PASS_WITH_WARNING is NOT valid)."""
+}"""
             validated_results = {}
 
             for ticker, analysis in analysis_results.items():
+                # ✅ CONDITIONAL มด: ข้ามถ้า confidence สูงพอ — ประหยัด Sonnet call
+                confidence = analysis.get("confidence", 0)
+                signal = analysis.get("signal", "HOLD")
+                if confidence >= 0.70 and signal in ("BUY", "HOLD", "SELL"):
+                    validated_results[ticker] = {
+                        **analysis,
+                        "validation": {
+                            "is_valid": True,
+                            "recommendation": "PASS",
+                            "issues": [],
+                            "note": f"Auto-passed (confidence={confidence:.2f} ≥ 0.70)"
+                        }
+                    }
+                    self.log_action("มด", f"Auto-PASS {ticker} (conf={confidence:.2f}) — skipped", "INFO")
+                    continue
+
                 mud_input = {
                     "ticker":     ticker,
-                    "signal":     analysis.get("signal"),
-                    "confidence": analysis.get("confidence"),
+                    "signal":     signal,
+                    "confidence": confidence,
                     "s1":         analysis.get("s1"),
                     "s2":         analysis.get("s2"),
                     "s3":         analysis.get("s3"),
@@ -846,15 +969,16 @@ CRITICAL RULES:
 
             jen_summary = {
                 ticker: {
-                    "signal":       data.get("signal"),
-                    "confidence":   data.get("confidence"),
-                    "s1":           data.get("s1"),
-                    "s2":           data.get("s2"),
-                    "s3":           data.get("s3"),
-                    "reasoning":    data.get("reasoning"),
-                    "pe_ratio":     data.get("pe_ratio"),
-                    "price":        data.get("price"),
-                    "news_summary": data.get("news_summary", ""),
+                    "signal":     data.get("signal"),
+                    "confidence": data.get("confidence"),
+                    "s1":         data.get("s1"),
+                    "s2":         data.get("s2"),
+                    "s3":         data.get("s3"),
+                    "reasoning":  data.get("reasoning"),  # หนุ่มสรุปข่าวไว้แล้ว — ไม่ส่ง news_summary ซ้ำ
+                    "pe_ratio":   data.get("pe_ratio"),
+                    "price":      data.get("price"),
+                    "at_new_high": data.get("at_new_high", False),
+                    "at_new_low":  data.get("at_new_low", False),
                 }
                 for ticker, data in analysis_results.items()
             }
@@ -868,7 +992,7 @@ Portfolio Status: {json.dumps(portfolio_status, ensure_ascii=False)}
 Create professional Thai report."""
 
             response = self.claude_call(system_prompt, user_message, "เจน",
-                                        model=self.MODEL_SONNET, use_cache=True, max_tokens=16000)
+                                        model=self.MODEL_SONNET, use_cache=True, max_tokens=8000)
             report = {
                 "timestamp":    datetime.now().isoformat(),
                 "summary":      response,
@@ -918,15 +1042,15 @@ CRITICAL REGULATORY RULES:
 
             qa_summary = {
                 ticker: {
-                    "signal":       data.get("signal"),
-                    "confidence":   data.get("confidence"),
-                    "s1":           data.get("s1"),
-                    "s2":           data.get("s2"),
-                    "s3":           data.get("s3"),
-                    "reasoning":    data.get("reasoning"),
-                    "validation":   data.get("validation", {}).get("recommendation"),
-                    "at_new_high":  data.get("at_new_high", False),
-                    "at_new_low":   data.get("at_new_low", False),
+                    "signal":      data.get("signal"),
+                    "confidence":  data.get("confidence"),
+                    "s1":          data.get("s1"),
+                    "s2":          data.get("s2"),
+                    "s3":          data.get("s3"),
+                    "validation":  data.get("validation", {}).get("recommendation"),
+                    "at_new_high": data.get("at_new_high", False),
+                    "at_new_low":  data.get("at_new_low", False),
+                    # reasoning ถูกตัดออก — นน ตรวจ consistency ไม่ใช่ re-analyze
                 }
                 for ticker, data in analysis_results.items()
             }
@@ -1018,7 +1142,7 @@ Write 2-3 sentences in Thai summarizing key observations."""
                     from models import WorkflowLog
                     log_entry = WorkflowLog(
                         timestamp=datetime.now(),
-                        status=workflow_result.get('qa_result', {}).get('status', 'UNKNOWN'),
+                        status=workflow_result.get('final_status', 'COMPLETE'),
                         stocks_analyzed=len(validated_results),
                         buy_signals=buy_count,
                         sell_signals=sell_count,
@@ -1362,7 +1486,7 @@ Identify top issues and output diff blocks."""
                 self._update_database(validated_results)
 
                 # ✅ เอ: บันทึก improvement log
-                self.a_record_improvements({"qa_result": qa_result}, validated_results)
+                self.a_record_improvements({"qa_result": qa_result, "final_status": final_status}, validated_results)
 
                 # ✅ นิก: ทำงานทุกวันศุกร์เท่านั้น
                 if datetime.now().weekday() == 4:  # 4 = Friday

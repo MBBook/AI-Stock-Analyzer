@@ -85,9 +85,16 @@ export default function DashboardV4() {
     }
   };
 
+  const MAX_TICKERS = 30;
+
   const handleAddStock = async () => {
     if (!newTicker.trim()) return;
-    
+
+    if (stocks.length >= MAX_TICKERS) {
+      alert(`⚠️ ไม่สามารถเพิ่มได้ — ระบบรองรับสูงสุด ${MAX_TICKERS} tickers เท่านั้น\nปัจจุบัน: ${stocks.length}/${MAX_TICKERS}`);
+      return;
+    }
+
     setLoading(true);
     try {
       const response = await fetch(`${API_URL}/stocks?ticker=${newTicker.toUpperCase()}`, {
@@ -133,7 +140,16 @@ export default function DashboardV4() {
   const StockTab = () => (
     <div className="space-y-6">
       <div style={{ padding: '20px', backgroundColor: colors.surface2, borderRadius: '8px', border: `1px solid ${colors.primaryLight}` }}>
-        <h2 style={{ color: colors.primary, marginBottom: '15px' }}>➕ เพิ่มหุ้น</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+          <h2 style={{ color: colors.primary }}>➕ เพิ่มหุ้น</h2>
+          <span style={{
+            color: stocks.length >= MAX_TICKERS ? colors.error : colors.neutral,
+            fontSize: '13px',
+            fontWeight: stocks.length >= MAX_TICKERS ? 'bold' : 'normal'
+          }}>
+            {stocks.length >= MAX_TICKERS ? '🚫 เต็มแล้ว' : ''} {stocks.length}/{MAX_TICKERS} tickers
+          </span>
+        </div>
         <div style={{ display: 'flex', gap: '10px' }}>
           <input
             type="text"
