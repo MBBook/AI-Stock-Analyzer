@@ -1337,9 +1337,10 @@ Create a professional market report summarizing:
 
 CRITICAL RULES:
 1. Write in Thai.
-2. Return JSON with a 'report_html' field containing the complete formatted report.
-3. DO NOT embed or include ANY raw JavaScript code, scripts, dynamic templates, or tags like 'new Date()' or '.toLocaleDateString()' inside the HTML content.
-4. All dates, times, and statistics must be rendered as plain static Thai text only. No dynamic calculations allowed inside the report."""
+2. Return PLAIN TEXT only — NO HTML tags, NO <div>, NO <style>, NO <table>, NO markdown code blocks.
+3. Use only plain Thai text with newlines and emojis for formatting.
+4. All signal counts (BUY/HOLD/SELL) and ticker names MUST match exactly what is given in the Analysis Results data. Do NOT invent or change signals.
+5. All dates and statistics must be plain static Thai text only."""
 
             jen_summary = {
                 ticker: {
@@ -1359,11 +1360,23 @@ CRITICAL RULES:
 
             retry_section = f"\n\nFEEDBACK FROM PREVIOUS ATTEMPT:\n{retry_hint}\nPlease address the above issues in this report." if retry_hint else ""
 
+            total_stocks = len(analysis_results)
+            buy_list  = [t for t, d in analysis_results.items() if d.get('signal') == 'BUY']
+            hold_list = [t for t, d in analysis_results.items() if d.get('signal') == 'HOLD']
+            sell_list = [t for t, d in analysis_results.items() if d.get('signal') == 'SELL']
+
             user_message = f"""Generate report based on this data:
+
+FIXED SIGNAL SUMMARY (DO NOT CHANGE):
+- Total stocks analyzed: {total_stocks}
+- BUY ({len(buy_list)}): {', '.join(buy_list) if buy_list else 'none'}
+- HOLD ({len(hold_list)}): {', '.join(hold_list) if hold_list else 'none'}
+- SELL ({len(sell_list)}): {', '.join(sell_list) if sell_list else 'none'}
+
 Analysis Results: {json.dumps(jen_summary, ensure_ascii=False)}
 Portfolio Status: {json.dumps(portfolio_status, ensure_ascii=False)}
 {retry_section}
-Create professional Thai report."""
+Create professional Thai plain-text report."""
 
             response = self.claude_call(system_prompt, user_message, "เจน",
                                         model=self.MODEL_SONNET, use_cache=True, max_tokens=8000)
