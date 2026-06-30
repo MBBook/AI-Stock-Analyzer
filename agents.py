@@ -1486,7 +1486,7 @@ Identify top issues and output diff blocks."""
                 self._update_database(validated_results)
 
                 # ✅ เอ: บันทึก improvement log
-                self.a_record_improvements({"qa_result": qa_result, "final_status": final_status}, validated_results)
+                self.a_record_improvements({"qa_result": qa_result, "final_status": "COMPLETE"}, validated_results)
 
                 # ✅ นิก: ทำงานทุกวันศุกร์เท่านั้น
                 if datetime.now().weekday() == 4:  # 4 = Friday
