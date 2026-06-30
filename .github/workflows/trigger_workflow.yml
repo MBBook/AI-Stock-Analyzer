@@ -15,7 +15,8 @@ jobs:
         run: |
           echo "⏰ Waking up Render..."
           for i in {1..15}; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "${{ secrets.RENDER_URL }}/health")
+            # || echo "000" ป้องกัน set -e จับ curl timeout (exit 28) แล้วออกก่อน retry
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "${{ secrets.RENDER_URL }}/health" || echo "000")
             echo "Attempt $i: HTTP $STATUS"
             if [ "$STATUS" = "200" ]; then
               echo "✅ Server is awake!"
@@ -40,7 +41,8 @@ jobs:
           fi
 
           echo "POST $ENDPOINT"
-          RESPONSE=$(curl -s -X POST "$ENDPOINT" --max-time 30)
+          # || echo "" ป้องกัน set -e จับ curl timeout แล้วออกก่อน check status
+          RESPONSE=$(curl -s -X POST "$ENDPOINT" --max-time 60 || echo "")
           echo "Response: $RESPONSE"
 
           STATUS=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','unknown'))" 2>/dev/null || echo "parse_error")
