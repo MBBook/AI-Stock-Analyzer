@@ -981,6 +981,7 @@ SIGNAL CRITERIA:
 - SELL: Negative fundamental trend, bad news, or technical breakdown. Confidence ≥ 0.65 required for SELL.
 - When in doubt between BUY and HOLD, choose HOLD. Preserving capital matters more than chasing upside.
 - Never assign BUY to a stock with very negative news regardless of fundamental strength.
+- HARD RULE: NEVER assign BUY if confidence < 0.70. If analysis leans BUY but confidence is 0.60–0.69, assign HOLD instead. No exceptions.
 
 CONFIDENCE SCORE GUIDELINES (0.0 – 1.0):
 - 0.80–1.00: Very clear signal. Multiple confirming factors align. Strong news catalyst present.
