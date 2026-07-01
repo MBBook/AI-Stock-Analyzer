@@ -41,15 +41,7 @@ jobs:
 
             # Check if already ran today (UTC date)
             HISTORY=$(curl -s --max-time 10 "${{ secrets.RENDER_URL }}/workflow/history" || echo "")
-            RAN_TODAY=$(echo "$HISTORY" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    ran = any(r.get('timestamp','').startswith('$TODAY') for r in d.get('runs', []))
-    print('yes' if ran else 'no')
-except:
-    print('unknown')
-" 2>/dev/null || echo "unknown")
+            RAN_TODAY=$(echo "$HISTORY" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('yes' if any(r.get('timestamp','').startswith('$TODAY') for r in d.get('runs',[])) else 'no')" 2>/dev/null || echo "unknown")
             echo "Ran today: $RAN_TODAY"
 
             if [ "$RAN_TODAY" = "no" ]; then
