@@ -92,12 +92,15 @@
 
 ## 6. Daily Budget
 
+> ปรับ 2026-07-01: MBBook ตั้งเป้างบจริงไว้ที่ **$10/เดือน (เป้า) / $12/เดือน (เพดานที่รับได้)** — เดิม DAILY_BUDGET ในโค้ดตั้งเพดานไว้ $19.40 สูงกว่าเป้าจริงเกือบเท่าตัว จึงตึงลงให้เหลือ buffer ~15% เหนือ cost จริงที่วัดได้ (Tue-Wed จริง ~$0.52/run) แทน
+
 | วัน | Limit/วัน | หมายเหตุ |
 |-----|-----------|---------|
-| Monday | $1.20 | news 3 วัน (Sat+Sun+Mon) |
-| Tue–Thu | $0.85 | ปกติ |
-| Friday | $1.10 | + นิก optimize |
-| **Monthly ceiling** | **~$19.40** | ต่ำกว่า $20 |
+| Monday | $0.85 | news 3 วัน (Sat+Sun+Mon) — ยังไม่มีข้อมูลจริง ใช้ประมาณการ + buffer |
+| Tue–Thu | $0.60 | ปกติ — cost จริงวัดแล้ว ~$0.52/run |
+| Friday | $0.75 | + นิก optimize — ยังไม่มีข้อมูลจริง ใช้ประมาณการ + buffer |
+| **Monthly ceiling (โค้ด)** | **~$13.60** | เผื่อ buffer เหนือเพดานจริง $12 ไว้ก่อน (ดู [Pending.md](Pending.md) หัวข้อทบทวนหลัง 3 เดือน) |
+| **เป้าหมายจริงของ MBBook** | **$10 เป้า / $12 เพดาน** | ติดตามของจริงผ่าน `GET /costs/summary` (dashboard tab Status) |
 
 ---
 
@@ -225,7 +228,7 @@ Dashboard_Share/
 
 **ถ้า Defect 2, 4 หรือ 8 เกิดจริงวันจันทร์:**
 - OOM → เพิ่ม `gc.collect()` หลัง checkpoint แต่ละ ticker
-- Budget เกิน → ปรับ limit เป็น $2.00 (Tue-Thu) / $2.50 (Mon) หรือ downgrade มด จาก Sonnet → Haiku
+- Budget เกิน → ⚠️ (อัพเดต 2026-07-01) **ห้ามแก้โดยเพิ่ม limit แล้ว** เพราะเป้าจริงของ MBBook คือ $10-12/เดือน (ดู section 6) การขึ้น limit จะยิ่งหนีเป้าไปอีก — ให้แก้ที่ต้นทุนแทน เช่น downgrade มด จาก Sonnet → Haiku, ลดจำนวน tickers, หรือขยาย prompt caching ให้ครอบคลุมมากขึ้น
 
 ---
 

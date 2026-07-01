@@ -97,13 +97,16 @@ class AgentOrchestrator:
     }
 
     # Limit รายวัน (USD) — จันทร์สูงกว่าเพราะดึงข่าว 72 ชม., ศุกร์บวกค่า นิก
-    # Monthly ceiling: (4×1.20) + (12×0.85) + (4×1.10) = $19.40 ✅ ใต้ $20
+    # ปรับ 2026-07-01: เดิมเพดาน $19.40/เดือน สูงกว่าเป้าจริงของ MBBook ($10 เป้า / $12 เพดานที่รับได้) เกือบเท่าตัว
+    #   → ตึงลงเหลือ buffer ~15% เหนือ cost จริงโดยประมาณของแต่ละวัน (Tue-Wed วัดจริงแล้ว ~$0.52/run)
+    # Monthly ceiling: (4×0.85) + (12×0.60) + (4×0.75) = $13.60 (เผื่อ buffer เหนือเพดาน $12 ไว้ก่อน
+    #   เพราะยังไม่มีข้อมูลจริงของวันจันทร์ — ดู Pending.md หัวข้อ "ทบทวน cost หลัง 3 เดือน" แล้วปรับอีกทีเมื่อมีข้อมูลจริง)
     DAILY_BUDGET = {
-        0: 1.20,  # Monday    — news 72hr
-        1: 0.85,  # Tuesday
-        2: 0.85,  # Wednesday
-        3: 0.85,  # Thursday
-        4: 1.10,  # Friday    — + นิก optimize
+        0: 0.85,  # Monday    — news 72hr
+        1: 0.60,  # Tuesday
+        2: 0.60,  # Wednesday
+        3: 0.60,  # Thursday
+        4: 0.75,  # Friday    — + นิก optimize
     }
 
     def claude_call(self, system_prompt, user_message, agent_name="Claude", model=None, use_cache=False, max_tokens=4096):
@@ -177,7 +180,7 @@ class AgentOrchestrator:
         """ตรวจสอบ cost วันนี้ก่อนรัน workflow
         Returns: (ok: bool, today_spent: float, daily_limit: float)"""
         today = datetime.now()
-        limit = self.DAILY_BUDGET.get(today.weekday(), 0.85)
+        limit = self.DAILY_BUDGET.get(today.weekday(), 0.60)
         try:
             from models import WorkflowLog
             from sqlalchemy import func
@@ -1132,7 +1135,7 @@ Provide analysis in JSON format."""
 
                 # ✅ MID-RUN BUDGET CHECK: หยุดถ้า session cost เกิน daily limit
                 today = datetime.now()
-                run_limit = self.DAILY_BUDGET.get(today.weekday(), 0.85)
+                run_limit = self.DAILY_BUDGET.get(today.weekday(), 0.60)
                 if self.session_cost_usd >= run_limit:
                     remaining = [t for t in stocks if t not in analysis_results]
                     self.log_action("หนุ่ม",
