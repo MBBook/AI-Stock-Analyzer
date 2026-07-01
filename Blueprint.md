@@ -1,7 +1,7 @@
 # Blueprint — AI Stock Analyzer V4
 
 > อ่านไฟล์นี้ก่อนเริ่มงานทุกครั้ง
-> อัพเดตล่าสุด: 2026-06-27
+> อัพเดตล่าสุด: 2026-07-01
 
 ---
 
@@ -18,11 +18,11 @@
 
 | Agent | ชื่อ | หน้าที่ | Model |
 |-------|------|---------|-------|
-| 1 | **นัตตี้** | ดึงราคา + news (3-tier: yfinance → Finnhub → Alpha Vantage) | — |
+| 1 | **นัตตี้** | ดึงราคา + news (3-tier: yfinance → Finnhub → Alpha Vantage) + pre-fetch รายชั่วโมงลง HourlyCache/NewsCache | — |
 | 2 | **หนุ่ม** | วิเคราะห์ fundamental + ให้ BUY/HOLD/SELL signal | Sonnet |
 | 3 | **มด** | Cross-validate ผล หนุ่ม — flag NEEDS_REVIEW ถ้าน่าสงสัย | Sonnet |
 | 4 | **แฮรี่** | ตรวจ portfolio alignment กับ signal | — |
-| 5 | **เจน** | สร้าง HTML report สรุปตลาด | Sonnet + cache |
+| 5 | **เจน** | สร้าง plain-text report สรุปตลาด (inject signal summary ป้องกัน hallucinate) | Sonnet + cache |
 | 6 | **นน** | QA ตรวจ report — PASS/REJECT | Sonnet + cache |
 | 7 | **เก้า** | Retry coordinator ถ้า QA REJECT (max 3 รอบ) | Haiku |
 | 8 | **เอ** | บันทึก WorkflowLog ลง DB + สรุป 2-3 ประโยค | Haiku |
@@ -63,7 +63,9 @@
 | `stocks` | ticker, signal, confidence, price, s1/s2/s3, at_new_high, at_new_low, updated_at | ทุก agent |
 | `trades` | ticker, action, shares, price, timestamp | โคลสัน |
 | `portfolio` | ticker, shares, avg_cost, current_value, total_gain | แฮรี่ |
-| `workflow_logs` | timestamp, status, stocks_analyzed, buy/sell/hold signals, needs_review, summary, cost_usd | เอ |
+| `workflow_logs` | timestamp, status (COMPLETE/REJECTED), stocks_analyzed, buy/sell/hold signals, needs_review, summary, cost_usd | เอ |
+| `hourly_cache` | ticker, price, week52_high/low, pe_ratio, market_cap, source, at_new_high/low, fetched_at | นัตตี้ prefetch |
+| `news_cache` | ticker, news_json, news_count, fetched_at | นัตตี้ prefetch |
 | `nik_suggestions` | summary, diff_text, status (pending/complete/failed), error_message, applied_at | นิก |
 
 **Migration:** startup event ใน `main.py` รัน `ALTER TABLE / CREATE TABLE IF NOT EXISTS` อัตโนมัติ
@@ -78,7 +80,8 @@
 | Workflow | Schedule (UTC) | Bangkok | วัน | หน้าที่ |
 |----------|---------------|---------|-----|---------|
 | `AI_Stocks_Trigger` | 15:00 | 22:00 | Mon–Fri | Main trigger · Monday ส่ง `?include_weekend=true` · wake Render ก่อน (retry 15×) |
-| `Render Keepalive` | ทุก 10 นาที | ทุก 10 นาที | ทุกวัน | ping `/health` ป้องกัน dyno sleep |
+| `AI_Stocks_Prefetch` | ทุกชั่วโมง 02–14 + 14:45 | 09:00–21:45 | Mon–Fri | POST `/prefetch` → นัตตี้ดึงราคา+ข่าวล่วงหน้า บันทึกลง HourlyCache+NewsCache |
+| `Render Keepalive` | ทุก 10 นาที | ทุก 10 นาที | ทุกวัน | ping `/health` + **self-heal**: ถ้า weekday + หลัง 22:00 + ยังไม่มี run วันนี้ → trigger อัตโนมัติ |
 | `Workflow Resume` | 15:15–16:45 ทุก 15 นาที | 22:15–23:45 | Mon–Fri | POST `/workflow/resume` fallback ถ้า crash |
 
 **หมายเหตุ budget:** `datetime.now()` บน Render ใช้ UTC → budget reset = 00:00 UTC = **07:00 Bangkok**
@@ -182,7 +185,8 @@ Dashboard_Share/
 ├── Blueprint.md       # ← ไฟล์นี้
 ├── .github/workflows/
 │   ├── trigger_workflow.yml  # AI_Stocks_Trigger — main cron 22:00 จ–ศ
-│   ├── keepalive.yml         # Render Keepalive — ทุก 10 นาที
+│   ├── keepalive.yml         # Render Keepalive — ทุก 10 นาที + self-heal trigger
+│   ├── prefetch.yml          # AI_Stocks_Prefetch — ทุกชั่วโมง 09:00–21:45 จ–ศ
 │   └── resume.yml            # Workflow Resume — 22:15–23:45 จ–ศ
 ├── frontend/
 │   └── src/App.jsx    # React dashboard
@@ -228,4 +232,4 @@ Dashboard_Share/
 - ROI > 50% → Upgrade (เพิ่ม tickers, feature ใหม่)
 - ROI < 50% → Debug (ดู WorkflowLog + nik suggestions)
 
-**ปัจจุบัน:** 40 tickers · live บน Render · 133 tests pass · GitHub Actions active (ย้ายจาก cron-job.org แล้ว)
+**ปัจจุบัน:** 30 tickers · live บน Render · 133 tests pass · GitHub Actions active · cost จริง $0.52/run (เป้า $0.43)

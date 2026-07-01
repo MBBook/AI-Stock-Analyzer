@@ -1,6 +1,16 @@
 # Pending — AI Stock Analyzer V4
 
 > รายการที่รอดำเนินการในอนาคต
+> อัพเดตล่าสุด: 2026-07-01
+
+---
+
+## 🔍 รอ verify คืนนี้ (2026-07-01)
+
+- **keepalive self-heal** — LINE ควรมาตรงเวลา 22:00-22:15 น. ไม่ใช่ตี 4
+- **NEEDS_REVIEW** — SNDK/ARM/LWLG/ZS ควรหายจากรายการ (hard rule BUY≥0.70)
+- **NewsCache** — prefetch รันมาตั้งแต่เช้า ควรมีข่าวใน cache แล้ว ดูที่ `/prefetch/status`
+- **cost** — ควรใกล้เคียง $0.43–0.52
 
 ---
 
