@@ -8,16 +8,21 @@ on:
 jobs:
   keepalive:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
 
     steps:
       - name: Ping + self-heal trigger
         run: |
-          # Step 1: Wake up Render
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "${{ secrets.RENDER_URL }}/health" || echo "000")
-          echo "Health: HTTP $STATUS"
+          # Step 1: Wake up Render (retry 6x × 15s = รอ Render ตื่นได้สูงสุด ~90s)
+          STATUS="000"
+          for i in {1..6}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${{ secrets.RENDER_URL }}/health" || echo "000")
+            echo "Wake attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then break; fi
+            if [ "$i" -lt 6 ]; then sleep 10; fi
+          done
           if [ "$STATUS" != "200" ]; then
-            echo "⚠️ Render not responding — skipping self-heal check"
+            echo "⚠️ Render not responding after retries — skipping self-heal check"
             exit 0
           fi
           echo "✅ Render is alive"
