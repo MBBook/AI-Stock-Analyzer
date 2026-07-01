@@ -1,10 +1,10 @@
 name: Workflow Resume
 
+# ⛔ ปิด schedule แล้ว 2026-07-01 — keepalive.yml Step 2 ทำหน้าที่นี้แทนแล้ว
+# (self-heal ทุก 10 นาที 15:00-23:59 UTC ยิง /workflow/resume เหมือนกัน แต่ครอบคลุมกว้างกว่า
+# และถี่กว่า resume.yml เดิมที่ทำแค่ 15:15-16:45 UTC) เหลือไว้แค่ workflow_dispatch
+# สำหรับกดรันมือถ้าต้องการ — กันระบบซ้ำซ้อนแบบเดียวกับที่เคยแก้ prefetch.yml
 on:
-  schedule:
-    # Mon–Fri 22:15–23:45 Bangkok (UTC+7) = 15:15–16:45 UTC ทุก 15 นาที
-    # เริ่ม 22:15 (ไม่ใช่ 22:00) เพื่อให้ main trigger รันก่อน
-    - cron: '15,30,45 15,16 * * 1-5'
   workflow_dispatch:
 
 jobs:

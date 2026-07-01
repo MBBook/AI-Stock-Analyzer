@@ -27,14 +27,17 @@ jobs:
           fi
           echo "✅ Render is alive"
 
-          # Step 2: Self-heal — ถ้าเป็น weekday + UTC >= 15:00 และยังไม่มี run วันนี้ → trigger
+          # Step 2: Self-heal — ถ้าเป็น weekday + UTC >= 15:00 และ workflow ไม่ได้รันอยู่ → resume
+          # ✅ แก้ 2026-07-01: เปลี่ยนจาก POST /workflow (วิเคราะห์ใหม่หมดทุกตัว) เป็น
+          # POST /workflow/resume (วิเคราะห์เฉพาะหุ้นที่ยังไม่เสร็จวันนี้) — endpoint นี้เช็คเองอยู่แล้วว่า
+          # วันนี้ COMPLETE/BUDGET_EXCEEDED/ABORTED หรือยัง (skip ถ้าจบแล้ว) และเช็ค Monday include_weekend เอง
+          # เหตุผล: เดิมถ้า Render ล่ม/dyno sleep กลางคันแล้ว self-heal restart ใหม่ทั้งชุด
+          # เสียเงินวิเคราะห์ซ้ำหุ้นที่ทำเสร็จไปแล้ว ทั้งที่มี checkpoint ต่อตัวเก็บไว้ใน DB อยู่แล้ว
           DAY=$(date +%u)    # 1=Mon ... 7=Sun
           HOUR=$(date +%H)   # UTC hour (GitHub Actions รัน UTC)
-          TODAY=$(date +%Y-%m-%d)
-          echo "Day=$DAY Hour=$HOUR UTC Today=$TODAY"
+          echo "Day=$DAY Hour=$HOUR UTC"
 
           if [ "$DAY" -le 5 ] && [ "$HOUR" -ge 15 ]; then
-            # Check workflow status
             WF_STATUS=$(curl -s --max-time 10 "${{ secrets.RENDER_URL }}/workflow/status" || echo "")
             CURRENT=$(echo "$WF_STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "unknown")
             echo "Workflow status: $CURRENT"
@@ -44,23 +47,9 @@ jobs:
               exit 0
             fi
 
-            # Check if already ran today (UTC date)
-            HISTORY=$(curl -s --max-time 10 "${{ secrets.RENDER_URL }}/workflow/history" || echo "")
-            RAN_TODAY=$(echo "$HISTORY" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('yes' if any(r.get('timestamp','').startswith('$TODAY') for r in d.get('runs',[])) else 'no')" 2>/dev/null || echo "unknown")
-            echo "Ran today: $RAN_TODAY"
-
-            if [ "$RAN_TODAY" = "no" ]; then
-              echo "⚠️ No workflow run today yet — self-healing trigger!"
-              if [ "$DAY" = "1" ]; then
-                ENDPOINT="${{ secrets.RENDER_URL }}/workflow?include_weekend=true"
-              else
-                ENDPOINT="${{ secrets.RENDER_URL }}/workflow"
-              fi
-              RESPONSE=$(curl -s -X POST "$ENDPOINT" --max-time 60 || echo "")
-              echo "Trigger response: $RESPONSE"
-            else
-              echo "✅ Workflow already ran today"
-            fi
+            echo "⚡ Self-heal via /workflow/resume (resume เฉพาะหุ้นค้าง, skip เองถ้าวันนี้จบแล้ว)"
+            RESPONSE=$(curl -s -X POST "${{ secrets.RENDER_URL }}/workflow/resume" --max-time 60 || echo "")
+            echo "Resume response: $RESPONSE"
           else
             echo "ℹ️ Outside trigger window (weekday UTC>=15 required)"
           fi

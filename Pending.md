@@ -1,7 +1,17 @@
 # Pending — AI Stock Analyzer V4
 
 > รายการที่รอดำเนินการในอนาคต
-> อัพเดตล่าสุด: 2026-07-01 (22:10 Bangkok)
+> อัพเดตล่าสุด: 2026-07-01 (22:50 Bangkok)
+
+---
+
+## 🔍 Monitor: Defect #12 แก้แล้ว รอพิสูจน์ตัวจริง (2026-07-01)
+
+**สรุป:** งาน 22:00 ไม่เคยเสร็จอัตโนมัติเลย ~2 สัปดาห์ (ดู Blueprint.md Defect #12) — แก้แล้ว 3 จุด: checkpoint ทีละหุ้น, keepalive self-heal ใช้ `/workflow/resume` แทน `/workflow`, ปิด `resume.yml` schedule ที่ซ้ำซ้อน คืนนี้ trigger เองล้มเหลว (deploy ชนช่วง 22:00 พอดี) ต้อง manual trigger เอง — job_id `a035af29` เริ่ม 22:44:57 น.
+
+**ต้องติดตาม:** คืนถัดๆ ไป เช็คว่า workflow จบเองโดยไม่ต้อง manual trigger ไหม (ดู `/workflow/history` ว่า timestamp ใกล้ 22:00-23:00 Bangkok หรือยัง) ถ้ายังหลุดอีกหลังแก้ 3 จุดนี้ → ต้องพิจารณา Render Starter plan ($7/mo, ไม่มี sleep เลย) จริงจัง (MBBook ปฏิเสธไปรอบนี้ 2026-07-01 เพราะอยากลอง free tier + fix ก่อน)
+
+**อย่า deploy code ช่วง 21:45-23:30 Bangkok** — ช่วงนี้ trigger + workflow กำลังรัน deploy จะฆ่า process กลางคัน (สาเหตุที่คืนนี้พลาด)
 
 ---
 

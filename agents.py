@@ -1133,6 +1133,15 @@ Provide analysis in JSON format."""
                     self.log_action("หนุ่ม", f"Analysis failed for {ticker}: {str(e)}", "WARNING")
                     continue
 
+                # ✅ CHECKPOINT ทีละหุ้น (เพิ่ม 2026-07-01): เดิม checkpoint รอจนมด validate
+                # ครบทั้งชุดก่อนถึง save — ถ้า Render ล่ม/dyno sleep กลางคันระหว่างหนุ่มวิเคราะห์
+                # (ขั้นตอนที่กินเวลานานสุด) งานที่ทำไปแล้วหายหมด ไม่มีอะไรให้ /workflow/resume ทำต่อ
+                # ย้ายมา save ทันทีหลังหุ้นแต่ละตัววิเคราะห์เสร็จ เพื่อให้ resume ใช้งานได้จริง
+                try:
+                    self._checkpoint_database({ticker: analysis_results[ticker]})
+                except Exception as ckpt_err:
+                    self.log_action("หนุ่ม", f"Per-ticker checkpoint failed for {ticker}: {ckpt_err}", "WARNING")
+
                 # ✅ MID-RUN BUDGET CHECK: หยุดถ้า session cost เกิน daily limit
                 today = datetime.now()
                 run_limit = self.DAILY_BUDGET.get(today.weekday(), 0.60)
@@ -1903,7 +1912,9 @@ Identify top issues and output diff blocks."""
             raise
 
     def _checkpoint_database(self, analysis_results):
-        """CHECKPOINT: บันทึก signal ทีละตัวทันทีหลัง มด validate — ป้องกันข้อมูลหายถ้า Render ล่ม
+        """CHECKPOINT: บันทึก signal ทันที — ป้องกันข้อมูลหายถ้า Render ล่ม/dyno sleep กลางคัน
+        เรียก 2 จุด: (1) ทีละตัวทันทีหลังหนุ่มวิเคราะห์เสร็จแต่ละหุ้น (เพิ่ม 2026-07-01 — จุดที่ใช้เวลานานสุด
+        และเสี่ยงโดนขัดจังหวะมากสุด) (2) อีกรอบหลังมด validate ครบทั้งชุด (ทับด้วยค่าที่ validate แล้ว)
         ใช้ flag checkpoint=True เพื่อแยกจาก _update_database ที่รันตอน QA pass เท่านั้น"""
         db = None
         try:
