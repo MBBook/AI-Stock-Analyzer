@@ -59,4 +59,31 @@ jobs:
           else
             echo "ℹ️ Outside trigger window (weekday UTC>=15 required)"
           fi
+
+          # Step 3: Prefetch self-heal — weekday UTC 02:00-14:59 + cache stale > 70 min → trigger
+          if [ "$DAY" -le 5 ] && [ "$HOUR" -ge 2 ] && [ "$HOUR" -lt 15 ]; then
+            PSTATUS=$(curl -s --max-time 10 "${{ secrets.RENDER_URL }}/prefetch/status" || echo "")
+            LATEST=$(echo "$PSTATUS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('price_cache',{}).get('latest_fetch') or '')" 2>/dev/null || echo "")
+            echo "Last prefetch: ${LATEST:-none}"
+            STALE=$(python3 -c "
+from datetime import datetime, timezone
+s = '$LATEST'
+if not s:
+    print('yes')
+else:
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+        diff = (datetime.now(timezone.utc) - dt).total_seconds()
+        print('yes' if diff > 4200 else 'no')
+    except: print('yes')
+" 2>/dev/null || echo "yes")
+            echo "Cache stale: $STALE"
+            if [ "$STALE" = "yes" ]; then
+              echo "⚡ Prefetch self-heal triggered!"
+              curl -s -X POST "${{ secrets.RENDER_URL }}/prefetch" --max-time 10 || echo ""
+            else
+              echo "✅ Prefetch cache is fresh"
+            fi
+          fi
           exit 0
