@@ -80,9 +80,11 @@
 | Workflow | Schedule (UTC) | Bangkok | วัน | หน้าที่ |
 |----------|---------------|---------|-----|---------|
 | `AI_Stocks_Trigger` | 15:00 | 22:00 | Mon–Fri | Main trigger · Monday ส่ง `?include_weekend=true` · wake Render ก่อน (retry 15×) |
-| `AI_Stocks_Prefetch` | ทุกชั่วโมง 02–14 + 14:45 | 09:00–21:45 | Mon–Fri | POST `/prefetch` → นัตตี้ดึงราคา+ข่าวล่วงหน้า บันทึกลง HourlyCache+NewsCache |
+| `AI_Stocks_Prefetch` | ⛔ **ปิด schedule แล้ว 2026-07-01** — เหลือ `workflow_dispatch` (manual/debug เท่านั้น) | — | — | เดิม POST `/prefetch` ทุกชั่วโมง — ย้ายหน้าที่ไป APScheduler ภายใน Render แทน (กัน fetch ซ้ำซ้อน 2 ระบบ) |
 | `Render Keepalive` | ทุก 10 นาที | ทุก 10 นาที | ทุกวัน | ping `/health` + **self-heal**: ถ้า weekday + หลัง 22:00 + ยังไม่มี run วันนี้ → trigger อัตโนมัติ |
 | `Workflow Resume` | 15:15–16:45 ทุก 15 นาที | 22:15–23:45 | Mon–Fri | POST `/workflow/resume` fallback ถ้า crash |
+
+**Prefetch mechanism (ปัจจุบัน):** APScheduler ภายใน Render process เดียว (`scheduler.py`) — cron ในตัว ทุกชั่วโมง 02:00–14:00 UTC (นาที 05) + pre-warm 14:45 UTC · พึ่ง `Render Keepalive` (ping `/health` ทุก 10 นาที) กันไม่ให้ dyno sleep ระหว่างวัน ไม่ต้องพึ่ง GitHub Actions cron แยกแล้ว
 
 **หมายเหตุ budget:** `datetime.now()` บน Render ใช้ UTC → budget reset = 00:00 UTC = **07:00 Bangkok**
 
@@ -219,6 +221,7 @@ Dashboard_Share/
 | 8 | Monday Mode Budget Deficit | ⏳ Monitor | $1.20 ตั้งไว้แล้วสำหรับ 72hr news — รอดู cost จริงวันจันทร์ก่อน (เหมือน Defect 4) |
 | 9 | LLM ล้มเมื่อ PE/MarketCap = None | ❌ ไม่มี defect | Prompt บรรทัด 668 รองรับแล้ว: "ถ้า P/E หรือ Market Cap เป็น N/A ให้วิเคราะห์จาก price แทน" + `_safe_float()` จัดการ edge cases |
 | 10 | LINE Notification Spam | ❌ ไม่มี defect | `_send_line_notification()` ถูกเรียกแค่ 2 จุด: จบสำเร็จ 1 ครั้ง + exception 1 ครั้ง ไม่มีการส่งรายตัว |
+| 11 | Prefetch 2 ระบบซ้อนกัน (GitHub Actions + APScheduler) | ✅ แก้แล้ว (2026-07-01) | Commit ก่อนหน้าเพิ่ม APScheduler แต่ลืมปิด `AI_Stocks_Prefetch` cron เดิม → log ยืนยันมี POST `/prefetch` จากภายนอก (GH Actions) ทำงานอยู่จริง แยกไม่ออกว่ารอบไหนทำงาน → ปิด schedule ใน `prefetch.yml` เหลือแค่ `workflow_dispatch` (manual/debug) ให้ APScheduler เป็นระบบเดียว |
 
 **ถ้า Defect 2, 4 หรือ 8 เกิดจริงวันจันทร์:**
 - OOM → เพิ่ม `gc.collect()` หลัง checkpoint แต่ละ ticker
