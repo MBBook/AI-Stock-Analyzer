@@ -67,7 +67,7 @@ _job_lock = threading.Lock()
 
 
 def _keepalive_ping():
-    """Ping /health ตัวเองทุก 10 นาที ป้องกัน Render kill dyno กลางคัน"""
+    """Ping /health ตัวเองทุก 10 นาที ป้องกัน Render kill dyno กลางคัน — เฉพาะช่วง workflow กำลังรัน"""
     import time
     host = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:8000").rstrip("/")
     while True:
@@ -80,6 +80,24 @@ def _keepalive_ping():
             print("[KEEPALIVE] Ping sent — dyno ยังตื่นอยู่")
         except Exception as e:
             print(f"[KEEPALIVE] Ping failed: {e}")
+
+
+def _self_ping_forever():
+    """Ping /health ตัวเองทุก 8 นาที ตลอดชีวิตของ process (เริ่มตั้งแต่ startup)
+    เพิ่ม 2026-07-01: กัน Render free-tier sleep (>15 นาที idle) โดยไม่ต้องพึ่งแค่
+    GitHub Actions Keepalive (cron ภายนอกอาจ delay/ข้ามรอบได้เอง) — thread นี้เป็น
+    in-process loop ใช้แค่ time.sleep() ไม่มี dependency ต่อ scheduler ภายนอกเลย
+    ทำงานคู่ขนานกับ GitHub Actions Keepalive เดิม (ไม่ได้แทนที่ — เป็น backup ซ้อนอีกชั้น)"""
+    import time
+    time.sleep(30)  # รอให้ startup migration เสร็จก่อนเริ่ม ping รอบแรก
+    host = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:8000").rstrip("/")
+    while True:
+        try:
+            resp = requests.get(f"{host}/health", timeout=15)
+            print(f"[SELF-PING] {resp.status_code} — dyno ยังตื่นอยู่ (in-process, ไม่พึ่ง GitHub Actions)")
+        except Exception as e:
+            print(f"[SELF-PING] Ping failed (จะลองใหม่รอบถัดไป): {e}")
+        time.sleep(480)  # 8 นาที — เผื่อ margin ก่อนถึง Render sleep threshold ที่ 15 นาที
 
 
 def _run_workflow_bg(stocks: list, include_weekend: bool):
@@ -226,6 +244,10 @@ async def startup():
         except Exception as e:
             print(f"[MIGRATION] {e}")
     setup_scheduler()
+
+    # ===== SELF-PING: กัน Render sleep ตลอดชีวิต process ไม่พึ่ง GitHub Actions =====
+    threading.Thread(target=_self_ping_forever, daemon=True).start()
+    print("✅ Self-ping thread started — ping ตัวเองทุก 8 นาที (backup ซ้อน GitHub Actions Keepalive)")
 
 @app.on_event("shutdown")
 async def shutdown():

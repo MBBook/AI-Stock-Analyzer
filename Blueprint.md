@@ -137,8 +137,11 @@ RENDER_EXTERNAL_URL     # ใช้โดย keepalive ping
 **Checkpoint:** มด validate เสร็จ → บันทึก signal ทีละ ticker ทันที (ไม่รอ QA pass)
 → ถ้า Render crash กลางคัน `/workflow/resume` จะวิ่งต่อจากตัวที่ค้าง
 
-**Render free tier:** dyno sleep หลัง 15 นาที idle → keepalive ping `/health` ทุก 10 นาที (GitHub Actions)
-→ wake time ~50s → `AI_Stocks_Trigger` retry สูงสุด 15 ครั้ง × 10s = 2.5 นาที ก่อน trigger จริง
+**Render free tier:** dyno sleep หลัง 15 นาที idle — มี 2 ชั้นกันหลับ (เพิ่มชั้นที่ 2 เมื่อ 2026-07-01):
+1. **GitHub Actions Keepalive** (`keepalive.yml`) ทุก 10 นาที — Step 1 wake+retry (6×15s) + Step 2 self-heal งาน 22:00 + Step 3 self-heal prefetch (cache stale >70 นาที → POST `/prefetch` เอง)
+2. **Self-ping ในแอป** (`_self_ping_forever()` ใน `main.py`) — ping ตัวเองทุก 8 นาที ตั้งแต่ startup ตลอดชีวิต process ไม่พึ่ง GitHub Actions cron เลย (กันกรณี GH schedule delay/ข้ามรอบ)
+
+`AI_Stocks_Trigger` เองก็มี wake+retry สูงสุด 15 ครั้ง × 10s = 2.5 นาที ก่อน trigger งานจริงตอน 22:00 (เป็นชั้นที่ 3 เฉพาะงานสำคัญนี้)
 
 **LINE notification:** ส่งทุก workflow จบ (COMPLETE/REJECTED/ABORTED/BUDGET_EXCEEDED/ERROR)
 → ถ้าไม่มี token → ข้าม ไม่ crash
@@ -214,7 +217,7 @@ Dashboard_Share/
 | # | Defect | สถานะ | Action |
 |---|--------|--------|--------|
 | 1 | Colson ไม่อยู่ใน workflow order | ✅ แก้แล้ว | เพิ่ม note ใน Blueprint ว่าเป็น Event-Driven Agent ผ่าน `/trade-update` |
-| 2 | OOM Risk บน Render 512MB | ⏳ Monitor | ระบบยังไม่ OOM — รอดูผลวันจันทร์ full 40 tickers ก่อน ถ้า crash ค่อย add `gc.collect()` |
+| 2 | OOM Risk บน Render 512MB | ⏳ Monitor (แก้ไข 2026-07-01 ค่ำ) | ตอนแรกสงสัยว่า instance เปลี่ยนบ่อย (cmvkw → 5j8m9 → c5lgt) มาจาก OOM/crash — เช็ค Render Events API แล้วพบว่า**ไม่ใช่** ทุก instance ตรงกับ `deploy_started/ended` ที่สำเร็จทั้งหมด (10 deploys วันนี้ ไม่มี `server_failed`/`server_hardware_failure` เลย) ส่วน instance ที่ไม่ตรง deploy ไหน (~21:40 น.) อธิบายได้จาก Render free-tier sleep/wake ปกติ (keepalive Step 1 wake+retry ทำงานถูกต้อง) ไม่ใช่ OOM — กลับสถานะเป็น Monitor ตามเดิม ยังไม่มีหลักฐาน OOM จริง |
 | 3 | Race Condition `/workflow/resume` | ❌ ไม่มี defect | Code มี guard บรรทัด 378 อยู่แล้ว: `if _job["status"] == "running": return already_running` |
 | 4 | Budget $0.85 ไม่พอ 40 tickers | ⏳ Monitor | ยังไม่มี cost จริง — prompt caching ลด cost ได้ 10× รอดู `cost_usd` ใน WorkflowLog วันจันทร์ก่อน |
 | 5 | Timezone Mismatch (นิก / budget) | ❌ ไม่มี defect | 22:00 Bangkok = 15:00 UTC = วันเดียวกันเสมอ ไม่ข้ามวัน weekday() ถูกต้อง |
