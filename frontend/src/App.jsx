@@ -14,6 +14,7 @@ export default function DashboardV4() {
   const [portfolioData, setPortfolioData] = useState(null);
   const [historyData, setHistoryData] = useState(null);
   const [nikSuggestions, setNikSuggestions] = useState(null);
+  const [costSummary, setCostSummary] = useState(null);
 
   const colors = {
     surface: '#121212',
@@ -43,6 +44,7 @@ export default function DashboardV4() {
     fetchPortfolio();
     fetchHistory();
     fetchNikSuggestions();
+    fetchCostSummary();
   }, []);
 
   const fetchStocks = async () => {
@@ -82,6 +84,16 @@ export default function DashboardV4() {
       setNikSuggestions(data);
     } catch (error) {
       console.error('Error fetching nik suggestions:', error);
+    }
+  };
+
+  const fetchCostSummary = async () => {
+    try {
+      const response = await fetch(`${API_URL}/costs/summary`);
+      const data = await response.json();
+      setCostSummary(data);
+    } catch (error) {
+      console.error('Error fetching cost summary:', error);
     }
   };
 
@@ -384,29 +396,57 @@ export default function DashboardV4() {
   const StatusTab = () => {
     const totalCost = historyData?.total_cost_usd ?? 0;
     const runs = historyData?.runs ?? [];
-    const budget = 30;
-    const budgetUsedPct = Math.min((totalCost / budget) * 100, 100).toFixed(0);
     const lastRun = runs[0];
     const passCount = runs.filter(r => r.status === 'COMPLETE').length;
     const rejectCount = runs.filter(r => r.status === 'REJECTED').length;
 
+    // Monthly cost summary (จาก /costs/summary — SUM/AVG cost_usd จริง ไม่ใช้ LLM)
+    const target = costSummary?.budget?.target_monthly_usd ?? 10;
+    const ceiling = costSummary?.budget?.ceiling_monthly_usd ?? 12;
+    const projected = costSummary?.projected_month_cost_usd;
+    const monthCost = costSummary?.month_to_date?.total_cost_usd ?? 0;
+    const budgetStatus = costSummary?.budget?.status;
+    const statusColor = budgetStatus === 'over_ceiling' ? colors.error
+      : budgetStatus === 'over_target_under_ceiling' ? colors.warning
+      : colors.success;
+    const statusLabel = budgetStatus === 'over_ceiling' ? '🔴 เกินเพดาน'
+      : budgetStatus === 'over_target_under_ceiling' ? '🟡 เกินเป้า แต่ยังไม่เกินเพดาน'
+      : budgetStatus === 'within_target' ? '🟢 อยู่ในเป้า'
+      : 'กำลังรวบรวมข้อมูล...';
+    const barPct = projected ? Math.min((projected / ceiling) * 100, 100) : 0;
+
     return (
       <div className="space-y-6">
-        {/* Budget usage */}
+        {/* Monthly cost vs target/ceiling */}
         <div style={{ padding: '20px', backgroundColor: colors.surface2, borderRadius: '8px', border: `1px solid ${colors.primaryLight}` }}>
-          <h3 style={{ color: colors.primary, marginBottom: '15px' }}>💰 Budget Usage</h3>
+          <h3 style={{ color: colors.primary, marginBottom: '15px' }}>💰 Monthly Cost (เป้า ${target} / เพดาน ${ceiling})</h3>
           <div style={{ width: '100%', height: '8px', backgroundColor: colors.surface3, borderRadius: '4px', overflow: 'hidden' }}>
-            <div style={{ width: `${budgetUsedPct}%`, height: '100%', backgroundColor: totalCost > 25 ? colors.error : colors.primary }}></div>
+            <div style={{ width: `${barPct}%`, height: '100%', backgroundColor: statusColor }}></div>
           </div>
           <p style={{ color: colors.neutral, fontSize: '12px', marginTop: '8px' }}>
-            ${totalCost.toFixed(2)} / ${budget} ({budgetUsedPct}%) — {historyData ? `${runs.length} runs` : 'Loading...'}
+            เดือนนี้ (MTD): ${monthCost.toFixed(2)} · คาดการณ์เต็มเดือน: {projected != null ? `$${projected.toFixed(2)}` : '—'} · {statusLabel}
           </p>
+          {costSummary?.by_weekday && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '8px', marginTop: '14px' }}>
+              {['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'].map(day => {
+                const d = costSummary.by_weekday[day];
+                return (
+                  <div key={day} style={{ padding: '8px', backgroundColor: colors.surface3, borderRadius: '6px', textAlign: 'center' }}>
+                    <p style={{ color: colors.neutral, fontSize: '10px', margin: '0 0 4px 0' }}>{day.slice(0, 3)}</p>
+                    <p style={{ color: '#fff', fontSize: '12px', fontWeight: 'bold', margin: 0 }}>
+                      {d?.avg_cost_usd != null ? `$${d.avg_cost_usd.toFixed(2)}` : '—'}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Cost summary */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px', padding: '15px', backgroundColor: colors.surface2, borderRadius: '8px' }}>
           <div>
-            <p style={{ color: colors.neutral, fontSize: '12px', margin: '0 0 8px 0' }}>Total Spent</p>
+            <p style={{ color: colors.neutral, fontSize: '12px', margin: '0 0 8px 0' }}>Total Spent (all-time)</p>
             <p style={{ color: colors.primary, fontSize: '18px', fontWeight: 'bold', margin: 0 }}>${totalCost.toFixed(2)}</p>
           </div>
           <div>
@@ -416,9 +456,9 @@ export default function DashboardV4() {
             </p>
           </div>
           <div>
-            <p style={{ color: colors.neutral, fontSize: '12px', margin: '0 0 8px 0' }}>Budget Left</p>
-            <p style={{ color: budget - totalCost < 5 ? colors.error : colors.success, fontSize: '18px', fontWeight: 'bold', margin: 0 }}>
-              ${(budget - totalCost).toFixed(2)}
+            <p style={{ color: colors.neutral, fontSize: '12px', margin: '0 0 8px 0' }}>เฉลี่ย/run ล่าสุด</p>
+            <p style={{ color: colors.success, fontSize: '18px', fontWeight: 'bold', margin: 0 }}>
+              {costSummary?.recent_avg_cost_per_run_usd != null ? `$${costSummary.recent_avg_cost_per_run_usd.toFixed(3)}` : '—'}
             </p>
           </div>
         </div>

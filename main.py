@@ -533,6 +533,71 @@ async def get_nik_suggestions(db: Session = Depends(get_db)):
     }
 
 
+@app.get("/costs/summary")
+async def get_cost_summary(db: Session = Depends(get_db)):
+    """สรุปต้นทุน Anthropic API รายเดือน + เทียบเป้าหมาย/เพดานงบของ MBBook
+    หมายเหตุ: endpoint นี้แค่ SUM/AVG คอลัมน์ cost_usd ที่ เอ บันทึกไว้อยู่แล้ว — ไม่เรียก LLM เพิ่ม ไม่มีต้นทุนส่วนนี้"""
+    from models import WorkflowLog
+    from sqlalchemy import desc
+
+    # เป้าหมายงบที่ MBBook ตั้งไว้ (บันทึกเมื่อ 2026-07-01)
+    MONTHLY_TARGET_USD  = 10.0
+    MONTHLY_CEILING_USD = 12.0
+    EST_WEEKDAYS_PER_MONTH = 20  # 4 Mon + 12 Tue-Thu + 4 Fri ตามสูตรเดียวกับ DAILY_BUDGET ใน agents.py
+
+    logs = db.query(WorkflowLog).order_by(desc(WorkflowLog.timestamp)).all()
+
+    now = datetime.utcnow()
+    month_key = now.strftime("%Y-%m")
+
+    # เดือนปัจจุบัน (UTC)
+    month_logs = [l for l in logs if l.timestamp and l.timestamp.strftime("%Y-%m") == month_key]
+    month_cost = sum(l.cost_usd or 0 for l in month_logs)
+
+    # แยกตามวันในสัปดาห์ — ใช้ log ทั้งหมดที่มี เพื่อดู pattern ราคาแต่ละวัน
+    weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    by_weekday = {name: {"runs": 0, "total_cost_usd": 0.0} for name in weekday_names}
+    for l in logs:
+        if l.timestamp and l.cost_usd:
+            wd = weekday_names[l.timestamp.weekday()]
+            by_weekday[wd]["runs"] += 1
+            by_weekday[wd]["total_cost_usd"] += l.cost_usd
+    for wd in by_weekday:
+        r = by_weekday[wd]["runs"]
+        by_weekday[wd]["avg_cost_usd"] = round(by_weekday[wd]["total_cost_usd"] / r, 4) if r else None
+        by_weekday[wd]["total_cost_usd"] = round(by_weekday[wd]["total_cost_usd"], 4)
+
+    # Projection: เฉลี่ยจาก run ล่าสุดที่ status = COMPLETE เท่านั้น (ตัด run ทดสอบ/debug ที่ cost เพี้ยนออก)
+    recent_complete = [l.cost_usd for l in logs if l.status == "COMPLETE" and l.cost_usd][:5]
+    avg_recent = (sum(recent_complete) / len(recent_complete)) if recent_complete else None
+    projected_month_cost = round(avg_recent * EST_WEEKDAYS_PER_MONTH, 2) if avg_recent else None
+
+    if projected_month_cost is None:
+        status = "insufficient_data"
+    elif projected_month_cost <= MONTHLY_TARGET_USD:
+        status = "within_target"
+    elif projected_month_cost <= MONTHLY_CEILING_USD:
+        status = "over_target_under_ceiling"
+    else:
+        status = "over_ceiling"
+
+    return {
+        "current_month": month_key,
+        "month_to_date": {
+            "runs": len(month_logs),
+            "total_cost_usd": round(month_cost, 4),
+        },
+        "recent_avg_cost_per_run_usd": round(avg_recent, 4) if avg_recent else None,
+        "projected_month_cost_usd": projected_month_cost,
+        "budget": {
+            "target_monthly_usd": MONTHLY_TARGET_USD,
+            "ceiling_monthly_usd": MONTHLY_CEILING_USD,
+            "status": status,
+        },
+        "by_weekday": by_weekday,
+    }
+
+
 @app.get("/workflow/history")
 async def get_workflow_history(limit: int = 30, db: Session = Depends(get_db)):
     """ดู workflow run history + cost จาก DB (ล่าสุดก่อน)"""
