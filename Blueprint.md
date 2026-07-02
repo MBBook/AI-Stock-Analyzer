@@ -108,14 +108,16 @@
 ## 6. Daily Budget
 
 > ปรับ 2026-07-01: MBBook ตั้งเป้างบจริงไว้ที่ **$10/เดือน (เป้า) / $12/เดือน (เพดานที่รับได้)** — เดิม DAILY_BUDGET ในโค้ดตั้งเพดานไว้ $19.40 สูงกว่าเป้าจริงเกือบเท่าตัว จึงตึงลงให้เหลือ buffer ~15% เหนือ cost จริงที่วัดได้ (Tue-Wed จริง ~$0.52/run) แทน
+>
+> ✅ **อัพเดต 2026-07-02 — มีข้อมูลจริง Tue-Thu ครบ 4 รอบแล้ว**: $0.515 / $0.526 / $0.539 / $0.510 เฉลี่ย **$0.5225/run** เทียบ budget $0.60/วัน = ใช้ไป ~87% มี buffer พอสมควร ยืนยันว่า Defect #4 (กลัวงบไม่พอ) **ไม่ได้เกิดขึ้นจริง** — ส่วน Monday/Friday ยังไม่มีข้อมูลจริงกับ config ปัจจุบัน (30 tickers) รอ Monday ถัดไป (2026-07-06) ก่อนสรุป Defect #8
 
 | วัน | Limit/วัน | หมายเหตุ |
 |-----|-----------|---------|
-| Monday | $0.85 | news 3 วัน (Sat+Sun+Mon) — ยังไม่มีข้อมูลจริง ใช้ประมาณการ + buffer |
-| Tue–Thu | $0.60 | ปกติ — cost จริงวัดแล้ว ~$0.52/run |
-| Friday | $0.75 | + นิก optimize — ยังไม่มีข้อมูลจริง ใช้ประมาณการ + buffer |
+| Monday | $0.85 | news 3 วัน (Sat+Sun+Mon) — ข้อมูลเก่า (40 tickers) $1.36 เกิน แต่ตอนนี้ 30 tickers แล้ว รอ 2026-07-06 ยืนยัน |
+| Tue–Thu | $0.60 | ✅ ยืนยันจริงแล้ว 4/4 รอบ เฉลี่ย $0.5225/run (87% ของ budget) |
+| Friday | $0.75 | + นิก optimize — ยังไม่มีข้อมูลจริงกับ 30 tickers |
 | **Monthly ceiling (โค้ด)** | **~$13.60** | เผื่อ buffer เหนือเพดานจริง $12 ไว้ก่อน (ดู [Pending.md](Pending.md) หัวข้อทบทวนหลัง 3 เดือน) |
-| **เป้าหมายจริงของ MBBook** | **$10 เป้า / $12 เพดาน** | ติดตามของจริงผ่าน `GET /costs/summary` (dashboard tab Status) |
+| **เป้าหมายจริงของ MBBook** | **$10 เป้า / $12 เพดาน** | ติดตามของจริงผ่าน `GET /costs/summary` (dashboard tab Status) — เทรนด์ Tue-Thu ตอนนี้อยู่ในเป้า |
 
 ---
 
@@ -232,14 +234,14 @@ Dashboard_Share/
 | # | Defect | สถานะ | Action |
 |---|--------|--------|--------|
 | 1 | Colson ไม่อยู่ใน workflow order | ✅ แก้แล้ว | เพิ่ม note ใน Blueprint ว่าเป็น Event-Driven Agent ผ่าน `/trade-update` |
-| 2 | OOM Risk บน Render 512MB | ⏳ Monitor (แก้ไข 2026-07-01 ค่ำ) | ตอนแรกสงสัยว่า instance เปลี่ยนบ่อย (cmvkw → 5j8m9 → c5lgt) มาจาก OOM/crash — เช็ค Render Events API แล้วพบว่า**ไม่ใช่** ทุก instance ตรงกับ `deploy_started/ended` ที่สำเร็จทั้งหมด (10 deploys วันนี้ ไม่มี `server_failed`/`server_hardware_failure` เลย) ส่วน instance ที่ไม่ตรง deploy ไหน (~21:40 น.) อธิบายได้จาก Render free-tier sleep/wake ปกติ (keepalive Step 1 wake+retry ทำงานถูกต้อง) ไม่ใช่ OOM — กลับสถานะเป็น Monitor ตามเดิม ยังไม่มีหลักฐาน OOM จริง |
+| 2 | OOM Risk บน Render 512MB | ⏳ Monitor (แก้ไข 2026-07-01 ค่ำ, เช็คซ้ำ 2026-07-02 — ไม่มีหลักฐานใหม่) | ตอนแรกสงสัยว่า instance เปลี่ยนบ่อย (cmvkw → 5j8m9 → c5lgt) มาจาก OOM/crash — เช็ค Render Events API แล้วพบว่า**ไม่ใช่** ทุก instance ตรงกับ `deploy_started/ended` ที่สำเร็จทั้งหมด (10 deploys วันนี้ ไม่มี `server_failed`/`server_hardware_failure` เลย) ส่วน instance ที่ไม่ตรง deploy ไหน (~21:40 น.) อธิบายได้จาก Render free-tier sleep/wake ปกติ (keepalive Step 1 wake+retry ทำงานถูกต้อง) ไม่ใช่ OOM — **ไม่มี tool เข้าถึง Render Events API ได้ตรงๆ ในเซสชันนี้** ถ้าอยากเช็คซ้ำต้องดูจาก Render dashboard เอง (Events tab) — ปล่อย Monitor แบบ passive ต่อไป ไม่มีอะไรต้องทำเพิ่มจนกว่าจะมีอาการจริง (deploy ล้ม/response ช้าผิดปกติ) |
 | 3 | Race Condition `/workflow/resume` | ❌ ไม่มี defect | Code มี guard บรรทัด 378 อยู่แล้ว: `if _job["status"] == "running": return already_running` |
-| 4 | Budget $0.85 ไม่พอ 40 tickers | ⏳ Monitor | ยังไม่มี cost จริง — prompt caching ลด cost ได้ 10× รอดู `cost_usd` ใน WorkflowLog วันจันทร์ก่อน |
+| 4 | Budget $0.85 ไม่พอ 40 tickers | ✅ **ปิดเคส 2026-07-02 — มีข้อมูลจริงแล้ว ไม่ได้เกิดขึ้นจริง** | Tue-Thu วัดจริงครบ 4 รอบ (30 tickers, ระบบปัจจุบัน): $0.515 / $0.526 / $0.539 / $0.510 เฉลี่ย **$0.5225/run** เทียบ budget ปัจจุบัน $0.60/วัน = ใช้ไปแค่ ~87% มี buffer เหลือ — prompt caching + ลดจาก 40→30 tickers ทำให้งบพอสบายๆ ดู section 6 |
 | 5 | Timezone Mismatch (นิก / budget) | ❌ ไม่มี defect | 22:00 Bangkok = 15:00 UTC = วันเดียวกันเสมอ ไม่ข้ามวัน weekday() ถูกต้อง |
 | 6 | Resume loop หลัง BUDGET_EXCEEDED | ✅ แก้แล้ว | เพิ่ม check ใน `/workflow/resume`: ถ้า last log วันนี้เป็น BUDGET_EXCEEDED/COMPLETE/ABORTED → return skipped |
 | 7 | DB Concurrency Lock (Harry vs Colson) | ❌ ไม่มี defect | PostgreSQL MVCC จัดการ read/write concurrency ได้เอง แฮรี่ read-only → ไม่มี deadlock risk |
 
-| 8 | Monday Mode Budget Deficit | ⏳ Monitor | $1.20 ตั้งไว้แล้วสำหรับ 72hr news — รอดู cost จริงวันจันทร์ก่อน (เหมือน Defect 4) |
+| 8 | Monday Mode Budget Deficit | ⏳ Monitor — รอข้อมูลจริง 2026-07-06 | ข้อมูลเก่า (2026-06-29, 40 tickers): cost จริง $1.36 เทียบ budget เดิม $1.20 ตอนนั้น = **เกิน budget ~13%** — แต่ตอนนี้เปลี่ยน 2 อย่างแล้ว: (1) ลดเหลือ 30 tickers (2) budget Monday ปรับเป็น $0.85 (ตึงกว่าเดิมอีก) ยังไม่มีข้อมูลจริงกับ config ปัจจุบัน **Monday ถัดไปคือ 2026-07-06 — เช็ค `cost_usd` ใน `/workflow/history` วันนั้นแล้วเทียบ $0.85 ทันที** ถ้ายังเกินอีกค่อยพิจารณาลด news window จาก 72hr เหลือ 48hr หรือ downgrade บางส่วนไป Haiku |
 | 9 | LLM ล้มเมื่อ PE/MarketCap = None | ❌ ไม่มี defect | Prompt บรรทัด 668 รองรับแล้ว: "ถ้า P/E หรือ Market Cap เป็น N/A ให้วิเคราะห์จาก price แทน" + `_safe_float()` จัดการ edge cases |
 | 10 | LINE Notification Spam | ❌ ไม่มี defect | `_send_line_notification()` ถูกเรียกแค่ 2 จุด: จบสำเร็จ 1 ครั้ง + exception 1 ครั้ง ไม่มีการส่งรายตัว |
 | 11 | Prefetch 2 ระบบซ้อนกัน (GitHub Actions + APScheduler) | ✅ แก้แล้ว (2026-07-01) | Commit ก่อนหน้าเพิ่ม APScheduler แต่ลืมปิด `AI_Stocks_Prefetch` cron เดิม → log ยืนยันมี POST `/prefetch` จากภายนอก (GH Actions) ทำงานอยู่จริง แยกไม่ออกว่ารอบไหนทำงาน → ปิด schedule ใน `prefetch.yml` เหลือแค่ `workflow_dispatch` (manual/debug) ให้ APScheduler เป็นระบบเดียว |
