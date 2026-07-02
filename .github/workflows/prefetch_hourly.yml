@@ -6,14 +6,12 @@ on:
     - cron: '45 14 * * 1-5'    # pre-warm 14:45 UTC (21:45 Bangkok) จ-ศ ก่อน workflow หลัก 22:00
   workflow_dispatch:  # manual trigger สำหรับ test / debug
 
-# ✅ เปิด schedule กลับมาแล้ว 2026-07-02 (Defect #14) — APScheduler ที่ใช้แทนตั้งแต่ 2026-07-01
-# หยุดยิงเงียบๆ นาน 22+ ชม. (รอบ 09:05-13:05 วันที่ 2 ก.ค. ขาดหมด) โดยไม่มี error ให้เห็นเลย
-# เพราะเป็น in-process scheduler ผูกกับ process เดียว ตรวจสอบ/debug ยากกว่า GitHub Actions มาก
-# ตัดสินใจสลับกลับมาใช้ GitHub Actions เป็นระบบหลักแทน (เห็น run history ชัดเจนใน GitHub UI)
-# และปิด setup_scheduler() ใน main.py แล้ว กัน 2 ระบบซ้อนกันแบบเดียวกับ Defect #11
-# 2026-07-02 16:30 — ย้าย comment มาไว้หลัง on: block (เหมือน keepalive.yml/trigger_workflow.yml
-# ที่ทำงานปกติ) + push ใหม่อีกรอบ เพื่อบังคับ GitHub resync schedule (วิธีที่งานวิจัยบอกว่าได้ผลบ่อยสุด
-# หลัง schedule ที่เพิ่ง re-enable ไม่ยอมยิงเองแม้ผ่านไปแล้ว 2 รอบ + กด manual trigger ไปแล้ว)
+# 2026-07-02 17:33 — ไฟล์ใหม่ทั้งอัน (คนละ path จาก prefetch.yml เดิม) เพราะ prefetch.yml เดิม
+# ไม่ยอมให้ GitHub ยิง schedule เองเลยแม้แต่ครั้งเดียว หลัง re-enable แล้ว 3 รอบติด (15:05, 16:05, 17:05)
+# ทั้งที่ลอง manual trigger + ย้าย comment + push ใหม่เพื่อ resync ไปแล้วก็ไม่ช่วย
+# สมมติฐาน: ไฟล์เดิมผ่านการเปิด-ปิด-เปิด schedule มาหลายรอบ อาจมี internal state ค้างฝั่ง GitHub
+# ที่ผูกกับ path เดิม — สร้างไฟล์ใหม่คนละ path เพื่อบังคับให้ GitHub ลงทะเบียนเป็น workflow ใหม่เอี่ยม
+# ไฟล์เดิม (prefetch.yml) ถูกลบไปแล้ว ห้ามสร้างซ้ำ ให้ไฟล์นี้เป็นตัวจริงตัวเดียว
 
 jobs:
   prefetch:
