@@ -80,11 +80,11 @@
 | Workflow | Schedule (UTC) | Bangkok | วัน | หน้าที่ |
 |----------|---------------|---------|-----|---------|
 | `AI_Stocks_Trigger` | 15:00 | 22:00 | Mon–Fri | Main trigger · Monday ส่ง `?include_weekend=true` · wake Render ก่อน (retry 15×) |
-| `AI_Stocks_Prefetch` | ⛔ **ปิด schedule แล้ว 2026-07-01** — เหลือ `workflow_dispatch` (manual/debug เท่านั้น) | — | — | เดิม POST `/prefetch` ทุกชั่วโมง — ย้ายหน้าที่ไป APScheduler ภายใน Render แทน (กัน fetch ซ้ำซ้อน 2 ระบบ) |
-| `Render Keepalive` | ทุก 10 นาที | ทุก 10 นาที | ทุกวัน | ping `/health` + **self-heal**: ถ้า weekday + หลัง 22:00 + ยังไม่มี run วันนี้ → trigger อัตโนมัติ |
-| `Workflow Resume` | 15:15–16:45 ทุก 15 นาที | 22:15–23:45 | Mon–Fri | POST `/workflow/resume` fallback ถ้า crash |
+| `AI_Stocks_Prefetch` | 5 2-14 * * 1-5 + 45 14 * * 1-5 | 09:00–21:00 (นาที :05) + pre-warm 21:45 | Mon–Fri | ✅ **เปิด schedule กลับมาแล้ว 2026-07-02** — POST `/prefetch` ทุกชั่วโมง (ดู Defect #14) |
+| `Render Keepalive` | ทุก 10 นาที | ทุก 10 นาที | ทุกวัน | ping `/health` + **self-heal**: weekday 22:00-01:59 Bangkok + ยังไม่จบวันนี้ → `/workflow/resume` อัตโนมัติ (จำกัดหน้าต่างแล้ว 2026-07-02) |
+| `Workflow Resume` | ⛔ ปิด schedule แล้ว 2026-07-01 — เหลือ `workflow_dispatch` | — | — | ซ้ำซ้อนกับ Keepalive self-heal ที่ครอบคลุมกว้างกว่า |
 
-**Prefetch mechanism (ปัจจุบัน):** APScheduler ภายใน Render process เดียว (`scheduler.py`) — cron ในตัว ทุกชั่วโมง 02:00–14:00 UTC (นาที 05) + pre-warm 14:45 UTC · พึ่ง `Render Keepalive` (ping `/health` ทุก 10 นาที) กันไม่ให้ dyno sleep ระหว่างวัน ไม่ต้องพึ่ง GitHub Actions cron แยกแล้ว
+**Prefetch mechanism (ปัจจุบัน):** กลับมาใช้ `AI_Stocks_Prefetch` (GitHub Actions) เป็นระบบหลักแล้ว 2026-07-02 — APScheduler ภายใน Render (`scheduler.py`) **ปิดการเรียกใช้แล้ว** (คอมเมนต์ `setup_scheduler()` ออกใน `main.py`) เพราะพบว่าหยุดยิงเงียบๆ นาน 22+ ชม.โดยไม่มี error ให้เห็น (Defect #14) — โค้ด `scheduler.py` เก็บไว้เผื่อกลับมาใช้ในอนาคตถ้าหาสาเหตุเจอ แต่ตอนนี้ไม่ได้ทำงานแล้ว
 
 **หมายเหตุ budget:** `datetime.now()` บน Render ใช้ UTC → budget reset = 00:00 UTC = **07:00 Bangkok**
 
@@ -134,8 +134,8 @@ RENDER_EXTERNAL_URL     # ใช้โดย keepalive ping
 
 ## 8. Resilience Pattern
 
-**Checkpoint:** มด validate เสร็จ → บันทึก signal ทีละ ticker ทันที (ไม่รอ QA pass)
-→ ถ้า Render crash กลางคัน `/workflow/resume` จะวิ่งต่อจากตัวที่ค้าง
+**Checkpoint:** ✅ แก้ 2026-07-01 — บันทึกทันทีหลัง**หนุ่มวิเคราะห์เสร็จแต่ละหุ้น** (ไม่รอมด validate ครบชุดแบบเดิม เพราะเป็นขั้นตอนที่นานสุด/เสี่ยงโดนขัดจังหวะสุด) + บันทึกซ้ำอีกรอบหลังมด validate ครบ (ทับด้วยค่า validate แล้ว)
+→ ถ้า Render crash กลางคัน `/workflow/resume` จะวิ่งต่อจากตัวที่ค้างจริง (ไม่ใช่เริ่มใหม่หมด)
 
 **Render free tier:** dyno sleep หลัง 15 นาที idle — มี 2 ชั้นกันหลับ (เพิ่มชั้นที่ 2 เมื่อ 2026-07-01):
 1. **GitHub Actions Keepalive** (`keepalive.yml`) ทุก 10 นาที — Step 1 wake+retry (6×15s) + Step 2 self-heal งาน 22:00 + Step 3 self-heal prefetch (cache stale >70 นาที → POST `/prefetch` เอง)
@@ -231,6 +231,8 @@ Dashboard_Share/
 | 12 | Workflow 22:00 ไม่เคยเสร็จอัตโนมัติเลย ~2 สัปดาห์ | ✅ แก้แล้ว (2026-07-01) | ตรวจ `/workflow/history` พบ 7 runs ทั้งหมดตั้งแต่ 23 มิ.ย. เสร็จเวลาไม่แน่นอน (21:29-21:31 UTC หรือ 01:53 UTC) ไม่เคยใกล้ 22:00-23:00 Bangkok เลย ต้นเหตุ 2 จุด: (1) Render free-tier sleep ฆ่า background thread กลางคัน — ก่อนหน้านี้พึ่งแค่ GitHub Actions Keepalive ภายนอกซึ่งไม่แม่นยำพอ (2) **จุดอ่อนสำคัญกว่า**: `_checkpoint_database()` เดิมเรียกแค่ครั้งเดียวหลังมด validate ครบทั้งชุด 30 ตัว ไม่ได้ save ทีละตัวระหว่างหนุ่มวิเคราะห์ (ขั้นตอนที่นานสุด/เสี่ยงโดนขัดจังหวะสุด) → โดนฆ่ากลางคันแล้วงานหายหมด ไม่มีอะไรให้ resume ต่อ ซ้ำร้าย `keepalive.yml` self-heal เดิมยิง `/workflow` (restart ใหม่ทั้งชุด) ไม่ใช่ `/workflow/resume` → เสียเงินวิเคราะห์ซ้ำ. **แก้แล้ว**: (a) ย้าย checkpoint มา save ทีละตัวทันทีหลังหนุ่มวิเคราะห์แต่ละหุ้นเสร็จ (agents.py `num_analyze_stocks`) (b) แก้ `keepalive.yml` self-heal ให้ยิง `/workflow/resume` แทน `/workflow` (c) ปิด schedule ของ `resume.yml` เดิม (ซ้ำซ้อนกับ keepalive self-heal ที่ครอบคลุมกว้างกว่าแล้ว) เหลือแค่ `workflow_dispatch` — พิจารณา Render Starter ($7/mo, ไม่มี sleep เลย) แล้ว **MBBook เลือกไม่อัพเกรด ใช้ free tier ต่อ** (2026-07-01) |
 
 | 13 | LINE แจ้ง BUDGET_EXCEEDED ตอนตี 3-4 ทุกคืน (3 วันติด) | ✅ แก้แล้ว (2026-07-02) | หลัง workflow COMPLETE ตอน 22:xx แล้ว keepalive self-heal (เดิมไม่มีเพดานบน HOUR — ไล่ยิงทุก 10 นาทีจน 23:59 UTC = ตี 7 เช้า Bangkok) ยังพยายาม `/workflow/resume` ต่อไปเรื่อยๆ ทั้งคืน ปัญหาซ้อน 2 จุด: (1) `BUDGET_EXCEEDED` ไม่เคยถูกบันทึกลง WorkflowLog เลย (ต่างจาก COMPLETE/REJECTED ที่บันทึก) ทำให้ `/workflow/resume` เช็ค "วันนี้จบหรือยัง" ไม่เจอ พยายามซ้ำได้เรื่อยๆ (2) `REJECTED` ไม่อยู่ใน skip-list ของ `/workflow/resume` (มีแค่ BUDGET_EXCEEDED/COMPLETE/ABORTED) ทำให้ถ้า QA reject self-heal ก็ยังพยายามต่อ จนกว่าจะชน daily budget แล้วได้ BUDGET_EXCEEDED ซึ่งก็ไม่บันทึกอีก วนแบบนี้ไปเรื่อยๆ จนกว่า UTC date จะเปลี่ยน (~ตี 7 Bangkok) ถึงจะหยุดเพราะ budget reset — อธิบายได้ว่าทำไมมาตอนตี 3-4 ทุกคืน **แก้แล้ว**: (a) บันทึก WorkflowLog ให้ BUDGET_EXCEEDED ด้วย (ไม่เรียก LLM ไม่เสียเงินเพิ่ม) (b) เพิ่ม REJECTED เข้า skip-list (c) จำกัดหน้าต่าง self-heal ใน keepalive.yml เหลือ 15:00-18:59 UTC (22:00-01:59 Bangkok) แทนที่จะไล่ยาวทั้งคืน |
+
+| 14 | Prefetch cache ค้าง 22+ ชม. — root cause จริงคือ `/prefetch` ไม่มี lock กันรันซ้อน | ✅ แก้แล้ว (2026-07-02) | ตรวจ `/prefetch/status` วันที่ 2026-07-02 เวลา 13:41 น. พบ `latest_fetch` ค้างมา 22+ ชม. ตอนแรกสงสัยว่า APScheduler หยุดยิง (สลับไปใช้ GitHub Actions `AI_Stocks_Prefetch` แทนแล้ว) **แต่หลัง manual POST /prefetch เพื่อทดสอบ พบว่า cache ยังไม่ขยับเลย** — สืบต่อพบ root cause จริง: `POST /prefetch` ใน `main.py` **ไม่มี lock กันรันซ้อนเลย** (endpoint เดิม เทียบกับ `scheduler.py` ที่มี `_prefetch_lock` อยู่แล้ว) ในขณะที่ 1 รอบ prefetch ใช้เวลาจริง ~11-13 นาที (ข่าว sleep 20s/ticker × 30 ticker) แต่ `keepalive.yml` Step 3 self-heal ยิงทุก 10 นาทีถ้า cache stale >70 นาที — ทำให้ทุกรอบที่ยังไม่ทันเสร็จ (เกือบทุกรอบ เพราะ 11-13 นาที > รอบเช็ค 10 นาที) โดน trigger ซ้อนอีกรอบเรื่อยๆ ทั้งวัน หลายสิบ background task แย่งกัน fetch ticker เดียวกันพร้อมกัน ชน rate limit จนไม่มีรอบไหนเสร็จสมบูรณ์เลยสักครั้ง **แก้แล้ว**: เพิ่ม `_prefetch_lock` + `_prefetch_running` flag ใน `main.py`'s `/prefetch` endpoint — ถ้ามีรอบทำงานอยู่แล้ว trigger ใหม่จะได้ `{"status":"already_running"}` แทนที่จะสร้าง background task ซ้อน พร้อมโชว์ `prefetch_running` ใน `/prefetch/status` ด้วย (เพิ่มเติมจากที่สลับ trigger กลับไป GitHub Actions ไปแล้วก่อนหน้า) |
 
 **ถ้า Defect 2, 4 หรือ 8 เกิดจริงวันจันทร์:**
 - OOM → เพิ่ม `gc.collect()` หลัง checkpoint แต่ละ ticker

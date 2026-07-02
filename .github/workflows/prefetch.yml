@@ -1,11 +1,15 @@
 name: AI_Stocks_Prefetch
 
-# ⛔ Schedule ปิดแล้ว 2026-07-01 — ย้ายไปใช้ APScheduler ภายใน Render แทน (scheduler.py)
-# เหตุผล: รัน 2 ระบบพร้อมกัน (GitHub Actions cron + APScheduler) ทำให้ fetch ซ้ำซ้อน
-#         เปลืองเควต้า API และแยกไม่ออกว่ารอบไหนทำงานจริง
-# เหลือ workflow_dispatch ไว้เผื่อ trigger manual ตอน debug เท่านั้น
+# ✅ เปิด schedule กลับมาแล้ว 2026-07-02 (Defect #14) — APScheduler ที่ใช้แทนตั้งแต่ 2026-07-01
+# หยุดยิงเงียบๆ นาน 22+ ชม. (รอบ 09:05-13:05 วันที่ 2 ก.ค. ขาดหมด) โดยไม่มี error ให้เห็นเลย
+# เพราะเป็น in-process scheduler ผูกกับ process เดียว ตรวจสอบ/debug ยากกว่า GitHub Actions มาก
+# ตัดสินใจสลับกลับมาใช้ GitHub Actions เป็นระบบหลักแทน (เห็น run history ชัดเจนใน GitHub UI)
+# และปิด setup_scheduler() ใน main.py แล้ว กัน 2 ระบบซ้อนกันแบบเดียวกับ Defect #11
 on:
-  workflow_dispatch:  # manual trigger สำหรับ test / debug เท่านั้น — ไม่มี schedule อัตโนมัติแล้ว
+  schedule:
+    - cron: '5 2-14 * * 1-5'   # ทุกชั่วโมง นาที :05 ช่วง 02:00-14:00 UTC (09:00-21:00 Bangkok) จ-ศ
+    - cron: '45 14 * * 1-5'    # pre-warm 14:45 UTC (21:45 Bangkok) จ-ศ ก่อน workflow หลัก 22:00
+  workflow_dispatch:  # manual trigger สำหรับ test / debug
 
 jobs:
   prefetch:

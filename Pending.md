@@ -15,10 +15,15 @@
 
 **ยืนยันแล้วคืน 2026-07-01**: LINE ตอน 22:54 มาจาก manual trigger (job `a035af29`) ไม่ใช่ auto — เพราะ fix (checkpoint+resume self-heal) push หลัง 22:00 ไปแล้ว ยังไม่เคยเทสต์ fix จริง
 
-**เจอ Defect #13 เพิ่ม (2026-07-02 เช้ามืด)**: LINE แจ้ง BUDGET_EXCEEDED ตอนตี 3-4 มา 3 คืนติด — สาเหตุคือ keepalive self-heal ไม่มีเพดานเวลาบน + BUDGET_EXCEEDED ไม่เคยบันทึกลง DB + REJECTED ไม่อยู่ใน skip-list ทำให้ไล่ยิง resume ทั้งคืนจนชน budget ดูรายละเอียดที่ Blueprint.md Defect #13 — แก้แล้วทั้ง 3 จุด ต้อง push รอบใหม่
+**เจอ Defect #13 เพิ่ม (2026-07-02 เช้ามืด)**: LINE แจ้ง BUDGET_EXCEEDED ตอนตี 3-4 มา 3 คืนติด — สาเหตุคือ keepalive self-heal ไม่มีเพดานเวลาบน + BUDGET_EXCEEDED ไม่เคยบันทึกลง DB + REJECTED ไม่อยู่ใน skip-list ทำให้ไล่ยิง resume ทั้งคืนจนชน budget ดูรายละเอียดที่ Blueprint.md Defect #13 — แก้แล้วทั้ง 3 จุด push แล้ว (ยืนยันขึ้น GitHub ครบ)
+
+**เจอ Defect #14 เพิ่ม (2026-07-02 บ่าย) — แก้ครบแล้ว**: prefetch cache ค้าง 22+ ชม. root cause จริงคือ `/prefetch` ไม่มี lock กันรันซ้อน (รอบใช้เวลา ~11-13 นาที แต่ keepalive self-heal ยิงทุก 10 นาที ซ้อนกันจนชน rate limit ไม่มีรอบไหนเสร็จ) แก้ 2 ชั้น: (1) สลับ trigger กลับไป GitHub Actions `AI_Stocks_Prefetch` (2) เพิ่ม `_prefetch_lock` กันรันซ้อนใน `main.py` ดูรายละเอียดที่ Blueprint.md Defect #14 **ต้อง push รอบนี้ด้วย** (prefetch.yml, main.py)
+
+**บั๊กของ Cow เอง**: scheduled task `monitor-prefetch-jul2` ที่ตั้งไว้เช็คทุกชั่วโมง self-reschedule ตัวเองไม่ทำงาน (เช็คแค่รอบเดียว 09:26 แล้วหยุด แม้เจอ anomaly ถูกต้องและ log ไว้ใน `prefetch_check_log_20260702.txt`) — เปลี่ยนแนวทาง `monitor-workflow-jul2` เป็นชุด one-shot tasks แยกกัน (ไม่พึ่ง self-reschedule) แทนแล้ว เพื่อความชัวร์คืนนี้
 
 **ตั้ง scheduled task ตรวจสอบแล้ว (2 ตัว, เฉพาะวันที่ 2026-07-02 วันเดียว ไม่ถาวร):**
-- `monitor-workflow-jul2`: เช็คทุกชั่วโมงเริ่ม 22:30 น. จนกว่า workflow หลัก (22:00) จะจบหรือเกิน 10:00 น. เช้า 2026-07-03 — ถ้ายังไม่จบตามกำหนดจะแจ้งเตือนให้ขุดต่อ (เช็ค Render deploy events ว่าชนช่วงเวลาอีกหรือไม่)
+- เช็ค workflow หลัก (22:00): 5 one-shot tasks — `monitor-workflow-jul2` (22:30), `-2300`, `-0000`, `-0100`, `-0200` (02:00 คือรอบสรุปผลสุดท้าย)
+- เช็ค prefetch ระบบใหม่ (GitHub Actions) **ระหว่างวัน** ก่อนถึง 22:00 (ตามที่ MBBook ท้วงว่าต้องจับปัญหาให้ทันก่อนรันจริง ไม่ใช่เช็คแต่หลัง 22:00): `monitor-prefetch-jul2-1425/1525/1625/1725/1825/1925/2025` (แจ้งเฉพาะเจอ anomaly) + `-2150` (รอบสุดท้ายหลัง pre-warm 21:45 — แจ้งผลเสมอไม่ว่า OK/ANOMALY เพราะเป็นจังหวะสุดท้ายก่อนรันจริง)
 - `monitor-prefetch-jul2`: เช็คนัตตี้ hourly prefetch (ราคา+ข่าว) ทุกชั่วโมง **09:25-21:25 น.** (13 รอบ — เลื่อนจาก :15 เป็น :25 เพราะนัตตี้ 1 รอบใช้เวลาจริง ~11-13 นาที เช็คเร็วไปจะชนกันกลางคัน) เก็บ log ไว้ที่ `prefetch_check_log_20260702.txt` แจ้งทันทีถ้าเจอความผิดปกติ + สรุปภาพรวมท้ายวันตอน 21:25 น.
 
 ---

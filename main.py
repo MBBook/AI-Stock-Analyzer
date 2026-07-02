@@ -65,6 +65,14 @@ _job: dict = {
 }
 _job_lock = threading.Lock()
 
+# ✅ เพิ่ม 2026-07-02 (Defect #14 ต่อเนื่อง): lock กัน /prefetch รันซ้อนกัน
+# เดิม endpoint นี้ไม่มี lock เลย — keepalive.yml Step 3 self-heal ยิงทุก 10 นาทีถ้า cache stale
+# แต่ prefetch 1 รอบใช้เวลาจริง ~11-13 นาที (ดึงข่าวทีละหุ้น sleep 20s) ทำให้ทุกๆ 10 นาทีที่ cache
+# ยังไม่ทันอัพเดต (เพราะรอบก่อนยังไม่เสร็จ) จะโดนยิงซ้อนอีกรอบ ซ้อนกันเรื่อยๆ ทั้งวัน แย่งกัน fetch
+# ticker เดียวกัน ชน rate limit จนไม่มีรอบไหนเสร็จสมบูรณ์เลย (คือสาเหตุที่แท้จริงที่ cache ค้าง 22+ ชม.)
+_prefetch_running = False
+_prefetch_lock = threading.Lock()
+
 
 def _keepalive_ping():
     """Ping /health ตัวเองทุก 10 นาที ป้องกัน Render kill dyno กลางคัน — เฉพาะช่วง workflow กำลังรัน"""
@@ -243,7 +251,12 @@ async def startup():
             print("[MIGRATION] hourly_cache + news_cache tables ready")
         except Exception as e:
             print(f"[MIGRATION] {e}")
-    setup_scheduler()
+
+    # ⛔ ปิด APScheduler แล้ว 2026-07-02 (Defect #14) — หยุดยิง prefetch เงียบๆ นาน 22+ ชม.
+    # (รอบ 09:05-13:05 วันที่ 2 ก.ค. ขาดหมด) โดยไม่มี error/log ให้ debug เลย เพราะเป็น
+    # in-process scheduler ผูกกับ process เดียว ตรวจสอบยากกว่า GitHub Actions มาก
+    # สลับกลับไปใช้ AI_Stocks_Prefetch (GitHub Actions, เห็น run history ชัดเจน) เป็นระบบหลักแทน
+    # setup_scheduler()
 
     # ===== SELF-PING: กัน Render sleep ตลอดชีวิต process ไม่พึ่ง GitHub Actions =====
     threading.Thread(target=_self_ping_forever, daemon=True).start()
@@ -260,7 +273,17 @@ async def prefetch_prices(background_tasks: BackgroundTasks):
     """Pre-fetch ราคาหุ้นทั้งหมดผ่าน Finnhub → เก็บใน HourlyCache
     เรียกโดย GitHub Actions ทุกชั่วโมง Mon-Fri 09:00-21:00 Bangkok
     ที่ 22:00 นัตตี้จะอ่านจาก cache → ประหยัดเวลา ~10 นาที"""
+    global _prefetch_running
+
+    # ✅ กันรันซ้อน (Defect #14): ถ้ารอบก่อนหน้ายังไม่เสร็จ (ใช้เวลาจริง ~11-13 นาที)
+    # อย่าปล่อยให้ trigger รอบใหม่ (เช่น keepalive self-heal ทุก 10 นาที) มาแย่งชน rate limit
+    with _prefetch_lock:
+        if _prefetch_running:
+            return {"status": "already_running", "message": "Prefetch is already running — skip this trigger"}
+        _prefetch_running = True
+
     def _run_prefetch():
+        global _prefetch_running
         try:
             db = __import__("database").SessionLocal()
             from models import Stock
@@ -276,6 +299,9 @@ async def prefetch_prices(background_tasks: BackgroundTasks):
             print("[PREFETCH] All done (prices + news)")
         except Exception as e:
             print(f"[PREFETCH] Error: {e}")
+        finally:
+            with _prefetch_lock:
+                _prefetch_running = False
 
     background_tasks.add_task(_run_prefetch)
     return {"status": "prefetch_started", "message": "Pre-fetching prices in background"}
@@ -293,6 +319,7 @@ async def prefetch_status():
         news_latest  = db_s.query(func.max(NewsCache.fetched_at)).scalar()
         db_s.close()
         return {
+            "prefetch_running": _prefetch_running,
             "price_cache":  {"entries": price_count, "latest_fetch": price_latest.isoformat() if price_latest else None},
             "news_cache":   {"entries": news_count,  "latest_fetch": news_latest.isoformat()  if news_latest  else None},
         }
