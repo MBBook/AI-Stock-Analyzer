@@ -116,7 +116,7 @@
 | Monday | $0.85 | news 3 วัน (Sat+Sun+Mon) — ข้อมูลเก่า (40 tickers) $1.36 เกิน แต่ตอนนี้ 30 tickers แล้ว รอ 2026-07-06 ยืนยัน |
 | Tue–Thu | $0.60 | ✅ ยืนยันจริงแล้ว 4/4 รอบ เฉลี่ย $0.5225/run (87% ของ budget) |
 | Friday | $0.75 | + นิก optimize — ยังไม่มีข้อมูลจริงกับ 30 tickers |
-| **Monthly ceiling (โค้ด)** | **~$13.60** | เผื่อ buffer เหนือเพดานจริง $12 ไว้ก่อน (ดู [Pending.md](Pending.md) หัวข้อทบทวนหลัง 3 เดือน) |
+| **Monthly ceiling (โค้ด)** | **~$13.60** | เผื่อ buffer เหนือเพดานจริง $12 ไว้ก่อน (ดู [Pending.md](../1_Reports/Pending.md) หัวข้อทบทวนหลัง 3 เดือน) |
 | **เป้าหมายจริงของ MBBook** | **$10 เป้า / $12 เพดาน** | ติดตามของจริงผ่าน `GET /costs/summary` (dashboard tab Status) — เทรนด์ Tue-Thu ตอนนี้อยู่ในเป้า |
 
 ---
@@ -198,25 +198,41 @@ python -m pytest test_agents.py test_main.py -v
 
 ## 11. โครงสร้างไฟล์หลัก
 
+> ✅ จัดระเบียบใหม่ 2026-07-02 22:xx — แยกไฟล์ core app (ต้องอยู่ root ห้ามย้าย เพราะ Render/GitHub บังคับ path) ออกจากไฟล์เอกสาร/สคริปต์อ้างอิง (ย้ายเข้าโฟลเดอร์แล้ว)
+
 ```
 Dashboard_Share/
-├── agents.py          # AI agents ทั้ง 10 ตัว + AgentOrchestrator
-├── main.py            # FastAPI app + endpoints + job state
-├── models.py          # SQLAlchemy models (Stock, Trade, Portfolio, WorkflowLog, NikSuggestion)
-├── database.py        # SessionLocal + engine
-├── scheduler.py       # APScheduler (keepalive)
+├── agents.py          # AI agents ทั้ง 10 ตัว + AgentOrchestrator (ห้ามย้าย — Render import)
+├── main.py            # FastAPI app + endpoints + job state (ห้ามย้าย — Render start command)
+├── models.py          # SQLAlchemy models (ห้ามย้าย)
+├── database.py        # SessionLocal + engine (ห้ามย้าย)
+├── scheduler.py       # APScheduler เดิม ปิดใช้งานแล้ว (ห้ามย้าย — ยัง import อยู่ใน main.py)
+├── requirements.txt    # ห้ามย้าย — Render build command
 ├── test_agents.py     # 107 unit tests (agents)
 ├── test_main.py       # 26 unit tests (endpoints)
-├── Blueprint.md       # ← ไฟล์นี้
-├── .github/workflows/
-│   ├── trigger_workflow.yml  # AI_Stocks_Trigger — main cron 22:00 จ–ศ
-│   ├── keepalive.yml         # Render Keepalive — ทุก 10 นาที + self-heal trigger
-│   ├── prefetch_hourly.yml   # AI_Stocks_Prefetch — ทุกชั่วโมง 09:00–21:45 จ–ศ (2026-07-02: ย้ายจาก prefetch.yml เดิมที่ลบไปแล้ว เพราะ GitHub ไม่ยอมยิง schedule ให้ ดู Defect #14)
-│   └── resume.yml            # ⛔ ปิด schedule แล้ว — workflow_dispatch เท่านั้น
-├── frontend/
-│   └── src/App.jsx    # React dashboard
-└── Claude_Profect/    # backup / reference files
+├── .github/workflows/  # ห้ามย้าย — GitHub บังคับ path นี้เป๊ะ
+│   ├── trigger_workflow.yml  # AI_Stocks_Trigger — เดิม main cron 22:00 จ–ศ ⛔ ปิด schedule แล้ว (เหลือ workflow_dispatch) trigger จริงอยู่ที่ cron-job.org
+│   ├── keepalive.yml         # Render Keepalive ⛔ ปิด schedule แล้ว (เหลือ workflow_dispatch)
+│   ├── prefetch_hourly.yml   # AI_Stocks_Prefetch ⛔ ปิด schedule แล้ว (เหลือ workflow_dispatch)
+│   ├── resume.yml            # ⛔ ปิด schedule แล้ว — workflow_dispatch เท่านั้น
+│   └── rotate-api-key.yml    # หมุน API key ทุกวันที่ 1/15 — ยังทำงานปกติ ไม่เกี่ยวกับ trigger
+├── frontend/           # React dashboard — ห้ามย้าย (deploy pipeline แยก)
+│
+├── 1_Reports/          # ไฟล์ที่ Cow เขียนรายงาน/สรุปให้ MBBook
+│   ├── Output.md        # ผลลัพธ์คำสั่ง PowerShell ที่ MBBook รัน (ยาวเกิน copy)
+│   └── Pending.md       # งานค้าง/ปัญหาที่ยังไม่จบ
+│
+├── 2_Reference/        # เกี่ยวกับงาน แต่ไม่ได้ import/รันจริงในระบบ
+│   ├── setup_cronjob_org.py       # สคริปต์ตั้ง 6 cron jobs ครั้งแรก (รันแล้ว เก็บไว้อ้างอิง/รันซ้ำได้ถ้าต้องสร้างใหม่)
+│   ├── update_cronjob_weekends.py # สคริปต์แก้ job ให้รันทุกวัน (รันแล้ว)
+│   └── prefetch_check_log_20260702.txt  # log การเช็คนัตตี้วันที่ 2 ก.ค. (ไม่ commit ขึ้น git)
+│
+└── 3_CowContext/       # ไฟล์ที่ Cow ต้องเปิดอ่านก่อนเริ่มงานทุกครั้ง
+    ├── Blueprint.md      # ← ไฟล์นี้ (source of truth ของทั้งระบบ)
+    └── README.md
 ```
+
+**⚠️ หมายเหตุสำคัญสำหรับ Cow**: `Blueprint.md` และ `Pending.md` ย้ายจาก root มาอยู่ `3_CowContext/` และ `1_Reports/` แล้วตั้งแต่ 2026-07-02 — กฎ "อ่าน Blueprint.md ก่อนเริ่มงานทุกครั้ง" ให้หมายถึงไฟล์ที่ path ใหม่นี้ (บันทึกไว้ใน project memory แล้วด้วย กันลืมข้ามเซสชัน)
 
 ---
 
