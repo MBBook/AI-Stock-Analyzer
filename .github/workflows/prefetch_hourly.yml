@@ -1,9 +1,11 @@
 name: AI_Stocks_Prefetch
 
+# ⛔ ปิด schedule แล้ว 2026-07-02 22:xx — ย้าย trigger ไป cron-job.org (Job B1/B2) แล้ว
+# พิสูจน์แล้วเสถียรจริง เหลือ workflow_dispatch ไว้ manual backup — revert เร็วถ้าจำเป็น
 on:
-  schedule:
-    - cron: '5 2-14 * * 1-5'   # ทุกชั่วโมง นาที :05 ช่วง 02:00-14:00 UTC (09:00-21:00 Bangkok) จ-ศ
-    - cron: '45 14 * * 1-5'    # pre-warm 14:45 UTC (21:45 Bangkok) จ-ศ ก่อน workflow หลัก 22:00
+  # schedule:
+  #   - cron: '5 2-14 * * 1-5'   # ทุกชั่วโมง นาที :05 ช่วง 02:00-14:00 UTC (09:00-21:00 Bangkok) จ-ศ
+  #   - cron: '45 14 * * 1-5'    # pre-warm 14:45 UTC (21:45 Bangkok) จ-ศ ก่อน workflow หลัก 22:00
   workflow_dispatch:  # manual trigger สำหรับ test / debug
 
 # 2026-07-02 17:33 — ไฟล์ใหม่ทั้งอัน (คนละ path จาก prefetch.yml เดิม) เพราะ prefetch.yml เดิม

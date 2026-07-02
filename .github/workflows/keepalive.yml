@@ -1,8 +1,12 @@
 name: Render Keepalive
 
+# ⛔ ปิด schedule แล้ว 2026-07-02 22:xx — ย้าย trigger ไป cron-job.org ทั้งหมดแล้ว
+# (พิสูจน์แล้วว่าเสถียรจริง: 2 รอบ prefetch ตรงเวลาติดกัน + workflow หลักจบอัตโนมัติครั้งแรก 22:10 น.)
+# เหลือ workflow_dispatch ไว้เป็น manual backup เท่านั้น — ถ้าจะกลับมาใช้ GH Actions
+# แค่เอา # ออกจาก 2 บรรทัดข้างล่าง แล้ว push ก็พอ (revert ได้เร็ว)
 on:
-  schedule:
-    - cron: '*/10 * * * *'  # ทุก 10 นาที ทุกวัน
+  # schedule:
+  #   - cron: '*/10 * * * *'  # ทุก 10 นาที ทุกวัน
   workflow_dispatch:
 
 jobs:

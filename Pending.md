@@ -1,7 +1,7 @@
 # Pending — AI Stock Analyzer V4
 
 > รายการที่รอดำเนินการในอนาคต
-> อัพเดตล่าสุด: 2026-07-01 (22:50 Bangkok)
+> อัพเดตล่าสุด: 2026-07-02 (18:xx Bangkok)
 
 ---
 
@@ -22,6 +22,28 @@
 **เจอ Defect #14 เพิ่ม (2026-07-02 บ่าย) — แก้ครบแล้ว + ยืนยันผลจริง**: prefetch cache ค้าง 22+ ชม. root cause จริงคือ `/prefetch` ไม่มี lock กันรันซ้อน (รอบใช้เวลา ~11-13 นาที แต่ keepalive self-heal ยิงทุก 10 นาที ซ้อนกันจนชน rate limit ไม่มีรอบไหนเสร็จ) แก้ 2 ชั้น: (1) สลับ trigger กลับไป GitHub Actions `AI_Stocks_Prefetch` (2) เพิ่ม `_prefetch_lock` กันรันซ้อนใน `main.py` — push แล้ว (commit `8782ad1`) **ทดสอบ manual trigger 14:22 น. 2026-07-02 สำเร็จ**: price_cache latest_fetch 14:22 น., news_cache latest_fetch 14:32 น. (~10 นาที) จบสมบูรณ์ครั้งแรกในรอบ 22+ ชม. ดูรายละเอียดที่ Blueprint.md Defect #14
 
 **บั๊กของ Cow เอง**: scheduled task `monitor-prefetch-jul2` ที่ตั้งไว้เช็คทุกชั่วโมง self-reschedule ตัวเองไม่ทำงาน (เช็คแค่รอบเดียว 09:26 แล้วหยุด แม้เจอ anomaly ถูกต้องและ log ไว้ใน `prefetch_check_log_20260702.txt`) — เปลี่ยนแนวทาง `monitor-workflow-jul2` เป็นชุด one-shot tasks แยกกัน (ไม่พึ่ง self-reschedule) แทนแล้ว เพื่อความชัวร์คืนนี้
+
+**🚨 พบต้นตอจริงแล้ว 2026-07-02 18:xx น. — GitHub Actions cron ไม่เสถียรทั้งระบบ ไม่ใช่แค่ prefetch.yml**: เช็คย้อนหลัง `keepalive.yml` (ตั้ง cron ทุก 10 นาที ตั้งแต่ 26 มิ.ย. 21:50 น.) พบว่ารันจริงแค่ **21 ครั้ง ใน 5.5 วัน** (ควรรัน ~790 ครั้ง — ห่างเกือบ 40 เท่า) แปลว่า self-heal ทั้งฝั่งกลางวัน (prefetch) และกลางคืน (workflow resume) ที่พึ่ง keepalive.yml อยู่ตลอด ไม่เคยทำงานได้จริงเลยตลอด 2 สัปดาห์ที่ผ่านมา — การแก้ไฟล์ `prefetch.yml`→`prefetch_hourly.yml` ก่อนหน้านี้ (17:33 น.) จึงมีโอกาสสูงว่าไม่ช่วยอะไร เพราะรากปัญหาคือ GitHub Actions cron ของทั้งเรพอไม่น่าเชื่อถือ (ยืนยันจาก GitHub community discussions: scheduled workflow เป็น "best effort" เท่านั้น อาจโดน delay/skip ตอนโหลดสูงโดยไม่มี alert)
+
+**🔧 แผนแก้ที่ตกลงกับ MBBook แล้ว (2026-07-02 18:xx)**: ย้าย trigger ทั้งหมดจาก GitHub Actions ไปเป็น **cron-job.org** (external cron service ฟรี ยิงได้ถี่สุด 1 นาที เชื่อถือได้กว่าสำหรับงานแบบนี้เพราะเป็น core product ไม่ใช่ฟีเจอร์เสริมของ CI/CD) — MBBook เคยมีปัญหาจริงกับ cron-job.org มาก่อน (รายละเอียดไม่ทราบแน่ชัด สาเหตุที่ย้ายมา GitHub Actions รอบก่อน) จึงต้องเฝ้าดูใกล้ชิดช่วงแรกว่าจะเจอปัญหาเดิมซ้ำหรือไม่ — **ไม่ปิด GitHub Actions schedule ทันที** (ปล่อยรันคู่ขนานไปก่อน เพราะ endpoint ทุกตัวมี lock/idempotency guard อยู่แล้ว ยิงซ้อนกันได้อย่างปลอดภัย) รอ cron-job.org พิสูจน์ตัวว่าเสถียรจริงสัก 2-3 วันค่อยปิด GitHub Actions schedule ทิ้ง
+
+Job ที่ออกแบบไว้ (6 jobs, ดู `setup_cronjob_org.py`):
+- A: GET `/health` ทุก 10 นาที 02:00-19:00 UTC จ-ศ (keepalive/wake)
+- B1: POST `/prefetch` ทุกชั่วโมง :05 น. 02:00-14:00 UTC จ-ศ
+- B2: POST `/prefetch` pre-warm 14:45 UTC จ-ศ
+- C1: POST `/workflow?include_weekend=true` 15:00 UTC เฉพาะจันทร์
+- C2: POST `/workflow` 15:00 UTC อังคาร-ศุกร์
+- D: POST `/workflow/resume` ทุก 10 นาที 15:00-18:59 UTC จ-ศ (self-heal)
+
+**✅ ตั้งเสร็จแล้ว 2026-07-02 18:33 น.**: MBBook รัน `setup_cronjob_org.py` สำเร็จ ครบทั้ง 6 jobs บน console.cron-job.org (A/B1/B2/C1/C2/D) เช็ค "Next execution" ตรงกับที่คำนวณไว้ทุกตัว — Job A (Keepalive Wake) ยิงสำเร็จไปแล้ว 1 ครั้ง (18:30:37 น., 227ms, Successful) ยืนยันว่า cron-job.org ยิงตรงเวลาจริง ต่างจาก GitHub Actions ที่ปล่อยไว้คู่ขนาน (ยังไม่ปิด schedule)
+
+**✅ ยืนยันสำเร็จ 2026-07-02 19:32-20:43 น.**: Job B1 ยิงตรงเวลา 2 รอบติด (19:05, 20:05) prefetch จบสมบูรณ์ทุกครั้ง — cron-job.org เสถียรจริง
+
+**🎉 ยืนยันครบวงจร 2026-07-02 22:10 น. — Defect #12 ปิดเคสได้จริงเป็นครั้งแรก!**: workflow หลักจบอัตโนมัติเองครั้งแรกในประวัติศาสตร์โปรเจกต์ (run id 9, COMPLETE, 30 หุ้น, QA PASS, BUY 6/HOLD 24/SELL 0, cost $0.51) trigger โดย cron-job.org (Job C2) ล้วนๆ ไม่ต้อง manual — LINE แจ้งเตือนมาเอง 22:10 น. (10 นาทีหลัง trigger ตามที่คาดไว้) ยืนยันจาก `/workflow/history` ตรงกันเป๊ะ — 2 สัปดาห์ที่รอมาจบแล้ว
+
+**✅ ปิด schedule ฝั่ง GitHub Actions แล้ว 2026-07-02 22:xx** (ตาม MBBook ขอให้เดินหน้าต่อทันทีหลังเห็นผลจริง ไม่ต้องรอ 2-3 วัน) — comment out schedule: ใน `keepalive.yml`, `prefetch_hourly.yml`, `trigger_workflow.yml` เหลือ `workflow_dispatch` เป็น manual backup ทุกไฟล์ (revert ง่าย แค่เอา # ออกแล้ว push) **รอ MBBook commit+push** — cron-job.org เป็นระบบ trigger หลักเพียงระบบเดียวแล้วตั้งแต่นี้
+
+**🔧 แก้เพิ่ม 2026-07-02 (หลังตั้งเสร็จ)**: MBBook ขอให้ Job A (Keepalive Wake) และ B1 (Prefetch Hourly) ดึง**ทุกวัน**รวมเสาร์-อาทิตย์ (เดิมจันทร์-ศุกร์) เหตุผล: ลดคอขวดงานนัตตี้ (กระจาย load ไม่ให้กองไว้รอวันจันทร์อย่างเดียว) — B2/C1/C2/D ยังคงจันทร์-ศุกร์เหมือนเดิม (workflow วิเคราะห์หลักไม่รันวันหยุดตลาด) **✅ แก้เสร็จแล้ว 2026-07-02**: ใช้สคริปต์ `update_cronjob_weekends.py` (ผ่าน cron-job.org API แทนการติ๊ก UI เอง) อัพเดตสำเร็จครบ 2 jobs — B1 (jobId 7978364), A (jobId 7978362) ทำงานทุกวันแล้วยืนยันจาก terminal output จริง — อัพเดต `setup_cronjob_org.py` ให้ตรงกันแล้วเผื่อต้องสร้างใหม่ในอนาคต
 
 **ตั้ง scheduled task ตรวจสอบแล้ว (2 ตัว, เฉพาะวันที่ 2026-07-02 วันเดียว ไม่ถาวร):**
 - เช็ค workflow หลัก (22:00): 5 one-shot tasks — `monitor-workflow-jul2` (22:30), `-2300`, `-0000`, `-0100`, `-0200` (02:00 คือรอบสรุปผลสุดท้าย)

@@ -1,8 +1,10 @@
 name: AI_Stocks_Trigger
 
+# ⛔ ปิด schedule แล้ว 2026-07-02 22:xx — ย้าย trigger ไป cron-job.org (Job C1/C2) แล้ว
+# พิสูจน์แล้วเสถียรจริง (run id 9 จบอัตโนมัติ 22:10 น.) เหลือ workflow_dispatch ไว้ manual backup
 on:
-  schedule:
-    - cron: '0 15 * * 1-5'  # 22:00 Bangkok (UTC+7) = 15:00 UTC, Mon–Fri
+  # schedule:
+  #   - cron: '0 15 * * 1-5'  # 22:00 Bangkok (UTC+7) = 15:00 UTC, Mon–Fri
   workflow_dispatch:          # manual trigger จาก GitHub UI
 
 jobs:
