@@ -195,6 +195,21 @@ async def startup():
         except Exception as e:
             print(f"[MIGRATION] {e}")
         try:
+            # ✅ แก้ 2026-07-03: trades.shares / portfolio.shares เดิมเป็น INTEGER
+            # MBBook ซื้อหุ้นเศษส่วน (fractional shares) ผ่าน Dime app เช่น 0.1874433 หุ้น
+            # ต้องแปลงเป็น FLOAT ไม่งั้นข้อมูลถูกปัดเป็น 0 หมด (ตาราง trades/portfolio ว่างอยู่แล้ว
+            # ตอนแก้ครั้งนี้ — ALTER TYPE ปลอดภัย ไม่มีข้อมูลเก่าให้เสีย)
+            conn.execute(text(
+                "ALTER TABLE trades ALTER COLUMN shares TYPE FLOAT"
+            ))
+            conn.execute(text(
+                "ALTER TABLE portfolio ALTER COLUMN shares TYPE FLOAT"
+            ))
+            conn.commit()
+            print("[MIGRATION] trades.shares / portfolio.shares → FLOAT ready")
+        except Exception as e:
+            print(f"[MIGRATION] {e}")
+        try:
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS nik_suggestions (
                     id SERIAL PRIMARY KEY,
@@ -379,35 +394,84 @@ async def remove_stock(ticker: str, db: Session = Depends(get_db)):
 
 # Trade Updates
 @app.post("/trade-update")
-async def update_trade(ticker: str, action: str, shares: int, price: float, db: Session = Depends(get_db)):
+async def update_trade(ticker: str, action: str, shares: float, price: float, db: Session = Depends(get_db)):
+    """บันทึกประวัติการซื้อขาย + อัพเดต portfolio position จริง
+    ✅ แก้ 2026-07-03: เดิม endpoint นี้บันทึกแค่ log ใน Trade table เฉยๆ
+    ไม่เคยอัพเดต Portfolio table เลย ทำให้ /portfolio ว่างตลอดแม้บันทึก trade ไปแล้ว
+    ตอนนี้เพิ่ม logic คำนวณ position จริง: BUY = ถัวเฉลี่ยต้นทุน, SELL = ลด shares ลง"""
+    ticker = ticker.upper().strip()
+    action = action.upper().strip()
+
     trade = Trade(ticker=ticker, action=action, shares=shares, price=price)
     db.add(trade)
+
+    position = db.query(Portfolio).filter(Portfolio.ticker == ticker).first()
+
+    if action == "BUY":
+        if position:
+            new_shares = position.shares + shares
+            # ถัวเฉลี่ยต้นทุนตามน้ำหนักจำนวนหุ้น (weighted average cost)
+            position.avg_cost = ((position.shares * position.avg_cost) + (shares * price)) / new_shares
+            position.shares = new_shares
+            position.updated_at = datetime.utcnow()
+        else:
+            position = Portfolio(
+                ticker=ticker, shares=shares, avg_cost=price,
+                current_value=shares * price, total_gain=0.0,
+                updated_at=datetime.utcnow()
+            )
+            db.add(position)
+
+    elif action == "SELL":
+        if position:
+            remaining = position.shares - shares
+            if remaining <= 0.0001:  # ขายหมด (เผื่อ floating point error เล็กน้อย)
+                db.delete(position)
+            else:
+                position.shares = remaining
+                position.updated_at = datetime.utcnow()
+        # ถ้าไม่มี position อยู่ก่อน (ขายโดยไม่เคยบันทึกซื้อ) — บันทึกแค่ history ใน Trade เฉยๆ ไม่ error
+
     db.commit()
     db.refresh(trade)
-    return {"status": "recorded", "id": trade.id, "ticker": ticker}
+    return {"status": "recorded", "id": trade.id, "ticker": ticker, "action": action}
 
 # Portfolio
 @app.get("/portfolio")
 async def get_portfolio(db: Session = Depends(get_db)):
+    """✅ แก้ 2026-07-03: current_value/gain คำนวณสดจาก Stock.current_price ตอน query
+    แทนที่จะพึ่งค่าที่ snapshot ไว้ตอนบันทึก trade (ซึ่งไม่มีอะไรมาอัพเดตให้เป็นปัจจุบัน)"""
     holdings = db.query(Portfolio).all()
-    total_value = sum(h.current_value for h in holdings) if holdings else 0
-    total_cost = sum(h.avg_cost * h.shares for h in holdings) if holdings else 0
-    total_gain = total_value - total_cost
+    result_holdings = []
+    total_value = 0.0
+    total_cost = 0.0
+
+    for h in holdings:
+        stock = db.query(Stock).filter(Stock.ticker == h.ticker).first()
+        current_price = stock.current_price if stock and stock.current_price else h.avg_cost
+        current_value = h.shares * current_price
+        cost_basis = h.shares * h.avg_cost
+        gain = current_value - cost_basis
+
+        total_value += current_value
+        total_cost += cost_basis
+
+        result_holdings.append({
+            "ticker": h.ticker,
+            "shares": h.shares,
+            "avg_cost": h.avg_cost,
+            "current_price": current_price,
+            "current_value": current_value,
+            "gain": gain,
+            "gain_pct": (gain / cost_basis * 100) if cost_basis else 0.0
+        })
+
     return {
         "total_value": total_value,
         "total_cost": total_cost,
-        "total_gain": total_gain,
-        "holdings_count": len(holdings),
-        "holdings": [
-            {
-                "ticker": h.ticker,
-                "shares": h.shares,
-                "avg_cost": h.avg_cost,
-                "current_value": h.current_value,
-                "gain": h.total_gain
-            }
-            for h in holdings
-        ]
+        "total_gain": total_value - total_cost,
+        "holdings_count": len(result_holdings),
+        "holdings": result_holdings
     }
 
 # Analysis

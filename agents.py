@@ -1598,7 +1598,8 @@ If you cannot parse, return {"error": "reason"}."""
                     trade = Trade(
                         ticker=trade_data.get("ticker", "").upper(),
                         action=trade_data.get("action", ""),
-                        shares=int(trade_data.get("shares", 0)),
+                        # ✅ แก้ 2026-07-03: shares เดิม int() ปัดเศษหุ้นทิ้งหมด (MBBook ซื้อ fractional shares)
+                        shares=float(trade_data.get("shares", 0)),
                         price=float(trade_data.get("price", 0))
                     )
                     db.add(trade)

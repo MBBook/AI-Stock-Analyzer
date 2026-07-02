@@ -22,20 +22,22 @@ class Stock(Base):
 
 class Trade(Base):
     __tablename__ = "trades"
-    
+
     id = Column(Integer, primary_key=True)
     ticker = Column(String, index=True)
     action = Column(String)
-    shares = Column(Integer)
+    # ✅ แก้ 2026-07-03: เดิม Integer — MBBook ซื้อหุ้นเศษส่วน (fractional shares) ผ่าน Dime app
+    # เช่น 0.1874433 หุ้น ถ้าเก็บเป็น Integer จะถูกปัดเป็น 0 ข้อมูลหายหมด
+    shares = Column(Float)
     price = Column(Float)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
 class Portfolio(Base):
     __tablename__ = "portfolio"
-    
+
     id = Column(Integer, primary_key=True)
     ticker = Column(String, unique=True)
-    shares = Column(Integer)
+    shares = Column(Float)  # ✅ แก้ 2026-07-03: เหตุผลเดียวกับ Trade.shares (fractional shares)
     avg_cost = Column(Float)
     current_value = Column(Float)
     total_gain = Column(Float)

@@ -1,7 +1,21 @@
 # Pending — AI Stock Analyzer V4
 
 > รายการที่รอดำเนินการในอนาคต
-> อัพเดตล่าสุด: 2026-07-02 (22:xx Bangkok)
+> อัพเดตล่าสุด: 2026-07-03 (01:xx Bangkok)
+
+---
+
+## 💼 Portfolio tracking เริ่มใช้งานจริง — 2026-07-03
+
+**การตัดสินใจ**: MBBook เลือกทาง A (บันทึกเทรดจริงที่ทำเอง) ไม่ใช่ B (auto paper-trading simulation) เพราะสไตล์การลงทุนคือถือยาว 10-15 ปี ไม่ได้ซื้อ-ขายตาม signal ทุกตัว (งบจำกัด) — วัตถุประสงค์หลักของระบบคือช่วยกรอง/วิเคราะห์ข่าวแทนการตามเอง ไม่ใช่ระบบเทรดอัตโนมัติ
+
+**Workflow ที่ตกลงกัน**: ทุกครั้งที่ MBBook ซื้อ-ขายหุ้นจริงผ่าน Dime app จะส่ง screenshot สลิปคำสั่งมาให้ Cow อ่านแล้วบันทึกผ่าน `/trade-update` ให้
+
+**🐛 เจอบั๊ก 2 จุดตอนเตรียมระบบ แก้แล้ว**:
+1. `Trade.shares` / `Portfolio.shares` เดิมเป็น Integer — หุ้นเศษส่วน (fractional shares) จาก Dime จะถูกปัดเป็น 0 หมด แก้เป็น Float แล้ว (models.py + ALTER TABLE migration ใน main.py startup())
+2. `/trade-update` เดิมบันทึกแค่ log ใน Trade table ไม่เคยอัพเดต Portfolio จริง — เพิ่ม logic ถัวเฉลี่ยต้นทุนตอน BUY / ลด shares ตอน SELL แล้ว + `/portfolio` GET คำนวณ current_value/gain สดจาก Stock.current_price
+
+**รอ MBBook**: รัน test ในเครื่อง → push → รอ deploy → รัน 3 คำสั่งบันทึก trade แรก (WDC, NBIS, P) ที่ส่งสลิปมาให้ดูแล้ว
 
 ---
 
