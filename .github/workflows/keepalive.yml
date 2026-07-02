@@ -37,7 +37,11 @@ jobs:
           HOUR=$(date +%H)   # UTC hour (GitHub Actions รัน UTC)
           echo "Day=$DAY Hour=$HOUR UTC"
 
-          if [ "$DAY" -le 5 ] && [ "$HOUR" -ge 15 ]; then
+          # ✅ แก้ 2026-07-02: เพิ่มเพดานบน HOUR -lt 19 (เดิมไม่มี ทำให้ self-heal ไล่ยิงทุก 10 นาที
+          # ยาวไปถึง 23:59 UTC = ตี 7 เช้า Bangkok) พบว่า BUDGET_EXCEEDED โผล่มาตอนตี 3-4 ติดต่อกัน 3 วัน
+          # เพราะ self-heal ยังไล่ resume ทุก 10 นาทีทั้งคืน ตอนนี้จำกัดหน้าต่างไว้แค่ 15:00-18:59 UTC
+          # (22:00-01:59 Bangkok — ~4 ชม. ให้ resume พอสำหรับ checkpoint ทีละตัวที่เพิ่งแก้)
+          if [ "$DAY" -le 5 ] && [ "$HOUR" -ge 15 ] && [ "$HOUR" -lt 19 ]; then
             WF_STATUS=$(curl -s --max-time 10 "${{ secrets.RENDER_URL }}/workflow/status" || echo "")
             CURRENT=$(echo "$WF_STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "unknown")
             echo "Workflow status: $CURRENT"

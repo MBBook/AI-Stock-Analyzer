@@ -491,7 +491,9 @@ async def resume_workflow(db: Session = Depends(get_db)):
         from models import WorkflowLog
         last_log = db.query(WorkflowLog).order_by(WorkflowLog.timestamp.desc()).first()
         if last_log and last_log.timestamp.date() == today:
-            if last_log.status in ("BUDGET_EXCEEDED", "COMPLETE", "ABORTED"):
+            # ✅ แก้ 2026-07-02: เพิ่ม REJECTED เข้า skip-list (เดิมขาด — ทำให้ self-heal
+            # พยายามซ้ำไปเรื่อยๆ หลัง REJECTED จนกว่าจะชน budget แล้วเจอ BUDGET_EXCEEDED ตอนตี 3-4)
+            if last_log.status in ("BUDGET_EXCEEDED", "COMPLETE", "ABORTED", "REJECTED"):
                 return {
                     "status": "skipped",
                     "reason": f"Today's workflow already ended with status: {last_log.status}"

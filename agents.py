@@ -1793,6 +1793,24 @@ Identify top issues and output diff blocks."""
                 self.log_action("BUDGET",
                     f"⚠️  Daily budget exceeded (${today_spent:.4f} >= ${daily_limit:.2f}) — workflow skipped to protect monthly cap",
                     "ERROR")
+                # ✅ แก้ 2026-07-02: บันทึก WorkflowLog แม้ BUDGET_EXCEEDED (เดิมไม่บันทึกเลย)
+                # เหตุผล: ถ้าไม่บันทึก /workflow/resume จะไม่เห็นว่าวันนี้เจอ BUDGET_EXCEEDED ไปแล้ว
+                # แล้ว self-heal (ทุก 10 นาที) จะพยายามซ้ำไปเรื่อยๆ จนกว่า UTC date จะเปลี่ยน — ไม่มี LLM call
+                # (ไม่เสียเงินซ้ำ) แค่ insert record ตรงๆ
+                try:
+                    from models import WorkflowLog
+                    db_budget.add(WorkflowLog(
+                        timestamp=datetime.now(),
+                        status="BUDGET_EXCEEDED",
+                        stocks_analyzed=0,
+                        buy_signals=0, sell_signals=0, hold_signals=0, needs_review=0,
+                        summary=f"Budget exceeded: spent ${today_spent:.4f} / limit ${daily_limit:.2f} — skipped",
+                        include_weekend=include_weekend,
+                        cost_usd=0.0,
+                    ))
+                    db_budget.commit()
+                except Exception as log_err:
+                    self.log_action("BUDGET", f"BUDGET_EXCEEDED log save failed: {log_err}", "WARNING")
                 return {
                     "status": "BUDGET_EXCEEDED",
                     "reason": f"Daily limit ${daily_limit:.2f} reached (spent ${today_spent:.4f} today). Workflow skipped.",
