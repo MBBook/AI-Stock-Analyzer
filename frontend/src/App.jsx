@@ -9,12 +9,30 @@ export default function DashboardV4() {
   const [stocks, setStocks] = useState([]);
   const [newTicker, setNewTicker] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
-  const [tradeInput, setTradeInput] = useState('');
+  const [tradeTicker, setTradeTicker] = useState('');
+  const [tradeAction, setTradeAction] = useState('BUY');
+  const [tradeShares, setTradeShares] = useState('');
+  const [tradePrice, setTradePrice] = useState('');
+  const [tradeSubmitting, setTradeSubmitting] = useState(false);
+  const [tradeMessage, setTradeMessage] = useState(null); // { type: 'success'|'error', text }
+  const [tradeImageFile, setTradeImageFile] = useState(null);
+  const [tradeImagePreview, setTradeImagePreview] = useState(null);
+  const [tradeParsing, setTradeParsing] = useState(false);
+  const [tradeParseMessage, setTradeParseMessage] = useState(null); // { type: 'success'|'error', text }
   const [loading, setLoading] = useState(false);
   const [portfolioData, setPortfolioData] = useState(null);
   const [historyData, setHistoryData] = useState(null);
   const [nikSuggestions, setNikSuggestions] = useState(null);
   const [costSummary, setCostSummary] = useState(null);
+
+  // ✅ เพิ่ม 2026-07-03 (รอบ 3): mobile UI แยกโครงสร้างจริง ไม่ใช่แค่ย่อขนาด
+  // isMobile ใช้ตัดสินว่าจะ render bottom nav bar + เลย์เอาต์ 1 คอลัมน์ หรือ top tab bar + เลย์เอาต์เดสก์ท็อป
+  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth <= 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   const colors = {
     surface: '#121212',
@@ -132,6 +150,85 @@ export default function DashboardV4() {
     }
   };
 
+  const handleSelectTradeImage = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setTradeImageFile(file);
+    setTradeImagePreview(URL.createObjectURL(file));
+    setTradeParseMessage(null);
+  };
+
+  const handleParseTradeImage = async () => {
+    if (!tradeImageFile) {
+      setTradeParseMessage({ type: 'error', text: 'เลือกรูปสลิปก่อนครับ' });
+      return;
+    }
+    setTradeParsing(true);
+    setTradeParseMessage(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', tradeImageFile);
+      const response = await fetch(`${API_URL}/trade-parse-image`, { method: 'POST', body: formData });
+      const data = await response.json();
+      if (data.status === 'parsed') {
+        setTradeTicker(data.ticker || '');
+        setTradeAction(data.action === 'SELL' ? 'SELL' : 'BUY');
+        setTradeShares(data.shares != null ? String(data.shares) : '');
+        setTradePrice(data.price != null ? String(data.price) : '');
+        setTradeParseMessage({ type: 'success', text: '✅ อ่านรูปแล้ว — ตรวจทานข้อมูลด้านล่างก่อนกดบันทึก' });
+      } else {
+        setTradeParseMessage({ type: 'error', text: `อ่านรูปไม่สำเร็จ: ${data.message || 'ไม่ทราบสาเหตุ'} — กรอกมือแทนได้` });
+      }
+    } catch (error) {
+      setTradeParseMessage({ type: 'error', text: `เชื่อมต่อไม่ได้: ${error.message}` });
+    }
+    setTradeParsing(false);
+  };
+
+  const handleSubmitTrade = async () => {
+    const ticker = tradeTicker.trim().toUpperCase();
+    const shares = parseFloat(tradeShares);
+    const price = parseFloat(tradePrice);
+
+    if (!ticker) {
+      setTradeMessage({ type: 'error', text: 'กรอกชื่อหุ้นก่อนครับ' });
+      return;
+    }
+    if (!shares || shares <= 0) {
+      setTradeMessage({ type: 'error', text: 'จำนวนหุ้นต้องมากกว่า 0 (ใส่ทศนิยมได้ เช่น 0.1874433)' });
+      return;
+    }
+    if (!price || price <= 0) {
+      setTradeMessage({ type: 'error', text: 'ราคาต้องมากกว่า 0' });
+      return;
+    }
+
+    setTradeSubmitting(true);
+    setTradeMessage(null);
+    try {
+      const params = new URLSearchParams({
+        ticker, action: tradeAction, shares: String(shares), price: String(price)
+      });
+      const response = await fetch(`${API_URL}/trade-update?${params}`, { method: 'POST' });
+      const data = await response.json();
+      if (data.status === 'recorded') {
+        setTradeMessage({ type: 'success', text: `✅ บันทึกแล้ว: ${tradeAction} ${ticker} ${shares} หุ้น @ $${price}` });
+        setTradeTicker('');
+        setTradeShares('');
+        setTradePrice('');
+        setTradeImageFile(null);
+        setTradeImagePreview(null);
+        setTradeParseMessage(null);
+        fetchPortfolio(); // รีเฟรช portfolio ให้เห็นผลทันที
+      } else {
+        setTradeMessage({ type: 'error', text: `เกิดข้อผิดพลาด: ${JSON.stringify(data)}` });
+      }
+    } catch (error) {
+      setTradeMessage({ type: 'error', text: `เชื่อมต่อไม่ได้: ${error.message}` });
+    }
+    setTradeSubmitting(false);
+  };
+
   const filteredStocks = stocks.filter(s =>
     s.ticker.toLowerCase().includes(searchTerm.toLowerCase())
   );
@@ -182,7 +279,8 @@ export default function DashboardV4() {
             onClick={handleAddStock}
             disabled={loading}
             style={{
-              padding: '10px 20px',
+              padding: isMobile ? '14px 20px' : '10px 20px',
+              minHeight: isMobile ? '48px' : 'auto',
               backgroundColor: colors.success,
               color: '#000',
               border: 'none',
@@ -311,33 +409,164 @@ export default function DashboardV4() {
   const TradeTab = () => (
     <div className="space-y-6">
       <div style={{ padding: '20px', backgroundColor: colors.surface2, borderRadius: '8px', border: `1px solid ${colors.primaryLight}` }}>
-        <h2 style={{ color: colors.primary, marginBottom: '15px' }}>💱 Trade Update</h2>
-        <textarea
-          value={tradeInput}
-          onChange={(e) => setTradeInput(e.target.value)}
-          placeholder="BUY AAPL 100 shares at $150..."
-          style={{
-            width: '100%',
-            padding: '12px',
-            backgroundColor: colors.surface3,
-            color: '#fff',
-            border: `1px solid ${colors.primary}`,
-            borderRadius: '6px',
-            minHeight: '100px'
-          }}
-        />
-        <button style={{ 
-          marginTop: '12px',
-          padding: '10px 20px',
-          backgroundColor: colors.primary,
-          color: '#fff',
-          border: 'none',
-          borderRadius: '6px',
-          cursor: 'pointer',
-          fontWeight: 'bold'
+        <h2 style={{ color: colors.primary, marginBottom: '15px' }}>💱 บันทึกการซื้อ-ขาย</h2>
+
+        <div style={{
+          padding: '14px', backgroundColor: colors.surface3, borderRadius: '8px',
+          border: `1px dashed ${colors.primaryLight}`, marginBottom: '16px'
         }}>
-          Submit to โคลสัน
-        </button>
+          <label style={{ color: colors.neutral, fontSize: '12px', display: 'block', marginBottom: '8px' }}>
+            📷 ส่งรูปสลิปซื้อขาย (เช่น screenshot จาก Dime) — ให้โคลสันอ่านค่าให้อัตโนมัติ
+          </label>
+          <input
+            type="file"
+            accept="image/*"
+            capture="environment"
+            onChange={handleSelectTradeImage}
+            style={{ color: colors.neutral, fontSize: '13px', marginBottom: '10px', width: '100%' }}
+          />
+          {tradeImagePreview && (
+            <img
+              src={tradeImagePreview}
+              alt="trade slip preview"
+              style={{ maxWidth: '100%', maxHeight: '220px', borderRadius: '6px', marginBottom: '10px', display: 'block' }}
+            />
+          )}
+          <button
+            onClick={handleParseTradeImage}
+            disabled={tradeParsing || !tradeImageFile}
+            style={{
+              width: isMobile ? '100%' : 'auto',
+              padding: isMobile ? '14px 16px' : '10px 16px',
+              minHeight: isMobile ? '48px' : 'auto',
+              backgroundColor: colors.secondary,
+              color: '#fff',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: (tradeParsing || !tradeImageFile) ? 'default' : 'pointer',
+              fontWeight: 'bold',
+              opacity: (tradeParsing || !tradeImageFile) ? 0.6 : 1
+            }}
+          >
+            {tradeParsing ? 'กำลังอ่านรูป...' : '🔍 อ่านข้อมูลจากรูป'}
+          </button>
+          {tradeParseMessage && (
+            <p style={{
+              color: tradeParseMessage.type === 'success' ? colors.success : colors.error,
+              fontSize: '13px', marginTop: '8px', marginBottom: 0
+            }}>
+              {tradeParseMessage.text}
+            </p>
+          )}
+        </div>
+
+        <p style={{ color: colors.neutral, fontSize: '12px', marginBottom: '12px' }}>
+          ตรวจทาน/แก้ไขข้อมูลด้านล่างก่อนกดบันทึก (แก้มือได้เสมอ ไม่จำเป็นต้องส่งรูป)
+        </p>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div>
+            <label style={{ color: colors.neutral, fontSize: '12px', display: 'block', marginBottom: '6px' }}>หุ้น (Ticker)</label>
+            <input
+              type="text"
+              value={tradeTicker}
+              onChange={(e) => setTradeTicker(e.target.value)}
+              placeholder="เช่น WDC, NBIS..."
+              style={{
+                width: '100%', padding: isMobile ? '14px 12px' : '10px 12px', minHeight: isMobile ? '48px' : 'auto',
+                backgroundColor: colors.surface3, fontSize: isMobile ? '16px' : '14px',
+                color: '#fff', border: `1px solid ${colors.primary}`, borderRadius: '6px', boxSizing: 'border-box'
+              }}
+            />
+          </div>
+
+          <div>
+            <label style={{ color: colors.neutral, fontSize: '12px', display: 'block', marginBottom: '6px' }}>ประเภท</label>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              {['BUY', 'SELL'].map(a => (
+                <button
+                  key={a}
+                  onClick={() => setTradeAction(a)}
+                  style={{
+                    flex: 1, padding: isMobile ? '14px' : '10px', minHeight: isMobile ? '48px' : 'auto',
+                    borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer',
+                    border: `1px solid ${a === 'BUY' ? colors.success : colors.error}`,
+                    backgroundColor: tradeAction === a ? (a === 'BUY' ? colors.success : colors.error) : 'transparent',
+                    color: tradeAction === a ? '#000' : (a === 'BUY' ? colors.success : colors.error)
+                  }}
+                >
+                  {a === 'BUY' ? '🟢 ซื้อ' : '🔴 ขาย'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label style={{ color: colors.neutral, fontSize: '12px', display: 'block', marginBottom: '6px' }}>
+              จำนวนหุ้น (ใส่ทศนิยมได้ — ดูจากช่อง "จำนวนหุ้น" ในสลิป Dime)
+            </label>
+            <input
+              type="number"
+              step="any"
+              value={tradeShares}
+              onChange={(e) => setTradeShares(e.target.value)}
+              placeholder="เช่น 0.1874433"
+              style={{
+                width: '100%', padding: isMobile ? '14px 12px' : '10px 12px', minHeight: isMobile ? '48px' : 'auto',
+                backgroundColor: colors.surface3, fontSize: isMobile ? '16px' : '14px',
+                color: '#fff', border: `1px solid ${colors.primary}`, borderRadius: '6px', boxSizing: 'border-box'
+              }}
+            />
+          </div>
+
+          <div>
+            <label style={{ color: colors.neutral, fontSize: '12px', display: 'block', marginBottom: '6px' }}>
+              ราคาต่อหุ้น (USD) — ใช้ "ราคาที่ได้จริง" จากสลิป
+            </label>
+            <input
+              type="number"
+              step="any"
+              value={tradePrice}
+              onChange={(e) => setTradePrice(e.target.value)}
+              placeholder="เช่น 537.97"
+              style={{
+                width: '100%', padding: isMobile ? '14px 12px' : '10px 12px', minHeight: isMobile ? '48px' : 'auto',
+                backgroundColor: colors.surface3, fontSize: isMobile ? '16px' : '14px',
+                color: '#fff', border: `1px solid ${colors.primary}`, borderRadius: '6px', boxSizing: 'border-box'
+              }}
+            />
+          </div>
+
+          <button
+            onClick={handleSubmitTrade}
+            disabled={tradeSubmitting}
+            style={{
+              marginTop: '4px',
+              width: isMobile ? '100%' : 'auto',
+              padding: isMobile ? '16px 20px' : '12px 20px',
+              minHeight: isMobile ? '52px' : 'auto',
+              fontSize: isMobile ? '16px' : '14px',
+              backgroundColor: colors.primary,
+              color: '#fff',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: tradeSubmitting ? 'default' : 'pointer',
+              fontWeight: 'bold',
+              opacity: tradeSubmitting ? 0.6 : 1
+            }}
+          >
+            {tradeSubmitting ? 'กำลังบันทึก...' : '✅ บันทึกรายการ'}
+          </button>
+
+          {tradeMessage && (
+            <p style={{
+              color: tradeMessage.type === 'success' ? colors.success : colors.error,
+              fontSize: '13px', marginTop: '4px'
+            }}>
+              {tradeMessage.text}
+            </p>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -369,7 +598,7 @@ export default function DashboardV4() {
       </div>
 
       {portfolioData && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fit, minmax(140px, 1fr))', gap: '15px' }}>
           <div style={{ padding: '15px', backgroundColor: colors.surface2, border: `2px solid ${colors.primary}`, borderRadius: '6px' }}>
             <p style={{ color: colors.neutral, fontSize: '12px', margin: '0 0 8px 0' }}>Total Value</p>
             <p style={{ color: colors.primary, fontSize: '18px', fontWeight: 'bold', margin: 0 }}>
@@ -389,6 +618,40 @@ export default function DashboardV4() {
             </p>
           </div>
         </div>
+      )}
+
+      {portfolioData?.holdings?.length > 0 && (
+        <div className="space-y-3">
+          {portfolioData.holdings.map(h => {
+            const isGain = h.gain >= 0;
+            return (
+              <div key={h.ticker} style={{
+                padding: '15px', backgroundColor: colors.surface2,
+                border: `1px solid ${isGain ? colors.success : colors.error}55`,
+                borderRadius: '6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+              }}>
+                <div>
+                  <h3 style={{ color: '#fff', fontWeight: 'bold', margin: '0 0 4px 0' }}>{h.ticker}</h3>
+                  <p style={{ color: colors.neutral, fontSize: '12px', margin: 0 }}>
+                    {h.shares.toFixed(4)} หุ้น @ เฉลี่ย ${h.avg_cost.toFixed(2)} · ราคาปัจจุบัน ${h.current_price.toFixed(2)}
+                  </p>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <p style={{ color: '#fff', fontSize: '14px', fontWeight: 'bold', margin: '0 0 4px 0' }}>
+                    {hideBalance ? '฿****' : `$${h.current_value.toFixed(2)}`}
+                  </p>
+                  <p style={{ color: isGain ? colors.success : colors.error, fontSize: '12px', margin: 0 }}>
+                    {isGain ? '+' : ''}{hideBalance ? '****' : `$${h.gain.toFixed(2)}`} ({isGain ? '+' : ''}{h.gain_pct.toFixed(2)}%)
+                  </p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {portfolioData && portfolioData.holdings_count === 0 && (
+        <p style={{ color: colors.neutral, fontSize: '13px' }}>ยังไม่มีการถือครองหุ้น</p>
       )}
     </div>
   );
@@ -427,7 +690,7 @@ export default function DashboardV4() {
             เดือนนี้ (MTD): ${monthCost.toFixed(2)} · คาดการณ์เต็มเดือน: {projected != null ? `$${projected.toFixed(2)}` : '—'} · {statusLabel}
           </p>
           {costSummary?.by_weekday && (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '8px', marginTop: '14px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(5, 1fr)' : 'repeat(auto-fit, minmax(56px, 1fr))', gap: '6px', marginTop: '14px' }}>
               {['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'].map(day => {
                 const d = costSummary.by_weekday[day];
                 return (
@@ -444,7 +707,7 @@ export default function DashboardV4() {
         </div>
 
         {/* Cost summary */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px', padding: '15px', backgroundColor: colors.surface2, borderRadius: '8px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fit, minmax(140px, 1fr))', gap: '15px', padding: '15px', backgroundColor: colors.surface2, borderRadius: '8px' }}>
           <div>
             <p style={{ color: colors.neutral, fontSize: '12px', margin: '0 0 8px 0' }}>Total Spent (all-time)</p>
             <p style={{ color: colors.primary, fontSize: '18px', fontWeight: 'bold', margin: 0 }}>${totalCost.toFixed(2)}</p>
@@ -553,32 +816,89 @@ export default function DashboardV4() {
     }
   };
 
-  return (
-    <div style={{ backgroundColor: colors.surface, minHeight: '100vh', padding: '24px', fontFamily: 'system-ui' }}>
-      <h1 style={{ color: colors.primary, fontSize: '32px', fontWeight: 'bold', marginBottom: '8px' }}>📊 AI Stock Analyzer V4</h1>
-      <p style={{ color: colors.neutral, marginBottom: '24px' }}>Smart Investment • Automated Analysis • Sequential Workflow</p>
+  // ✅ เพิ่ม 2026-07-03 (รอบ 3): label สั้นสำหรับ bottom nav มือถือ (6 แท็บ ต้องพอดีจอแคบ)
+  const tabsMobileShort = {
+    news: 'ข่าว', stock: 'หุ้น', agents: 'Agents', trade: 'เทรด', portfolio: 'Port', stats: 'สถานะ'
+  };
+  const tabEmoji = {
+    news: '📰', stock: '📈', agents: '🤖', trade: '💱', portfolio: '💼', stats: '📊'
+  };
 
-      <div style={{ display: 'flex', gap: '8px', marginBottom: '24px', flexWrap: 'wrap' }}>
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            style={{
-              padding: '10px 16px',
-              borderRadius: '8px',
-              fontWeight: '500',
-              backgroundColor: activeTab === tab.id ? colors.primary : colors.surface2,
-              color: activeTab === tab.id ? '#fff' : colors.neutral,
-              border: `1px solid ${colors.primaryLight}`,
-              cursor: 'pointer'
-            }}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+  // ✅ Bottom nav bar — โครงสร้างมือถือจริง (ไม่ใช่ top tab bar ที่ย่อขนาด) fixed ติดล่างจอ กดง่ายด้วยนิ้วโป้ง
+  const BottomNav = () => (
+    <div style={{
+      position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 100,
+      display: 'flex', backgroundColor: colors.surface2,
+      borderTop: `1px solid ${colors.primaryLight}`,
+      paddingBottom: 'env(safe-area-inset-bottom, 0px)'
+    }}>
+      {tabs.map((tab) => (
+        <button
+          key={tab.id}
+          onClick={() => setActiveTab(tab.id)}
+          style={{
+            flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+            justifyContent: 'center', gap: '2px', minHeight: '56px', padding: '6px 2px',
+            backgroundColor: 'transparent', border: 'none',
+            color: activeTab === tab.id ? colors.primary : colors.neutral,
+            cursor: 'pointer'
+          }}
+        >
+          <span style={{ fontSize: '20px' }}>{tabEmoji[tab.id]}</span>
+          <span style={{ fontSize: '10px', fontWeight: activeTab === tab.id ? 'bold' : 'normal' }}>
+            {tabsMobileShort[tab.id]}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+
+  return (
+    <div style={{
+      backgroundColor: colors.surface, minHeight: '100vh',
+      padding: isMobile ? '12px' : 'clamp(12px, 4vw, 24px)',
+      paddingBottom: isMobile ? '76px' : undefined,
+      fontFamily: 'system-ui',
+      maxWidth: '100vw', overflowX: 'hidden', boxSizing: 'border-box'
+    }}>
+      {isMobile ? (
+        <h1 style={{ color: colors.primary, fontSize: '18px', fontWeight: 'bold', marginBottom: '14px' }}>
+          📊 AI Stock Analyzer
+        </h1>
+      ) : (
+        <>
+          <h1 style={{ color: colors.primary, fontSize: '32px', fontWeight: 'bold', marginBottom: '8px' }}>📊 AI Stock Analyzer V4</h1>
+          <p style={{ color: colors.neutral, marginBottom: '24px', fontSize: '16px' }}>Smart Investment • Automated Analysis • Sequential Workflow</p>
+        </>
+      )}
+
+      {!isMobile && (
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '24px', flexWrap: 'wrap' }}>
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              style={{
+                padding: '10px 16px',
+                borderRadius: '8px',
+                fontWeight: '500',
+                fontSize: '15px',
+                backgroundColor: activeTab === tab.id ? colors.primary : colors.surface2,
+                color: activeTab === tab.id ? '#fff' : colors.neutral,
+                border: `1px solid ${colors.primaryLight}`,
+                cursor: 'pointer',
+                whiteSpace: 'nowrap'
+              }}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {renderTab()}
+
+      {isMobile && <BottomNav />}
     </div>
   );
 }
