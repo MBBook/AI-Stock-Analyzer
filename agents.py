@@ -1618,6 +1618,68 @@ If you cannot parse, return {"error": "reason"}."""
             self.log_action("โคลสัน", f"Trade parse failed: {str(e)}", "ERROR")
             return None
 
+    # ✅ เพิ่ม 2026-07-03: โคลสัน อ่านรูปสลิปซื้อขาย (เช่น screenshot จาก Dime app) แทนพิมพ์มือ
+    # MBBook ยืนยันแล้วว่าอยากส่งรูปสลิปเข้าเว็บแอปโดยตรง ไม่ใช่กรอกฟอร์มเอง
+    # ไม่บันทึก DB ในเมธอดนี้ — แค่ parse แล้วคืนค่าให้ endpoint ตัดสินใจ (ให้ user preview/แก้ก่อน save จริง)
+    def colson_parse_trade_image(self, image_base64, media_type="image/jpeg"):
+        """โคลสัน: อ่านรูปสลิปคำสั่งซื้อขาย (เช่น Dime app) → parse ticker/action/shares/price ด้วย vision
+        คืนค่า dict {ticker, action, shares, price} หรือ {"error": reason}"""
+        self.log_action("โคลสัน", "Parsing trade slip image...", "INFO")
+        try:
+            system_prompt = """You are โคลสัน (Colson), a trade slip reader.
+You will see a screenshot of a stock trade confirmation from a brokerage app (e.g. Dime).
+Read the slip and return ONLY JSON, no other text:
+{
+    "ticker": "AAPL",
+    "action": "BUY" or "SELL",
+    "shares": 12.345,
+    "price": 150.25
+}
+Rules:
+- action: look at the header/title of the slip — "ซื้อ"/"Buy" = BUY, "ขาย"/"Sell" = SELL
+- shares: often a fractional number (e.g. 0.1874433) since orders are amount-based, not share-count-based. Read exactly as shown, do not round.
+- price: use the ACTUAL EXECUTED price field (e.g. "ราคาที่ได้จริง" / "ราคาเฉลี่ย" / "avg fill price"), NOT the limit price the user set (e.g. NOT "ราคาที่คุณตั้ง").
+- If the image is not a trade slip or required fields are unreadable, return {"error": "reason in Thai"}."""
+
+            content = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": image_base64,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": "อ่านสลิปนี้แล้วคืนค่า JSON ตามที่กำหนด",
+                },
+            ]
+
+            response = self.claude_call(system_prompt, content, "โคลสัน", model=self.MODEL_HAIKU)
+
+            try:
+                trade_data = json.loads(response[response.find('{'):response.rfind('}')+1])
+                if "error" in trade_data:
+                    self.log_action("โคลสัน", f"Image parse error: {trade_data['error']}", "WARNING")
+                    return trade_data
+
+                trade_data["ticker"] = str(trade_data.get("ticker", "")).upper().strip()
+                trade_data["action"] = str(trade_data.get("action", "")).upper().strip()
+                trade_data["shares"] = float(trade_data.get("shares", 0))
+                trade_data["price"] = float(trade_data.get("price", 0))
+
+                self.log_action("โคลสัน", f"Image parsed: {trade_data}", "SUCCESS")
+                return trade_data
+
+            except (json.JSONDecodeError, ValueError) as e:
+                self.log_action("โคลสัน", f"Could not parse image response: {str(e)}", "ERROR")
+                return {"error": "อ่านค่าจากรูปไม่สำเร็จ ลองส่งรูปใหม่หรือกรอกมือแทน"}
+
+        except Exception as e:
+            self.log_action("โคลสัน", f"Trade image parse failed: {str(e)}", "ERROR")
+            return {"error": str(e)}
+
     # ==================== AGENT 10: นิก (Code Optimizer — Every Friday) ====================
     def nik_optimize_code(self):
         """นิก: อ่าน WorkflowLog 5 วัน → วิเคราะห์ → สร้าง diff → บันทึกลง DB รอ MBBook อนุมัติ

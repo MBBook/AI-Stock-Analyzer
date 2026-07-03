@@ -15,7 +15,45 @@
 1. `Trade.shares` / `Portfolio.shares` เดิมเป็น Integer — หุ้นเศษส่วน (fractional shares) จาก Dime จะถูกปัดเป็น 0 หมด แก้เป็น Float แล้ว (models.py + ALTER TABLE migration ใน main.py startup())
 2. `/trade-update` เดิมบันทึกแค่ log ใน Trade table ไม่เคยอัพเดต Portfolio จริง — เพิ่ม logic ถัวเฉลี่ยต้นทุนตอน BUY / ลด shares ตอน SELL แล้ว + `/portfolio` GET คำนวณ current_value/gain สดจาก Stock.current_price
 
-**รอ MBBook**: รัน test ในเครื่อง → push → รอ deploy → รัน 3 คำสั่งบันทึก trade แรก (WDC, NBIS, P) ที่ส่งสลิปมาให้ดูแล้ว
+**✅ บันทึกสำเร็จ 2026-07-03**: 3 trades แรกบันทึกแล้ว (WDC BUY, NBIS BUY, P SELL) เช็ค `/portfolio` ยืนยันคำนวณถูก — WDC +5.79 USD (+5.74%), NBIS +3.12 USD (+3.09%)
+
+---
+
+## ✅ งาน 2026-07-03 เสร็จแล้ว — รอ MBBook เทสต์+push
+
+1. **ต่อปุ่ม Trade Update ให้ใช้งานได้จริง** — เปลี่ยนจาก free-text textarea เป็นฟอร์มกรอกฟิลด์ตรงๆ (ticker/action BUY-SELL/shares/price) เรียก `/trade-update` โดยตรง ไม่ผ่าน โคลสัน/Haiku (เร็วกว่า ไม่เสีย LLM cost ต่อเทรด) submit แล้วรีเฟรช portfolio อัตโนมัติ + เพิ่มรายการ holdings แสดงในหน้า Portfolio ด้วย (เดิมมีแค่ตัวเลขรวม ไม่เห็นรายตัว)
+2. **ทำ mobile-responsive** — ใช้ `clamp()` สำหรับ font-size/padding (ปรับสัดส่วนตามขนาดจออัตโนมัติ ไม่ต้องพึ่ง JS/media query) + เปลี่ยน grid แบบ fixed column เป็น `repeat(auto-fit, minmax())` (Portfolio summary, Status cost summary, weekday breakdown) ให้ reflow เป็นคอลัมน์เดียวอัตโนมัติบนจอแคบ
+
+**หมายเหตุ**: ทดสอบ build ในเครื่อง sandbox ไม่สำเร็จ (bash timeout ซ้ำๆ ไม่ทราบสาเหตุแน่ชัด — น่าจะ resource/cold-cache ไม่เกี่ยวกับโค้ด) ตรวจโค้ดด้วยการอ่านทวนทั้งไฟล์แทน (syntax ครบถ้วน สมดุล) **ให้ MBBook รัน `npm start` เช็คจริงในเครื่องก่อน push** เพื่อความชัวร์
+
+---
+
+## ✅ งาน 2026-07-03 (รอบ 2) — เพิ่มอัปโหลดรูปสลิปในเว็บแอป
+
+**บริบท**: ทำฟอร์มกรอกมือไปตอนแรก แต่ MBBook ทักท้วงว่าตั้งใจจะ "ส่งรูป" (แบบสลิป Dime ที่เคยส่งให้) ไม่ใช่พิมพ์เอง — เลยเปลี่ยนแผน (ผมพลาดเองที่ไปตีความเป็นฟอร์มกรอกมือโดยไม่เช็คก่อน)
+
+**ทำเสร็จ**:
+1. `agents.py` — เพิ่ม `colson_parse_trade_image()`: โคลสัน (Haiku vision) อ่านรูปสลิป → คืน JSON {ticker, action, shares, price} (ไม่บันทึก DB ในนี้)
+2. `main.py` — เพิ่ม `POST /trade-parse-image` (multipart file upload) → เรียกโคลสัน parse รูป → คืนผลให้ frontend (ยังไม่บันทึก DB — save จริงผ่าน `/trade-update` เดิมตอนกด "บันทึกรายการ")
+3. `requirements.txt` — เพิ่ม `python-multipart==0.0.6` (FastAPI UploadFile ต้องใช้)
+4. `frontend/src/App.jsx` — TradeTab เพิ่มช่องอัปโหลดรูป (รองรับกล้องมือถือ `capture="environment"`) + ปุ่ม "🔍 อ่านข้อมูลจากรูป" → pre-fill ฟอร์มเดิม (ticker/action/shares/price) ให้ตรวจทาน/แก้ก่อนกดบันทึกจริง — ออกแบบเป็น 2 steps (parse-preview → confirm-save) กันเคส AI อ่านรูปผิด
+
+**สถานะ**: โค้ดพร้อม รอ push + deploy + ทดสอบด้วยรูปจริง (ดู "ขั้นต่อไป" ในแชท)
+
+---
+
+## ✅ งาน 2026-07-03 (รอบ 3) — Mobile UI ออกแบบใหม่จริง (ไม่ใช่ย่อขนาด)
+
+**บริบท**: MBBook ทักท้วงว่า "responsive" ที่ทำไปรอบก่อน (clamp/auto-fit) คือแค่ย่อเลย์เอาต์เดสก์ท็อป ไม่ใช่โครงสร้างที่ออกแบบมาสำหรับมือถือจริง — เลือกให้ทำใหม่แบบเต็มรูปแบบ
+
+**ทำเสร็จใน `frontend/src/App.jsx`**:
+1. เพิ่ม `isMobile` state (เช็ค `window.innerWidth <= 768` + resize listener) — ไม่ใช้ CSS media query เพราะไฟล์นี้ไม่มี CSS แยก ใช้ inline style ทั้งหมด
+2. **Bottom nav bar** (fixed ติดล่างจอ, icon+label สั้น, กดง่ายด้วยนิ้วโป้ง) แทน top tab bar เมื่อ isMobile — top tab bar เดิมยังอยู่สำหรับเดสก์ท็อป
+3. Header ย่อให้กระชับบนมือถือ (ตัดคำโปรยออก, ชื่อสั้นลง) ประหยัดพื้นที่แนวตั้งให้ bottom nav
+4. บังคับกริดสำคัญ (Portfolio summary, Status cost summary) เป็น 1 คอลัมน์เสมอบนมือถือ (ไม่ใช่ auto-fit ที่อาจยังเรียง 2 คอลัมน์)
+5. ขยาย touch target ปุ่ม/ช่องกรอกสำคัญเป็น ≥48px บนมือถือ (BUY/SELL toggle, ปุ่มบันทึกรายการ, ปุ่มอ่านรูป, ปุ่มเพิ่มหุ้น, ช่องกรอก ticker/shares/price) + font-size 16px ในช่องกรอก (กัน iOS Safari auto-zoom ตอน focus)
+
+**สถานะ**: โค้ดพร้อม รอ push + deploy + ทดสอบจริงบนมือถือ
 
 ---
 

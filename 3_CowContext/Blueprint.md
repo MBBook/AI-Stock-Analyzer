@@ -45,6 +45,7 @@
 | GET | `/stocks` | ดูรายชื่อ + signal ทั้งหมด |
 | DELETE | `/stocks/{ticker}` | ลบ ticker |
 | POST | `/trade-update?ticker=&action=&shares=&price=` | บันทึก trade จริง + อัพเดต position (ถัวเฉลี่ยต้นทุนตอน BUY, ลด shares ตอน SELL) — ✅ แก้ 2026-07-03 เดิม endpoint นี้บันทึกแค่ log เฉยๆ ไม่เคยอัพเดต portfolio จริง |
+| POST | `/trade-parse-image` (multipart file) | ✅ เพิ่ม 2026-07-03 — โคลสัน (Haiku vision) อ่านรูปสลิปซื้อขาย (เช่น Dime app) → คืน JSON {ticker, action, shares, price} ให้ frontend pre-fill ฟอร์ม ไม่บันทึก DB ที่ endpoint นี้ (save จริงผ่าน `/trade-update`) |
 | GET | `/portfolio` | ดู portfolio holdings — current_value/gain คำนวณสดจาก `Stock.current_price` |
 | GET | `/analysis/latest` | สรุป signal ล่าสุด |
 | POST | `/workflow` | เริ่ม workflow ใน background (non-blocking) |

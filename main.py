@@ -1,10 +1,11 @@
-from fastapi import FastAPI, Depends, BackgroundTasks
+from fastapi import FastAPI, Depends, BackgroundTasks, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import os
 import threading
 import uuid
 import requests
+import base64
 from dotenv import load_dotenv
 from database import get_db, engine
 from models import Base, Stock, Trade, Portfolio
@@ -393,6 +394,22 @@ async def remove_stock(ticker: str, db: Session = Depends(get_db)):
     return {"status": "deleted", "ticker": ticker}
 
 # Trade Updates
+@app.post("/trade-parse-image")
+async def parse_trade_image(file: UploadFile = File(...)):
+    """✅ เพิ่ม 2026-07-03: MBBook ส่งรูปสลิปซื้อขาย (เช่น Dime app) → โคลสัน (Haiku vision) อ่านค่าให้
+    ไม่บันทึก DB ที่ endpoint นี้ — คืนค่า parse แล้วให้ frontend เอาไป pre-fill ฟอร์มให้ตรวจทาน/แก้ก่อน
+    แล้วค่อยยิง /trade-update จริงตอนกดยืนยัน (กันเคส AI อ่านผิด)"""
+    contents = await file.read()
+    image_base64 = base64.b64encode(contents).decode("utf-8")
+    media_type = file.content_type or "image/jpeg"
+
+    result = orchestrator.colson_parse_trade_image(image_base64, media_type)
+
+    if result is None or "error" in result:
+        return {"status": "error", "message": result.get("error", "อ่านรูปไม่สำเร็จ") if result else "อ่านรูปไม่สำเร็จ"}
+
+    return {"status": "parsed", **result}
+
 @app.post("/trade-update")
 async def update_trade(ticker: str, action: str, shares: float, price: float, db: Session = Depends(get_db)):
     """บันทึกประวัติการซื้อขาย + อัพเดต portfolio position จริง
