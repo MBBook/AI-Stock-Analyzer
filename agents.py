@@ -1534,6 +1534,12 @@ Write 2-3 sentences in Thai summarizing key observations."""
             summary = self.claude_call(system_prompt, user_message, "เอ",
                                        model=self.MODEL_HAIKU)
 
+            # ✅ เพิ่ม 2026-07-03: ดึงรายงานตลาดฉบับเต็มที่เจนเขียน (market overview, top signals,
+            # portfolio recommendations, risk) มาบันทึกถาวร — เดิมมีแค่ short summary ของเอ
+            # (สรุปเกี่ยวกับตัว run เอง ไม่ใช่เนื้อหาข่าว) ทำให้ MBBook ไม่เคยเห็นรายงานจริงเลย
+            report_obj = workflow_result.get('report') or {}
+            full_report_text = report_obj.get('summary')  # เจนเก็บ text เต็มไว้ใน key "summary" ของ report dict
+
             # บันทึกลง DB
             db = None
             try:
@@ -1549,6 +1555,7 @@ Write 2-3 sentences in Thai summarizing key observations."""
                         hold_signals=hold_count,
                         needs_review=needs_review,
                         summary=summary,
+                        full_report=full_report_text,
                         include_weekend=workflow_result.get('include_weekend', False),
                         cost_usd=round(self.session_cost_usd, 6)  # ✅ BUDGET: บันทึก cost จริงของ run นี้
                     )
@@ -1729,7 +1736,10 @@ Rules:
             if not current_code:
                 self.log_action("นิก", "Cannot read agents.py — aborting", "ERROR")
                 return None
-            if len(current_code) > 80000:
+            # ✅ แก้ 2026-07-04: agents.py โตเกิน 80000 chars ไปแล้วจริง (105872 chars ตอนพบปัญหา)
+            # ทำให้นิกข้าม optimization ทุกวันศุกร์มาโดยไม่มีใครรู้ (แค่ log WARNING เงียบๆ ไม่มี error โผล่ที่ไหน)
+            # เห็นตอน audit ระบบ 2026-07-04 — ดู Blueprint.md Defect #16 — ยกเพดานขึ้นเพื่อให้นิกกลับมาทำงานได้
+            if len(current_code) > 300000:
                 self.log_action("นิก", f"agents.py ใหญ่เกินไป ({len(current_code)} chars) — ข้าม optimization รอบนี้", "WARNING")
                 return None
 
@@ -1965,8 +1975,8 @@ Identify top issues and output diff blocks."""
                 self.log_action("SYSTEM", "✅ Workflow PASSED - Updating database...", "SUCCESS")
                 self._update_database(validated_results)
 
-                # ✅ เอ: บันทึก improvement log
-                self.a_record_improvements({"qa_result": qa_result, "final_status": "COMPLETE"}, validated_results)
+                # ✅ เอ: บันทึก improvement log (+ ส่ง report เต็มของเจนให้บันทึกถาวรด้วย 2026-07-03)
+                self.a_record_improvements({"qa_result": qa_result, "final_status": "COMPLETE", "report": report}, validated_results)
 
                 # ✅ นิก: ทำงานทุกวันศุกร์เท่านั้น
                 if datetime.now().weekday() == 4:  # 4 = Friday
@@ -1977,8 +1987,8 @@ Identify top issues and output diff blocks."""
             else:
                 self.log_action("SYSTEM", f"❌ Workflow REJECTED after {self.max_retries} attempts - Database NOT updated", "ERROR")
                 final_status = "REJECTED"
-                # ✅ บันทึก REJECTED run ลง DB ด้วย — ไม่งั้นหายจาก history
-                self.a_record_improvements({"qa_result": qa_result, "final_status": "REJECTED"}, validated_results)
+                # ✅ บันทึก REJECTED run ลง DB ด้วย — ไม่งั้นหายจาก history (+ report ฉบับสุดท้ายที่ยังไม่ผ่าน QA เผื่ออ้างอิง)
+                self.a_record_improvements({"qa_result": qa_result, "final_status": "REJECTED", "report": report}, validated_results)
             
             self.log_action("SYSTEM", f"Workflow finished with status: {final_status}", "SUCCESS" if qa_passed else "ERROR")
             return {
@@ -2014,6 +2024,8 @@ Identify top issues and output diff blocks."""
                     stock.current_price = analysis.get('price', stock.current_price) or stock.current_price
                     stock.at_new_high   = analysis.get('at_new_high', False)
                     stock.at_new_low    = analysis.get('at_new_low', False)
+                    # ✅ เพิ่ม 2026-07-03: บันทึก reasoning ที่หนุ่มสร้างไว้แล้ว แต่ไม่เคย persist
+                    stock.reasoning     = analysis.get('reasoning', stock.reasoning)
                     stock.updated_at    = datetime.now()
                     saved.append(ticker)
             db.commit()
@@ -2051,12 +2063,14 @@ Identify top issues and output diff blocks."""
                     stock.signal        = analysis.get('signal', 'HOLD')
                     stock.confidence    = analysis.get('confidence', 0.5)
                     stock.current_price = analysis.get('price', stock.current_price) or stock.current_price
-                    stock.fair_price    =                     stock.fair_price    = analysis.get('fair_price', stock.current_price)
+                    stock.fair_price    = analysis.get('fair_price', stock.current_price)
                     stock.s1            = analysis.get('s1', stock.current_price)
                     stock.s2            = analysis.get('s2', stock.current_price)
                     stock.s3            = analysis.get('s3', stock.current_price)
                     stock.at_new_high   = analysis.get('at_new_high', False)
                     stock.at_new_low    = analysis.get('at_new_low', False)
+                    # ✅ เพิ่ม 2026-07-03: บันทึก reasoning ที่หนุ่มสร้างไว้แล้ว แต่ไม่เคย persist
+                    stock.reasoning     = analysis.get('reasoning', stock.reasoning)
                     stock.updated_at    = datetime.now()
                     updated.append(ticker)
 

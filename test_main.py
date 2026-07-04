@@ -123,9 +123,21 @@ class TestWorkflowEndpoint(unittest.TestCase):
         app_module.app.dependency_overrides[app_module.get_db] = \
             lambda: (yield self._make_db_with_stocks())
 
+        # ✅ แก้ 2026-07-04: patch("threading.Thread") แบบ global เดิม ไปดักโดน thread
+        # ภายในของ starlette TestClient (anyio blocking portal) ด้วย ทำให้ portal ไม่เคย
+        # start จริง → self.client.post() ค้างรอ portal ตลอดไป (เจอผ่าน pytest-timeout)
+        # แก้โดยเช็คก่อนว่า target ตรงกับ _run_workflow_bg จริงมั้ย ถ้าไม่ใช่ให้ผ่านไปที่ thread จริง
+        original_thread = threading.Thread
+
+        def fake_thread(**kwargs):
+            if kwargs.get("target") is app_module._run_workflow_bg:
+                t = MagicMock()
+                t.start = MagicMock()
+                return t
+            return original_thread(**kwargs)
+
         with patch.object(app_module, "_run_workflow_bg"):
-            with patch("threading.Thread") as mock_thread:
-                mock_thread.return_value = MagicMock()
+            with patch("threading.Thread", side_effect=fake_thread):
                 start = time.time()
                 resp = self.client.post("/workflow")
                 elapsed = time.time() - start
@@ -143,10 +155,14 @@ class TestWorkflowEndpoint(unittest.TestCase):
         original_thread = threading.Thread
 
         def capture_thread(**kwargs):
-            captured["args"] = kwargs.get("args", ())
-            t = MagicMock()
-            t.start = MagicMock()
-            return t
+            # ✅ แก้ 2026-07-04: ดักเฉพาะ thread ของ _run_workflow_bg เท่านั้น — เรื่องเดียวกับ
+            # test_workflow_starts_immediately_no_blocking ด้านบน (anyio portal hang)
+            if kwargs.get("target") is app_module._run_workflow_bg:
+                captured["args"] = kwargs.get("args", ())
+                t = MagicMock()
+                t.start = MagicMock()
+                return t
+            return original_thread(**kwargs)
 
         with patch("threading.Thread", side_effect=capture_thread):
             resp = self.client.post("/workflow")
@@ -162,12 +178,16 @@ class TestWorkflowEndpoint(unittest.TestCase):
             lambda: (yield self._make_db_with_stocks())
 
         captured = {}
+        original_thread = threading.Thread
 
         def capture_thread(**kwargs):
-            captured["args"] = kwargs.get("args", ())
-            t = MagicMock()
-            t.start = MagicMock()
-            return t
+            # ✅ แก้ 2026-07-04: เหตุผลเดียวกับสองเทสต์ด้านบน — ดักเฉพาะ target ที่ตรงกันจริง
+            if kwargs.get("target") is app_module._run_workflow_bg:
+                captured["args"] = kwargs.get("args", ())
+                t = MagicMock()
+                t.start = MagicMock()
+                return t
+            return original_thread(**kwargs)
 
         with patch("threading.Thread", side_effect=capture_thread):
             resp = self.client.post("/workflow?include_weekend=true")
@@ -201,8 +221,17 @@ class TestWorkflowEndpoint(unittest.TestCase):
         app_module.app.dependency_overrides[app_module.get_db] = \
             lambda: (yield self._make_db_with_stocks())
 
-        with patch("threading.Thread") as mock_thread:
-            mock_thread.return_value = MagicMock()
+        # ✅ แก้ 2026-07-04: เหตุผลเดียวกับ test_workflow_monday_mode_flag_true ด้านบน
+        original_thread = threading.Thread
+
+        def fake_thread(**kwargs):
+            if kwargs.get("target") is app_module._run_workflow_bg:
+                t = MagicMock()
+                t.start = MagicMock()
+                return t
+            return original_thread(**kwargs)
+
+        with patch("threading.Thread", side_effect=fake_thread):
             resp = self.client.post("/workflow")
 
         self.assertIn("job_id", resp.json())
@@ -213,8 +242,16 @@ class TestWorkflowEndpoint(unittest.TestCase):
         app_module.app.dependency_overrides[app_module.get_db] = \
             lambda: (yield self._make_db_with_stocks())
 
-        with patch("threading.Thread") as mock_thread:
-            mock_thread.return_value = MagicMock()
+        original_thread = threading.Thread
+
+        def fake_thread(**kwargs):
+            if kwargs.get("target") is app_module._run_workflow_bg:
+                t = MagicMock()
+                t.start = MagicMock()
+                return t
+            return original_thread(**kwargs)
+
+        with patch("threading.Thread", side_effect=fake_thread):
             self.client.post("/workflow")
 
         with app_module._job_lock:
@@ -265,8 +302,17 @@ class TestWorkflowResume(unittest.TestCase):
         db.query.return_value.all.return_value = stocks
         app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
 
-        with patch("threading.Thread") as mock_thread:
-            mock_thread.return_value = MagicMock()
+        # ✅ แก้ 2026-07-04: เหตุผลเดียวกับ test_workflow_monday_mode_flag_true ด้านบน
+        original_thread = threading.Thread
+
+        def fake_thread(**kwargs):
+            if kwargs.get("target") is app_module._run_workflow_bg:
+                t = MagicMock()
+                t.start = MagicMock()
+                return t
+            return original_thread(**kwargs)
+
+        with patch("threading.Thread", side_effect=fake_thread):
             resp = self.client.post("/workflow/resume")
 
         self.assertEqual(resp.json()["status"], "resumed")

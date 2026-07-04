@@ -18,6 +18,10 @@ class Stock(Base):
     s3 = Column(Float, default=0.0)
     at_new_high = Column(Boolean, default=False)
     at_new_low  = Column(Boolean, default=False)
+    # ✅ เพิ่ม 2026-07-03: หนุ่มสร้าง reasoning (เหตุผลภาษาไทย 2-3 ประโยค อ้างอิงข่าว/sentiment)
+    # ต่อหุ้นทุกคืนอยู่แล้ว แต่ไม่เคยถูกบันทึกลง DB เลย — MBBook ต้องการอ่านเหตุผลนี้แทนการ
+    # หาข่าวเองจาก 4-5 แหล่ง (ดู workflow_trade_screenshots.md / project memory)
+    reasoning = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 class Trade(Base):
@@ -55,7 +59,11 @@ class WorkflowLog(Base):
     sell_signals    = Column(Integer, default=0)
     hold_signals    = Column(Integer, default=0)
     needs_review    = Column(Integer, default=0)
-    summary         = Column(Text,    nullable=True)  # เอ สรุปด้วย Haiku
+    summary         = Column(Text,    nullable=True)  # เอ สรุปด้วย Haiku (2-3 ประโยค เกี่ยวกับ run เอง ไม่ใช่ข่าว)
+    # ✅ เพิ่ม 2026-07-03: รายงานตลาดฉบับเต็มที่เจนเขียนทุกคืน (market overview, top signals,
+    # portfolio recommendations, risk) เดิมอยู่แค่ใน memory ระหว่าง job หายทันทีที่ job ถัดไปทับ
+    # เก็บถาวรตรงนี้ให้ MBBook อ่านย้อนหลังได้ผ่าน /workflow/latest-report
+    full_report     = Column(Text,    nullable=True)
     include_weekend = Column(Boolean, default=False)  # True = Monday mode
     cost_usd        = Column(Float,   default=0.0)    # ค่าใช้จ่าย API ของ run นี้ (USD)
 

@@ -416,10 +416,15 @@ class TestMudValidation(unittest.TestCase):
 
     def setUp(self):
         self.orc = make_orchestrator()
+        # ✅ แก้ 2026-07-04: เดิม confidence=0.85 (>= 0.70) โดน auto-PASS shortcut ใน
+        # mud_cross_validate ดักไปก่อนถึง self.claude_call() เลย (cost-saving optimization
+        # ที่เพิ่มเข้ามาทีหลัง แต่ test fixture นี้ไม่เคยอัปเดตตาม) ทำให้ mock_call ที่ตั้งไว้
+        # ไม่เคยถูกเรียกจริง เทสต์เลย assert ผิดที่ผิดทาง (เห็น PASS ทั้งที่ mock exception/parse-fail)
+        # ใช้ 0.65 (< 0.70) เพื่อบังคับให้ผ่านเข้า path ที่เรียก claude_call จริงตามที่เทสต์ต้องการ
         self.sample_analysis = {
             "AAPL": {
                 "ticker": "AAPL", "signal": "BUY",
-                "confidence": 0.85, "s1": 180.0, "s2": 175.0, "s3": 170.0,
+                "confidence": 0.65, "s1": 180.0, "s2": 175.0, "s3": 170.0,
                 "reasoning": "แนวโน้มดี"
             }
         }
@@ -902,7 +907,7 @@ class TestNewHighFlag(unittest.TestCase):
 
 
 class TestMudRecommendationFormat(unittest.TestCase):
-    """prompt มด ต้องบังคับ PASS/FAIL เท่านั้น — ตรวจจาก source file โดยตรง"""
+    """prompt มด ต้องบังคับ PASS/NEEDS_REVIEW เท่านั้น — ตรวจจาก source file โดยตรง"""
 
     def _read_agents_src(self):
         src_path = os.path.join(os.path.dirname(__file__), "agents.py")
@@ -910,13 +915,16 @@ class TestMudRecommendationFormat(unittest.TestCase):
             return f.read()
 
     def test_pass_fail_only_constraint_in_source(self):
+        # ✅ แก้ 2026-07-04: agents.py เปลี่ยนศัพท์จาก PASS/FAIL เป็น PASS/NEEDS_REVIEW
+        # ไปแล้วจริง (สอดคล้องกับ TestMudValidation ทั้งชุดที่ assert "NEEDS_REVIEW" อยู่แล้ว)
+        # แต่เทสต์นี้ตัวเดียวไม่เคยอัปเดตตาม ยังหา "FAIL" ซึ่งไม่มีในโค้ดจริงอีกต่อไป
         src = self._read_agents_src()
         # หา mud system_prompt section
         mud_start = src.find("def mud_cross_validate")
         mud_end   = src.find("def ", mud_start + 1)
         mud_src   = src[mud_start:mud_end]
         self.assertIn("PASS", mud_src)
-        self.assertIn("FAIL", mud_src)
+        self.assertIn("NEEDS_REVIEW", mud_src)
         # ต้องมี constraint ห้ามค่าอื่น
         self.assertTrue(
             "no other" in mud_src.lower() or "not valid" in mud_src.lower(),

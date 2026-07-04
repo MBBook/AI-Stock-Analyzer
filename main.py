@@ -196,6 +196,19 @@ async def startup():
         except Exception as e:
             print(f"[MIGRATION] {e}")
         try:
+            # ✅ เพิ่ม 2026-07-03: reasoning ต่อหุ้น (หนุ่มสร้างอยู่แล้วทุกคืนแต่ไม่เคย persist)
+            # + full_report ของ workflow_logs (รายงานตลาดฉบับเต็มที่เจนเขียน เดิมอยู่แค่ใน memory)
+            conn.execute(text(
+                "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS reasoning TEXT"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workflow_logs ADD COLUMN IF NOT EXISTS full_report TEXT"
+            ))
+            conn.commit()
+            print("[MIGRATION] stocks.reasoning / workflow_logs.full_report columns ready")
+        except Exception as e:
+            print(f"[MIGRATION] {e}")
+        try:
             # ✅ แก้ 2026-07-03: trades.shares / portfolio.shares เดิมเป็น INTEGER
             # MBBook ซื้อหุ้นเศษส่วน (fractional shares) ผ่าน Dime app เช่น 0.1874433 หุ้น
             # ต้องแปลงเป็น FLOAT ไม่งั้นข้อมูลถูกปัดเป็น 0 หมด (ตาราง trades/portfolio ว่างอยู่แล้ว
@@ -378,6 +391,7 @@ async def get_stocks(db: Session = Depends(get_db)):
                 "fair_price": s.fair_price,
                 "at_new_high": s.at_new_high or False,
                 "at_new_low":  s.at_new_low or False,
+                "reasoning": s.reasoning,  # ✅ เพิ่ม 2026-07-03: เหตุผลภาษาไทยจากหนุ่ม
                 "updated_at": s.updated_at
             }
             for s in stocks
@@ -727,6 +741,65 @@ async def get_cost_summary(db: Session = Depends(get_db)):
             "status": status,
         },
         "by_weekday": by_weekday,
+    }
+
+
+@app.get("/workflow/latest-report")
+async def get_latest_report(db: Session = Depends(get_db)):
+    """✅ เพิ่ม 2026-07-03: รายงานตลาดฉบับเต็มล่าสุดที่เจนเขียน (ภาษาไทย)
+    ให้ MBBook อ่านแทนการหาข่าวเองจาก 4-5 แหล่ง — คืนเฉพาะ run ล่าสุดที่มี full_report จริง
+    (ข้าม run ที่ BUDGET_EXCEEDED หรือ ABORTED ซึ่งไม่มีรายงาน)
+    ⚠️ คืนแค่อันเดียว — ถ้าไม่ได้เข้ามาดูหลายวัน ใช้ /workflow/reports แทนเพื่อดูย้อนหลังได้"""
+    from models import WorkflowLog
+    from sqlalchemy import desc
+    log = (
+        db.query(WorkflowLog)
+        .filter(WorkflowLog.full_report.isnot(None))
+        .order_by(desc(WorkflowLog.timestamp))
+        .first()
+    )
+    if not log:
+        return {"status": "no_report_yet", "message": "ยังไม่มีรายงานที่บันทึกไว้ — รอ workflow รันรอบถัดไป (22:00 น.)"}
+    return {
+        "status": "ok",
+        "timestamp": log.timestamp,
+        "run_status": log.status,
+        "buy_signals": log.buy_signals,
+        "hold_signals": log.hold_signals,
+        "sell_signals": log.sell_signals,
+        "report": log.full_report,
+    }
+
+
+@app.get("/workflow/reports")
+async def get_recent_reports(limit: int = 7, db: Session = Depends(get_db)):
+    """✅ เพิ่ม 2026-07-03: รายงานตลาดย้อนหลังหลายคืน (ไม่ใช่แค่ล่าสุดอันเดียว)
+    เหตุผล: ข้อมูลของทุกคืนไม่เคยถูกทับ (insert แถวใหม่ทุก run ไม่ใช่ update) แต่ endpoint
+    /workflow/latest-report เดิมโชว์แค่อันล่าสุด ทำให้ MBBook ไม่มีทางย้อนดูรายงานของคืนก่อนๆ
+    ถ้าพลาดไม่ได้เข้ามาดูสักวัน — endpoint นี้แก้ตรงนั้น ให้ดูย้อนหลังได้จริง"""
+    from models import WorkflowLog
+    from sqlalchemy import desc
+    logs = (
+        db.query(WorkflowLog)
+        .filter(WorkflowLog.full_report.isnot(None))
+        .order_by(desc(WorkflowLog.timestamp))
+        .limit(limit)
+        .all()
+    )
+    return {
+        "count": len(logs),
+        "reports": [
+            {
+                "id": l.id,
+                "timestamp": l.timestamp,
+                "run_status": l.status,
+                "buy_signals": l.buy_signals,
+                "hold_signals": l.hold_signals,
+                "sell_signals": l.sell_signals,
+                "report": l.full_report,
+            }
+            for l in logs
+        ]
     }
 
 

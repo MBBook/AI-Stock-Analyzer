@@ -57,6 +57,96 @@
 
 ---
 
+## ✅ ยืนยันแล้ว 2026-07-03: Trade Update (อัปโหลดรูป) ใช้งานได้จริงบน production
+
+Push จาก root ถูกต้อง (commit `739924b`) deploy Live 5:05 PM — เทสต์ผ่านแล้ว: อัปโหลดรูป → parse → กด "บันทึกรายการ" → เข้า portfolio จริง
+
+**บั๊กที่เจอระหว่างทาง**: รอบแรก push จากใน `frontend/` แทนที่จะเป็น root ของ repo → `git add .` stage แค่ไฟล์ frontend ทำให้ backend (main.py, agents.py, requirements.txt) ไม่ถูก push เลย แก้โดยสั่ง `cd D:\AI_Project\Dashboard_Share` ก่อน add/commit/push — **จำไว้: ต้องรัน git commands จาก root เสมอ ไม่ใช่จาก frontend/**
+
+**Pending — MBBook ขอ**: ปรับรายละเอียดที่แสดงตอน "add หุ้น" ในหน้า Trade Update (บอกว่ายัง "งงๆ" กับ flow ปัจจุบัน — parse กับ save เป็นคนละปุ่มกัน) รอรายละเอียดเพิ่มเติมว่าอยากให้ปรับตรงไหน
+
+---
+
+## ✅ 2026-07-03 (รอบ 4) — รื้อออกแบบ UI ใหม่ทั้งหมด
+
+MBBook ทักท้วงตรงๆ ว่า UI "เด๋อ" ไม่โมเดิร์น/มินิมอล: tab เยอะรก, สีปนกันลายตา, ตัวอักษรอ่านยาก, ดูเหมือนแปะๆ กันไว้ให้ครบ
+
+**แก้**: รื้อ `frontend/src/App.jsx` ใหม่ทั้งไฟล์
+- ลด tab จาก 6 → 4: **พอร์ต, บันทึกเทรด, หุ้น, ระบบ** (ยุบ News ที่เป็นแค่ placeholder ประโยคเดียว + Agents เข้า "ระบบ")
+- Design system ใหม่: จำกัดสีเหลือ 1 accent (ม่วง) + เขียว/แดงเฉพาะความหมายกำไร-ขาดทุน/ซื้อ-ขายเท่านั้น ที่เหลือเป็นเฉดเทา
+- เปลี่ยน emoji ทั้งหมดเป็น lucide-react icon (Briefcase, ArrowLeftRight, TrendingUp, Settings, Eye, Plus, Trash2, Upload, Search, Check, Camera, Info) — มีอยู่แล้วใน package.json
+- กำหนด spacing scale (SP: xs/sm/md/lg/xl/xxl) + style helper (`styles.card`, `styles.input`, `btn()`) ใช้ซ้ำทั้งไฟล์แทนตัวเลขสุ่ม
+- Agent pipeline ที่เคย ASCII-art แนวตั้งยาว ย่อเป็นแถว chip สั้นๆ
+- Portfolio ตั้งเป็น tab เริ่มต้น (เดิมเป็น News ที่ไม่มีเนื้อหา)
+- คงฟังก์ชันเดิมทั้งหมดไว้ครบ (parse รูป, submit trade, add/remove stock, cost summary, นิก suggestions)
+
+**หมายเหตุ**: sandbox bash mount ไฟล์นี้ค้างเวอร์ชันเก่า (2026-07-01) มาตลอดทั้ง session ตรวจ build อัตโนมัติไม่ได้ ใช้การอ่านทวนทั้งไฟล์แทน (โครงสร้างสมบูรณ์) **ต้อง `npm start` เช็คจริงก่อน push**
+
+---
+
+## ✅ 2026-07-03 (รอบ 5) — Audit ความพร้อมระบบ + แก้ gap ข่าว/reasoning หาย
+
+**คำถาม MBBook**: 30 tickers update ทุกคืนไม่ตกหล่นจริงไหม + มีสรุปข่าวใน webapp หรือยัง + เช็คส่วนอื่นพร้อมทำงานไหม
+
+**พบ**:
+1. **Gap ใหญ่**: หนุ่มสร้าง `reasoning` (เหตุผลภาษาไทย 2-3 ประโยค อ้างอิงข่าว/sentiment) ต่อหุ้นทุกคืนอยู่แล้ว และเจนเขียนรายงานตลาดฉบับเต็ม (market overview/signals/portfolio/risk) ทุกคืนเช่นกัน — แต่**ทั้งสองอย่างไม่เคยถูกบันทึกลง DB เลย** อยู่แค่ใน memory ระหว่าง job แล้วหายทันทีที่ job ถัดไปทับ นี่คือสาเหตุที่ News tab เดิมว่างเปล่า (เป็นแค่ placeholder ประโยคเดียวมาตลอด) — MBBook ไม่เคยเห็นสิ่งที่ AI วิเคราะห์จริงเลยแม้จะรันมาหลายรอบแล้ว
+2. **30 tickers update**: เช็คจาก `/workflow/history` พบ run ล่าสุด (id 9, 2026-07-02 22:10 Bangkok) COMPLETE 30/30 ครบ — แต่เป็นข้อมูลจุดเดียวหลังย้ายไป cron-job.org (แค่ 1 คืน) **ยังเรียกว่า "พิสูจน์แล้วทุกคืน" ไม่ได้** ต้องรอดูอีกหลายคืนก่อนฟันธง (run ก่อนหน้านั้นช่วง GH Actions ไม่เสถียร มีทั้ง COMPLETE/PASS กระจายเวลาแปลกๆ ไม่นับเป็น baseline)
+3. **Budget เดือน ก.ค.**: projected $10.46 (เป้า $10 / เพดาน $12) — เกินเป้าเล็กน้อยแต่ยังไม่เกินเพดาน สถานะปกติ
+4. **Prefetch/cron-job.org**: เช็ค `/prefetch/status` วันนี้ (2026-07-03) พบ fetch ล่าสุด 19:15 Bangkok ยืนยันว่ายังทำงานปกติ
+
+**แก้**:
+- `models.py`: เพิ่ม `Stock.reasoning` (Text) + `WorkflowLog.full_report` (Text)
+- `agents.py`: persist `reasoning` ใน `_checkpoint_database` และ `_update_database` (เดิมมีอยู่ใน `analysis` dict แล้วแต่ไม่เคยเขียนลง DB) + ส่ง `report` เข้า `a_record_improvements` แล้วดึง `report["summary"]` (text เต็มของเจน) บันทึกเป็น `full_report`
+- `main.py`: migration ALTER TABLE 2 คอลัมน์ใหม่ + expose `reasoning` ใน `/stocks` + endpoint ใหม่ `GET /workflow/latest-report`
+- `App.jsx`: แท็บ "ระบบ" เพิ่มการ์ด "รายงานตลาดล่าสุด" ไว้บนสุด (เนื้อหาเต็มจากเจน) + แท็บ "หุ้น" แสดง reasoning ต่อตัวใต้ signal/confidence
+
+**ผลลัพธ์ที่คาดหวัง**: หลัง deploy + รัน workflow รอบถัดไป (22:00 คืนนี้) MBBook จะเห็นรายงานตลาดจริงในแท็บระบบ และเหตุผลต่อหุ้นในแท็บหุ้น เป็นครั้งแรก — รอบนี้จะเห็นผลได้ก็ต่อเมื่อ workflow รันรอบใหม่เท่านั้น (ข้อมูลเก่าไม่มี reasoning/report ย้อนหลัง เพราะไม่เคยถูกบันทึกไว้)
+
+**แก้เพิ่ม (รอบ 2 วันเดียวกัน)**: MBBook ถามคมมาก — "ถ้าไม่ว่างเข้ามาอ่านสักวัน รายงานหายไปเลยหรอ" คำตอบคือข้อมูลไม่หาย (insert แถวใหม่ทุกคืน ไม่ทับของเก่า) แต่ endpoint เดิม (`/workflow/latest-report`) โชว์แค่อันล่าสุดอันเดียว ไม่มีทางย้อนดู — เพิ่ม endpoint ใหม่ `/workflow/reports?limit=7` คืนรายงานย้อนหลังสูงสุด 7 คืน + แก้ frontend ให้แสดงเป็นลิสต์ย้อนหลังในแท็บ "ระบบ" แทนที่จะโชว์แค่ล่าสุด
+
+---
+
+## ✅ 2026-07-04 — Full System Audit ก่อนเริ่มออกแบบ UI
+
+MBBook ขอให้เช็คทั้งระบบให้แน่ใจว่าทำงานปกติ ก่อนเริ่มคุยเรื่องหน้าตา UI ใหม่จริงจัง (มี mockup คร่าวๆ อยากเอามาคุยตอนถึงขั้นนั้น)
+
+**ผลตรวจ (เช็คสด ไม่ใช่เดา)**:
+
+1. **Workflow อัตโนมัติ 22:00**: คืน 2026-07-03 (ศุกร์) ก็ COMPLETE อัตโนมัติอีกครั้ง (run id 10, 22:09 น., 30/30, cost $0.499) — **2 คืนติดกันแล้ว** หลังย้าย cron-job.org (2 ก.ค. + 3 ก.ค.) แนวโน้มดีมาก แต่ยังไม่พอจะเรียก "เสถียร 100%" (ต้องดูอีกสัก 5 คืน)
+2. **🐛 พบบั๊กใหม่ — นิก (Friday code optimization) ข้ามทำงานทุกสัปดาห์มาโดยไม่มีใครรู้**: เช็ค `/workflow/logs` ของ run วันศุกร์ที่ผ่านมา พบ log `"agents.py ใหญ่เกินไป (105872 chars) — ข้าม optimization รอบนี้"` — โค้ดมี hard guard `if len(current_code) > 80000: return None` แต่ agents.py โตเกิน 80000 ไปนานแล้ว ไม่มี error โผล่ที่ไหนเลย มีแค่ WARNING เงียบๆ ที่ไม่มีใครไปดู **แก้แล้ว**: ยกเพดานเป็น 300000 chars — ⚠️ ข้อจำกัดที่เหลือ (ยังไม่แก้): นิกส่งแค่ 8000 ตัวอักษรแรกของไฟล์ให้ Claude วิเคราะห์เสมอ ไม่เห็นโค้ดท้ายไฟล์เลย — คุณภาพ suggestion จะจำกัดอยู่แค่ต้นไฟล์ (ดู Blueprint Defect #16)
+3. **นิก suggestions ปัจจุบัน**: `/nik/suggestions` count=0 — ตอนนี้เข้าใจแล้วว่าเป็นเพราะบั๊กข้อ 2 ไม่ใช่เพราะไม่มีอะไรต้องแก้
+4. **QA (นน) คุณภาพ**: run ล่าสุด PASS พร้อม issue ระดับ LOW 3 จุด (คำอธิบายเล็กน้อยไม่ตรงเป๊ะ เช่น ORCL อ้าง S1 เป็น 52-week low ผิด) — ไม่กระทบความน่าเชื่อถือ QA ทำงานตามที่ออกแบบไว้ถูกต้อง
+5. **Budget เดือน ก.ค.**: ยังอยู่ระดับ over_target_under_ceiling ปกติ ไม่มีอะไรน่าห่วง
+6. **⚠️ ยังไม่ได้ทำ — Test suite (133 tests)**: ยังรันไม่ได้ในเครื่อง (Python 3.14 กับ sqlalchemy==2.0.23 เข้ากันไม่ได้ เป็นปัญหา local environment เดิมที่ค้างมาตั้งแต่ 2026-07-03 ไม่เกี่ยวกับโค้ด) หมายความว่าการเปลี่ยนโค้ดหลายรอบใน session นี้ (models.py, agents.py, main.py) **ยังไม่เคยผ่านการรัน automated test ยืนยันเลย** อาศัยการตรวจสดผ่าน live endpoint หลัง deploy แทน (ใช้ได้แต่ไม่เท่า unit test) — ควรแก้ environment นี้ในบางจังหวะ
+
+**สรุปให้ MBBook**: ระบบ core (workflow, trade update, portfolio, prefetch) ทำงานพร้อมใช้จริงระดับหนึ่งแล้ว มี 1 บั๊กเงียบที่เพิ่งแก้ (นิก) และ 1 gap ด้าน dev process ที่ยังไม่แก้ (test suite รันไม่ได้ในเครื่อง) — เหมาะจะเริ่มคุยเรื่อง UI ต่อได้ แต่ควรรู้ไว้ว่า risk ของการไม่มี automated test ยังอยู่
+
+---
+
+## ✅ 2026-07-04 — แก้ test suite รันไม่ได้ในเครื่อง
+
+MBBook ขอให้แก้ก่อนทำ mockup UI จะได้สมบูรณ์ไปเลย
+
+**Root cause**: `requirements.txt` ล็อก `sqlalchemy==2.0.23` (ก.ค. 2024 — ก่อน Python 3.13/3.14 จะออก) ชนกับ Python 3.14 ในเครื่อง MBBook (`AssertionError: TypingOnly`)
+
+**แก้**: อัพเกรดเป็น `sqlalchemy==2.0.51` (ล่าสุดในสาย 2.0.x ไม่ใช่ 2.1 beta — เช็คจาก SQLAlchemy release notes แล้วว่ารองรับ 3.14 เต็มที่ตั้งแต่ 2.0.41) ความเสี่ยง breaking change ต่ำเพราะยังอยู่ในสาย 2.0 เดียวกัน — Render (production) ไม่เคยเจอปัญหานี้อยู่แล้วเพราะใช้ Python คนละเวอร์ชัน ไม่กระทบ production
+
+**ต้องทำต่อ**: MBBook ต้อง `pip install -r requirements.txt` ใหม่ในเครื่อง แล้วรัน `python -m pytest test_agents.py test_main.py -v` เพื่อยืนยันว่า 133 tests ยังผ่านหมดหลังอัพเกรด (ยังไม่ได้รันจริง ณ ตอนบันทึกนี้)
+
+**อัพเดต 2026-07-04 (รอบ 2) — เจอปัญหาเพิ่มอีก 2 ชุด ระหว่างพยายามรันจริง แก้ครบแล้ว ผลสุดท้าย 133 passed:**
+
+1. **httpx ไม่เคย pin เวอร์ชัน** — pip install ใหม่ได้ httpx 0.28+ มา ซึ่งเอา `Client(app=...)` shortcut ออกแล้ว แต่ `fastapi==0.104.1` (starlette เก่า) `TestClient` ยังเรียกแบบนั้นอยู่ → `TypeError: unexpected keyword argument 'app'` (23 tests fail) แก้ด้วย pin `httpx==0.27.2` ใน requirements.txt
+
+2. **6 เทสต์ค้างตลอดกาล (ต้อง Ctrl+C)** — `test_workflow_*` และ `test_resume_pending_stocks_starts_workflow` ทำ `patch("threading.Thread")` แบบ global ซึ่งไปดักโดน thread ภายในของ starlette TestClient เอง (ใช้เปิด async portal สำหรับยิง request จำลอง) ด้วย ทำให้ portal ไม่เคย start จริง แล้ว `self.client.post(...)` ค้างรอตลอดไป (ยืนยันสาเหตุผ่าน `pytest-timeout` เห็น stack trace ค้างใน `anyio.from_thread.start_blocking_portal`) แก้โดยให้ mock เช็คก่อนว่า `target` ตรงกับ `_run_workflow_bg` จริงมั้ย ถ้าไม่ใช่ให้ปล่อยผ่านไปสร้าง thread จริง (แก้ใน `test_main.py` 6 จุด)
+
+3. **4 fail ในมด (validation agent) — ไม่ใช่บั๊กจริง เป็น test เก่าไม่อัปเดตตามโค้ด:**
+   - 3 เทสต์ใน `TestMudValidation` ใช้ fixture `confidence=0.85` ซึ่งโดน auto-PASS shortcut (cost-saving optimization ที่ข้ามการเรียก Sonnet เมื่อ confidence ≥ 0.70 — ของจริง ไม่ใช่บั๊ก) ดักไปก่อนถึง mock เลย แก้โดยลด fixture เป็น `confidence=0.65`
+   - `TestMudRecommendationFormat::test_pass_fail_only_constraint_in_source` หา string "FAIL" ในซอร์ส แต่ agents.py เปลี่ยนศัพท์เป็น "PASS"/"NEEDS_REVIEW" ไปนานแล้ว (ตรงกับเทสต์อื่นทั้งชุด) แก้ให้เช็ค "NEEDS_REVIEW" แทน
+
+**สถานะ: ✅ ปิดเคสแล้ว** — `python -m pytest test_agents.py test_main.py -v` ผ่านครบ 133/133 ใน 14.65s ไม่มีอะไรค้าง ไม่มีอะไร fail พร้อม push ของทั้งชุด (sqlalchemy, httpx, thread-mock fix ใน test_main.py, mud test fix ใน test_agents.py, reasoning/full_report, นิก size guard) จาก repo root
+
+---
+
 ## 🧹 ทำความสะอาดงานค้าง (Defect Monitor) — 2026-07-02 22:xx
 
 **✅ Defect #4 ปิดเคสแล้ว**: budget Tue-Thu มีข้อมูลจริงครบ 4 รอบ เฉลี่ย $0.5225/run เทียบ $0.60 budget = เหลือ buffer ~13% ไม่มีปัญหาจริง ดู Blueprint.md Section 13
