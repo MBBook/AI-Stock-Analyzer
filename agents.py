@@ -9,13 +9,13 @@ import re
 import requests
 from requests.adapters import HTTPAdapter
 from anthropic import Anthropic
-from datetime import datetime
+from datetime import datetime, timedelta
 import yfinance as yf
 from requests_ratelimiter import LimiterSession
 import json
 import os
 from database import SessionLocal
-from models import Stock, Trade, Portfolio
+from models import Stock, Trade, Portfolio, SignalHistory, PortfolioSnapshot
 
 # ✅ FIX #I: define TimeoutAdapter ที่ top-level ไม่ redefine ในลูปทุกครั้งที่เรียก natty
 class TimeoutAdapter(HTTPAdapter):
@@ -2074,6 +2074,26 @@ Identify top issues and output diff blocks."""
                     stock.updated_at    = datetime.now()
                     updated.append(ticker)
 
+                    # ✅ เพิ่ม 2026-07-04: insert-only snapshot ลง signal_history สำหรับคำนวณ ROI
+                    # ย้อนหลัง (win rate 14d/30d เทียบ 75%, avg return 30d เทียบ 13%/เดือน — เฉพาะ BUY)
+                    # เงื่อนไข skip เดียวกับด้านบน (ผ่าน มด แล้ว + มีราคาจริง) ให้ตรงกับที่เขียนลง stocks จริง
+                    db.add(SignalHistory(
+                        ticker=ticker,
+                        signal=analysis.get('signal', 'HOLD'),
+                        confidence=analysis.get('confidence', 0.5),
+                        price=analysis.get('price', stock.current_price) or stock.current_price,
+                    ))
+
+            # ✅ เพิ่ม 2026-07-04: snapshot มูลค่าพอร์ตทั้งก้อนคืนนี้ (insert-only) สำหรับ
+            # คำนวณผลตอบแทนสะสมของพอร์ตจริง (ไม่มีเส้นตาย เป้า 13% — ดู Blueprint.md Section 14)
+            # ใช้ current_price ที่เพิ่ง update ในเซสชันนี้เอง (ยังไม่ commit แต่ query ซ้ำในเซสชัน
+            # เดียวกันจะได้ค่าที่เพิ่งแก้ ผ่าน SQLAlchemy identity map)
+            # ✅ แก้ 2026-07-04: ทำเฉพาะตอนมีอย่างน้อย 1 ticker ที่ update จริง — ถ้าคืนนี้ทุกตัวโดน
+            # skip หมด (NEEDS_REVIEW/ไม่มีราคา) ไม่ต้อง query Portfolio เลย (ตรงกับพฤติกรรมเดิม
+            # ที่เทสต์ยึดไว้อยู่แล้วว่า skip ทั้งหมด = ไม่แตะ DB เพิ่ม)
+            if updated:
+                self._snapshot_portfolio(db)
+
             db.commit()
 
             summary = f"Updated: {updated}" if updated else "No stocks updated"
@@ -2084,6 +2104,190 @@ Identify top issues and output diff blocks."""
             self.log_action("DATABASE", f"Update failed: {str(e)}", "ERROR")
         finally:
             if db is not None:
+                db.close()
+
+    def _snapshot_portfolio(self, db):
+        """✅ เพิ่ม 2026-07-04: คำนวณมูลค่ารวม + ต้นทุนรวมของพอร์ตทั้งก้อน แล้ว insert
+        ลง portfolio_snapshots (ไม่ commit เอง — ให้ผู้เรียกเป็นคน commit ในเซสชันเดียวกัน)
+        สูตรเดียวกับ endpoint GET /portfolio ใน main.py (คำนวณสดจาก Stock.current_price)"""
+        try:
+            holdings = db.query(Portfolio).all()
+            if not holdings:
+                return  # ยังไม่มีพอร์ตให้ snapshot (เช่น ยังไม่เคยบันทึก trade เลย)
+
+            total_value = 0.0
+            total_cost = 0.0
+            for h in holdings:
+                stock = db.query(Stock).filter(Stock.ticker == h.ticker).first()
+                current_price = stock.current_price if stock and stock.current_price else h.avg_cost
+                total_value += h.shares * current_price
+                total_cost += h.shares * h.avg_cost
+
+            db.add(PortfolioSnapshot(total_value=total_value, total_cost=total_cost))
+        except Exception as e:
+            self.log_action("SYSTEM", f"Portfolio snapshot failed: {str(e)}", "WARNING")
+
+    def calculate_roi(self, db=None):
+        """✅ เพิ่ม 2026-07-04, แก้ 2026-07-04 (รอบ 2): ROI 2 ชั้น ตามที่ตกลงกับ MBBook —
+        แยกวัด "ความแม่นของ AI" กับ "ผลตอบแทนจริงของบุ๊คเอง" คนละตัวชี้วัด (ดู Blueprint.md Section 14):
+          1. win rate (BUY ราคาขึ้น = ถูก, SELL ราคาลง = ถูก) จาก signal_history ที่ระยะ 14 และ 30 วัน
+             เทียบเกณฑ์ 75% — วัดความแม่นของ AI ล้วนๆ ไม่ขึ้นกับว่าบุ๊คเทรดตามจริงมั้ย
+          2. ผลตอบแทนพอร์ตจริงสะสม (ไม่มีเส้นตาย) จาก portfolio_snapshots เทียบเป้า 13% —
+             วัดผลจริงของบุ๊ค (ขึ้นกับการตัดสินใจเทรดของบุ๊คเองด้วย ไม่ใช่ AI ล้วนๆ)
+        เฉพาะสัญญาณที่ "อายุครบ" (เกิดมาแล้ว >= N วัน) เท่านั้นที่ตัดสินถูก/ผิดได้ — สัญญาณใหม่ที่ยัง
+        ไม่ถึงอายุ ถูกข้ามไปเงียบๆ ไม่นับทั้งถูกและผิด (ยังไม่มีคำตอบ)
+        หมายเหตุ: avg_return_pct ในผลลัพธ์ 14d/30d เป็นแค่ค่าเฉลี่ยผลตอบแทนต่อสัญญาณ BUY (ข้อมูล
+        diagnostic เสริม) ไม่มี target ผูกอยู่ — เป้า 13% อยู่ที่ portfolio_return เท่านั้น"""
+        own_db = False
+        if db is None:
+            db = SessionLocal()
+            own_db = True
+        try:
+            now = datetime.now()
+            result = {}
+
+            # ✅ ดึงข้อมูลทั้งหมดมาครั้งเดียว แล้วคำนวณ 14d/30d ใน Python แทนการ query
+            # ซ้ำต่อสัญญาณ (N+1) — เร็วกว่า และง่ายต่อการเทสต์
+            all_rows = db.query(SignalHistory).order_by(SignalHistory.timestamp.asc()).all()
+            by_ticker = {}
+            for row in all_rows:
+                by_ticker.setdefault(row.ticker, []).append(row)
+
+            for horizon_days in (14, 30):
+                cutoff = now - timedelta(days=horizon_days)
+                wins = 0
+                losses = 0
+                buy_returns = []
+
+                for row in all_rows:
+                    if row.signal not in ("BUY", "SELL"):
+                        continue
+                    if not row.timestamp or row.timestamp > cutoff:
+                        continue  # ยังไม่ครบอายุ — ตัดสินไม่ได้ ข้ามเงียบๆ
+                    if not row.price:
+                        continue  # ไม่มีราคาตั้งต้น ตัดสินไม่ได้
+
+                    target_time = row.timestamp + timedelta(days=horizon_days)
+                    nearby = [
+                        r for r in by_ticker.get(row.ticker, [])
+                        if r.price and abs((r.timestamp - target_time).total_seconds()) <= 5 * 86400
+                    ]
+                    if not nearby:
+                        continue  # ไม่มี snapshot ราคาในช่วงนั้น (เช่น หุ้นเพิ่งเพิ่มเข้าระบบ) — ข้าม
+
+                    future_row = min(nearby, key=lambda r: abs((r.timestamp - target_time).total_seconds()))
+
+                    price_then  = row.price
+                    price_later = future_row.price
+
+                    if row.signal == "BUY":
+                        correct = price_later > price_then
+                        buy_returns.append((price_later - price_then) / price_then * 100)
+                    else:  # SELL
+                        correct = price_later < price_then
+
+                    if correct:
+                        wins += 1
+                    else:
+                        losses += 1
+
+                evaluated  = wins + losses
+                win_rate   = round(wins / evaluated * 100, 1) if evaluated else None
+                avg_return = round(sum(buy_returns) / len(buy_returns), 2) if buy_returns else None
+
+                result[f"{horizon_days}d"] = {
+                    "win_rate_pct": win_rate,
+                    "win_rate_target_pct": 75,
+                    "meets_win_target": (win_rate >= 75) if win_rate is not None else None,
+                    "evaluated_signals": evaluated,
+                    "wins": wins,
+                    "losses": losses,
+                    "avg_return_pct": avg_return,  # diagnostic เสริม — ไม่มี target ผูก (ดู portfolio_return)
+                    "buy_signals_counted": len(buy_returns),
+                }
+
+            # ✅ เพิ่ม 2026-07-04 (รอบ 2): ผลตอบแทนพอร์ตจริงสะสม ไม่มีเส้นตาย เทียบเป้า 13%
+            # ใช้ snapshot ล่าสุดเทียบกับต้นทุนจริง (ไม่ใช่มูลค่าวันแรกที่เริ่ม track)
+            # ✅ แก้ 2026-07-04: แยก try/except ของส่วนนี้ออกมาต่างหาก — ถ้า query
+            # portfolio_snapshots พังด้วยเหตุผลอะไรก็ตาม ต้องไม่ทำให้ผลลัพธ์ win rate
+            # (14d/30d) ที่คำนวณสำเร็จไปแล้วด้านบนหายไปด้วย (คนละส่วนกัน ไม่ควรผูกชะตากรรมกัน)
+            try:
+                latest_snapshot = (
+                    db.query(PortfolioSnapshot)
+                    .order_by(PortfolioSnapshot.timestamp.desc())
+                    .first()
+                )
+                if latest_snapshot and latest_snapshot.total_cost:
+                    return_pct = round(
+                        (latest_snapshot.total_value - latest_snapshot.total_cost) / latest_snapshot.total_cost * 100,
+                        2
+                    )
+                    result["portfolio_return"] = {
+                        "return_pct": return_pct,
+                        "target_pct": 13,
+                        "meets_target": return_pct >= 13,
+                        "has_deadline": False,  # ไม่มีเส้นตาย ต่างจาก win rate ที่มีกรอบ 14/30 วันชัดเจน
+                        "total_value": round(latest_snapshot.total_value, 2),
+                        "total_cost": round(latest_snapshot.total_cost, 2),
+                        "as_of": latest_snapshot.timestamp,
+                    }
+                else:
+                    result["portfolio_return"] = {
+                        "return_pct": None,
+                        "target_pct": 13,
+                        "meets_target": None,
+                        "has_deadline": False,
+                        "total_value": None,
+                        "total_cost": None,
+                        "as_of": None,
+                    }
+            except Exception as e:
+                self.log_action("SYSTEM", f"Portfolio return calculation failed: {str(e)}", "WARNING")
+                result["portfolio_return"] = {"error": str(e)}
+
+            return result
+        except Exception as e:
+            self.log_action("SYSTEM", f"ROI calculation failed: {str(e)}", "ERROR")
+            return {"error": str(e)}
+        finally:
+            if own_db:
+                db.close()
+
+    def portfolio_return_history(self, db=None):
+        """✅ เพิ่ม 2026-07-04: ข้อมูลสำหรับกราฟแท่ง 2 อัน ตามที่ MBBook ขอ —
+        รายวัน (จันทร์-ศุกร์ หลังตลาดปิด) และรายเดือน (snapshot สุดท้ายของแต่ละเดือน)
+        ใช้ snapshot ล่าสุดของแต่ละวัน/เดือน (กัน duplicate จากกรณีรัน resume หลายรอบในวันเดียว)"""
+        own_db = False
+        if db is None:
+            db = SessionLocal()
+            own_db = True
+        try:
+            rows = db.query(PortfolioSnapshot).order_by(PortfolioSnapshot.timestamp.asc()).all()
+
+            by_day = {}
+            by_month = {}
+            for r in rows:
+                if not r.timestamp or not r.total_cost:
+                    continue
+                by_day[r.timestamp.strftime("%Y-%m-%d")] = r    # เรียง asc แล้ว แถวหลังสุดทับแถวก่อนเสมอ
+                by_month[r.timestamp.strftime("%Y-%m")] = r
+
+            def _point(period, row):
+                return_pct = round((row.total_value - row.total_cost) / row.total_cost * 100, 2)
+                return {"period": period, "return_pct": return_pct, "total_value": round(row.total_value, 2)}
+
+            daily = [
+                _point(k, r) for k, r in sorted(by_day.items())
+                if r.timestamp.weekday() < 5  # จันทร์-ศุกร์เท่านั้น
+            ]
+            monthly = [_point(k, r) for k, r in sorted(by_month.items())]
+
+            return {"daily": daily, "monthly": monthly}
+        except Exception as e:
+            self.log_action("SYSTEM", f"Portfolio history calculation failed: {str(e)}", "ERROR")
+            return {"error": str(e)}
+        finally:
+            if own_db:
                 db.close()
 
 

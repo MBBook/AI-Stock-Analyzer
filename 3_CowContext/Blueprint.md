@@ -56,6 +56,8 @@
 | GET | `/workflow/latest-report` | ✅ เพิ่ม 2026-07-03 — รายงานตลาดฉบับเต็มล่าสุดที่เจนเขียน (อันเดียว) |
 | GET | `/workflow/reports?limit=7` | ✅ เพิ่ม 2026-07-03 (รอบ 2) — รายงานตลาดย้อนหลังหลายคืน (กันเคส MBBook ไม่ว่างเข้ามาดูหลายวัน) — ใช้ตัวนี้แทน `/workflow/latest-report` ในหน้าเว็บ |
 | GET | `/nik/suggestions` | ดู NikSuggestion 10 รายการล่าสุด |
+| GET | `/roi/summary` | ✅ เพิ่ม 2026-07-04 — win rate @14d/@30d (เกณฑ์ 75%) + portfolio_return สะสมไม่มีเส้นตาย (เป้า 13%) |
+| GET | `/roi/portfolio-history` | ✅ เพิ่ม 2026-07-04 — ข้อมูลกราฟแท่งผลตอบแทนพอร์ต รายวัน (จ-ศ) + รายเดือน |
 
 ---
 
@@ -284,7 +286,21 @@ Dashboard_Share/
 ## 14. สถานะ Phase 1 Testing
 
 **เป้าหมาย:** รัน 60 วัน → วัด ROI
-- ROI > 50% → Upgrade (เพิ่ม tickers, feature ใหม่)
-- ROI < 50% → Debug (ดู WorkflowLog + nik suggestions)
 
-**ปัจจุบัน:** 30 tickers · live บน Render · 133 tests pass · GitHub Actions active · cost จริง $0.52/run (เป้า $0.43)
+**✅ อัพเดต 2026-07-04 — นิยาม ROI ชัดเจนแล้ว (เดิมเขียนแค่ "ROI > 50%" กำกวม ไม่รู้หมายถึงอัตราทายถูก
+หรือผลตอบแทน — คุยกับ MBBook แล้วสรุปเป็น 2 ตัวชี้วัดแยกกัน):**
+
+1. **Win rate** (BUY ราคาขึ้นจริง / SELL ราคาลงจริง = ถูก) วัด 2 ระยะเวลาแยกกัน:
+   - @14 วันหลังสัญญาณ — เกณฑ์ **75%**
+   - @30 วันหลังสัญญาณ — เกณฑ์ **75%**
+2. **Avg return %** (เฉพาะสัญญาณ BUY — SELL ไม่มีผลตอบแทนที่วัดเป็น % ได้ตรงๆ) ที่ระยะ 30 วัน
+   (≈ 1 เดือน) — เป้า **13%/เดือน**
+
+- ทั้งสองตัวชี้วัด < เกณฑ์ → Debug (ดู WorkflowLog + nik suggestions)
+- ทั้งสองตัวชี้วัดผ่านเกณฑ์ → Upgrade (เพิ่ม tickers, feature ใหม่)
+
+**Data infra:** ตาราง `signal_history` (insert-only ทุกคืนต่อหุ้น เก็บ ticker/signal/confidence/price/timestamp
+— ไม่ทับเหมือน `stocks`) + endpoint `GET /roi/summary` คำนวณให้อัตโนมัติ (`agents.py::calculate_roi`)
+สัญญาณที่ยังไม่ครบอายุ (< 14/30 วัน) จะไม่ถูกนับ ต้องรอเวลาให้ข้อมูลสะสมก่อนตัวเลขจะมีความหมาย
+
+**ปัจจุบัน:** 30 tickers · live บน Render · 133 tests pass (ก่อนเพิ่ม ROI tests รอบนี้) · cron-job.org active · cost จริง $0.52/run (เป้า $0.43)

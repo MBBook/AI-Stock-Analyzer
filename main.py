@@ -280,6 +280,48 @@ async def startup():
             print("[MIGRATION] hourly_cache + news_cache tables ready")
         except Exception as e:
             print(f"[MIGRATION] {e}")
+        try:
+            # ✅ เพิ่ม 2026-07-04: signal_history — insert-only ทุกคืนต่อหุ้น เก็บสัญญาณ+ราคา
+            # ณ เวลานั้น เพื่อคำนวณ ROI (win rate + avg return) ย้อนหลังได้ตอนครบ 60 วัน
+            # (Phase 1 evaluation ตาม Blueprint.md) — ต่างจาก stocks ที่ถูกทับทุกคืน
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS signal_history (
+                    id SERIAL PRIMARY KEY,
+                    ticker VARCHAR(20) NOT NULL,
+                    signal VARCHAR(10) NOT NULL,
+                    confidence FLOAT DEFAULT 0.0,
+                    price FLOAT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_signal_history_ticker ON signal_history (ticker)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_signal_history_timestamp ON signal_history (timestamp)"
+            ))
+            conn.commit()
+            print("[MIGRATION] signal_history table ready")
+        except Exception as e:
+            print(f"[MIGRATION] {e}")
+        try:
+            # ✅ เพิ่ม 2026-07-04: portfolio_snapshots — insert-only ทุกคืน เก็บมูลค่ารวม +
+            # ต้นทุนรวมของพอร์ตจริง เพื่อคำนวณผลตอบแทนสะสม (ไม่มีเส้นตาย เป้า 13%) แยกจาก win rate
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+                    id SERIAL PRIMARY KEY,
+                    total_value FLOAT NOT NULL,
+                    total_cost FLOAT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_portfolio_snapshots_timestamp ON portfolio_snapshots (timestamp)"
+            ))
+            conn.commit()
+            print("[MIGRATION] portfolio_snapshots table ready")
+        except Exception as e:
+            print(f"[MIGRATION] {e}")
 
     # ⛔ ปิด APScheduler แล้ว 2026-07-02 (Defect #14) — หยุดยิง prefetch เงียบๆ นาน 22+ ชม.
     # (รอบ 09:05-13:05 วันที่ 2 ก.ค. ขาดหมด) โดยไม่มี error/log ให้ debug เลย เพราะเป็น
@@ -742,6 +784,23 @@ async def get_cost_summary(db: Session = Depends(get_db)):
         },
         "by_weekday": by_weekday,
     }
+
+
+@app.get("/roi/summary")
+async def get_roi_summary(db: Session = Depends(get_db)):
+    """✅ เพิ่ม 2026-07-04: ROI ของสัญญาณ AI (Phase 1 evaluation — ดู Blueprint.md)
+    - win rate (BUY ราคาขึ้น / SELL ราคาลง = ถูก) ที่ระยะ 14d และ 30d เทียบเกณฑ์ 75%
+    - avg return % (เฉพาะสัญญาณ BUY) ที่ระยะ 30d เทียบเป้า 13%/เดือน
+    ข้อมูลมาจาก signal_history ที่ insert ทุกคืน (insert-only ไม่ทับ) — สัญญาณที่ยังไม่ครบอายุ
+    (เช่น เพิ่งออกเมื่อวาน) จะไม่ถูกนับ ต้องรอให้ครบ 14/30 วันก่อนถึงจะตัดสินถูก/ผิดได้"""
+    return orchestrator.calculate_roi(db)
+
+
+@app.get("/roi/portfolio-history")
+async def get_roi_portfolio_history(db: Session = Depends(get_db)):
+    """✅ เพิ่ม 2026-07-04: ข้อมูลกราฟแท่ง 2 ชุดสำหรับผลตอบแทนพอร์ตจริง — รายวัน (จ-ศ หลังตลาดปิด)
+    และรายเดือน (สรุปวันสิ้นเดือน) ให้ frontend ทำกราฟแท่งจากข้อมูลนี้โดยตรง"""
+    return orchestrator.portfolio_return_history(db)
 
 
 @app.get("/workflow/latest-report")

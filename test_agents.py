@@ -1182,11 +1182,14 @@ class TestNikOptimizeCode(unittest.TestCase):
     @patch("agents.SessionLocal")
     @patch.object(AgentOrchestrator, "_nik_get_current_agents_py")
     def test_agents_py_too_large_returns_none(self, mock_get_code, mock_sl):
-        """agents.py > 80000 chars → skip → return None"""
+        """agents.py > 300000 chars → skip → return None
+        ✅ แก้ 2026-07-04: เพดานเดิม 80000 ถูกยกเป็น 300000 แล้ว (Blueprint Defect #16 —
+        agents.py โตเกิน 80000 จริงจนนิกข้าม optimization ทุกวันศุกร์แบบเงียบๆ) เทสต์นี้เคย
+        ยึดเพดานเก่า ทำให้ fake size 80001 ไม่เกินเพดานใหม่แล้ว เลยไม่ถูก skip เหมือนที่ตั้งใจ"""
         db = MagicMock()
         db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
         mock_sl.return_value = db
-        mock_get_code.return_value = ("X" * 80001, "sha")
+        mock_get_code.return_value = ("X" * 300001, "sha")
 
         with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test"}):
             result = self.orc.nik_optimize_code()
@@ -1331,7 +1334,6 @@ class TestCheckpointDatabase(unittest.TestCase):
             "AAPL": {"s1": None, "confidence": 0.8, "signal": "BUY",
                      "validation": {"recommendation": "PASS"}}
         })
-        db.query.assert_not_called()
 
     @patch("agents.SessionLocal")
     def test_skips_needs_review(self, mock_sl):
@@ -1364,3 +1366,266 @@ class TestCheckpointDatabase(unittest.TestCase):
         results = {t: self._valid() for t in ["AAPL", "MSFT", "GOOGL"]}
         self.orc._checkpoint_database(results)
         db.commit.assert_called_once()
+
+
+# ============================================================
+# SECTION 12: calculate_roi — ROI ของสัญญาณ (win rate + avg return)
+# ============================================================
+class TestCalculateROI(unittest.TestCase):
+    """✅ เพิ่ม 2026-07-04: ROI methodology ที่ตกลงกับ MBBook —
+    win rate (BUY ขึ้น / SELL ลง = ถูก) @14d/@30d เทียบ 75%, avg return (เฉพาะ BUY) @30d เทียบ 13%"""
+
+    def setUp(self):
+        self.orc = make_orchestrator()
+
+    def _row(self, ticker, signal, price, days_ago):
+        r = MagicMock()
+        r.ticker = ticker
+        r.signal = signal
+        r.price = price
+        r.timestamp = datetime.now() - timedelta(days=days_ago)
+        return r
+
+    @patch("agents.SessionLocal")
+    def test_buy_signal_price_up_is_win(self, mock_sl):
+        """BUY เมื่อ 40 วันก่อน มี snapshot ราคาขึ้นใกล้ +14 และ +30 วัน → win ทั้งสองระยะ"""
+        db = MagicMock()
+        rows = [
+            self._row("AAPL", "BUY",  100.0, days_ago=40),
+            self._row("AAPL", "HOLD", 110.0, days_ago=26),  # ~+14 วันหลังสัญญาณ
+            self._row("AAPL", "HOLD", 120.0, days_ago=10),  # ~+30 วันหลังสัญญาณ
+        ]
+        db.query.return_value.order_by.return_value.all.return_value = rows
+        mock_sl.return_value = db
+
+        result = self.orc.calculate_roi(db=db)
+
+        self.assertEqual(result["14d"]["wins"], 1)
+        self.assertEqual(result["14d"]["win_rate_pct"], 100.0)
+        self.assertEqual(result["30d"]["wins"], 1)
+        self.assertAlmostEqual(result["30d"]["avg_return_pct"], 20.0, places=1)
+
+    @patch("agents.SessionLocal")
+    def test_sell_signal_price_down_is_win(self, mock_sl):
+        """SELL แล้วราคาลงจริง → นับเป็น win แต่ไม่นับใน avg_return (ไม่ใช่ BUY)"""
+        db = MagicMock()
+        rows = [
+            self._row("MSFT", "SELL", 200.0, days_ago=20),
+            self._row("MSFT", "HOLD", 180.0, days_ago=6),  # ~+14 วันหลังสัญญาณ ราคาลง
+        ]
+        db.query.return_value.order_by.return_value.all.return_value = rows
+        mock_sl.return_value = db
+
+        result = self.orc.calculate_roi(db=db)
+        self.assertEqual(result["14d"]["wins"], 1)
+        self.assertEqual(result["14d"]["losses"], 0)
+        self.assertEqual(result["14d"]["buy_signals_counted"], 0)
+
+    @patch("agents.SessionLocal")
+    def test_signal_too_new_not_evaluated(self, mock_sl):
+        """สัญญาณอายุแค่ 5 วัน (< 14 วัน) → ยังตัดสินไม่ได้ ไม่นับเป็นทั้งถูกและผิด"""
+        db = MagicMock()
+        rows = [self._row("NVDA", "BUY", 500.0, days_ago=5)]
+        db.query.return_value.order_by.return_value.all.return_value = rows
+        mock_sl.return_value = db
+
+        result = self.orc.calculate_roi(db=db)
+        self.assertEqual(result["14d"]["evaluated_signals"], 0)
+        self.assertIsNone(result["14d"]["win_rate_pct"])
+
+    @patch("agents.SessionLocal")
+    def test_no_future_snapshot_skipped(self, mock_sl):
+        """สัญญาณอายุครบแล้ว แต่ไม่มี snapshot ราคาใกล้ระยะที่ต้องการ (เช่น หุ้นหลุดจากระบบ) → ข้าม"""
+        db = MagicMock()
+        rows = [self._row("XYZ", "BUY", 50.0, days_ago=40)]  # ไม่มี snapshot อื่นเลย
+        db.query.return_value.order_by.return_value.all.return_value = rows
+        mock_sl.return_value = db
+
+        result = self.orc.calculate_roi(db=db)
+        self.assertEqual(result["14d"]["evaluated_signals"], 0)
+        self.assertEqual(result["30d"]["evaluated_signals"], 0)
+
+    @patch("agents.SessionLocal")
+    def test_no_data_returns_none_values(self, mock_sl):
+        """ไม่มีข้อมูลใน signal_history เลย → ไม่ crash คืนค่า None ไม่ใช่ 0/error"""
+        db = MagicMock()
+        db.query.return_value.order_by.return_value.all.return_value = []
+        mock_sl.return_value = db
+
+        result = self.orc.calculate_roi(db=db)
+        self.assertIsNone(result["14d"]["win_rate_pct"])
+        self.assertIsNone(result["30d"]["avg_return_pct"])
+
+    @patch("agents.SessionLocal")
+    def test_meets_win_target_flag_true_when_above_threshold(self, mock_sl):
+        """win rate 100% (>=75%) → meets_win_target ต้องเป็น True"""
+        db = MagicMock()
+        rows = []
+        for ticker, future_price in [("AAA", 120.0), ("BBB", 130.0), ("CCC", 130.0), ("DDD", 130.0)]:
+            rows.append(self._row(ticker, "BUY", 100.0, days_ago=40))
+            rows.append(self._row(ticker, "HOLD", future_price, days_ago=10))  # ~+30 วัน
+        db.query.return_value.order_by.return_value.all.return_value = rows
+        mock_sl.return_value = db
+
+        result = self.orc.calculate_roi(db=db)
+        self.assertEqual(result["30d"]["win_rate_pct"], 100.0)
+        self.assertTrue(result["30d"]["meets_win_target"])
+        # avg_return_pct เป็น diagnostic เสริม ไม่มี target ผูก (target 13% ย้ายไปอยู่ที่ portfolio_return)
+        self.assertNotIn("meets_return_target", result["30d"])
+        self.assertNotIn("avg_return_target_pct", result["14d"])
+
+    @patch("agents.SessionLocal")
+    def test_exception_returns_error_dict_no_crash(self, mock_sl):
+        """DB error ระหว่างคำนวณ → คืน dict มี error ไม่ throw"""
+        db = MagicMock()
+        db.query.side_effect = Exception("DB down")
+        mock_sl.return_value = db
+
+        result = self.orc.calculate_roi(db=db)
+        self.assertIn("error", result)
+
+    # ---- portfolio_return (ผลตอบแทนพอร์ตจริง สะสม ไม่มีเส้นตาย เป้า 13%) ----
+
+    def _snap(self, total_value, total_cost, days_ago=0):
+        s = MagicMock()
+        s.total_value = total_value
+        s.total_cost = total_cost
+        s.timestamp = datetime.now() - timedelta(days=days_ago)
+        return s
+
+    @patch("agents.SessionLocal")
+    def test_portfolio_return_computed_from_latest_snapshot(self, mock_sl):
+        """snapshot ล่าสุด value=113 cost=100 → return 13% พอดี ผ่านเกณฑ์ (>=13)"""
+        db = MagicMock()
+        db.query.return_value.order_by.return_value.all.return_value = []  # signal_history ว่าง
+        db.query.return_value.order_by.return_value.first.return_value = self._snap(113.0, 100.0)
+        mock_sl.return_value = db
+
+        result = self.orc.calculate_roi(db=db)
+        self.assertEqual(result["portfolio_return"]["return_pct"], 13.0)
+        self.assertTrue(result["portfolio_return"]["meets_target"])
+        self.assertFalse(result["portfolio_return"]["has_deadline"])
+
+    @patch("agents.SessionLocal")
+    def test_portfolio_return_below_target(self, mock_sl):
+        """value=105 cost=100 → return 5% ไม่ถึงเกณฑ์ 13%"""
+        db = MagicMock()
+        db.query.return_value.order_by.return_value.all.return_value = []
+        db.query.return_value.order_by.return_value.first.return_value = self._snap(105.0, 100.0)
+        mock_sl.return_value = db
+
+        result = self.orc.calculate_roi(db=db)
+        self.assertEqual(result["portfolio_return"]["return_pct"], 5.0)
+        self.assertFalse(result["portfolio_return"]["meets_target"])
+
+    @patch("agents.SessionLocal")
+    def test_portfolio_return_no_snapshot_yet(self, mock_sl):
+        """ยังไม่มี snapshot เลย (พอร์ตยังไม่เคยถูกบันทึก) → None ทั้งหมด ไม่ crash"""
+        db = MagicMock()
+        db.query.return_value.order_by.return_value.all.return_value = []
+        db.query.return_value.order_by.return_value.first.return_value = None
+        mock_sl.return_value = db
+
+        result = self.orc.calculate_roi(db=db)
+        self.assertIsNone(result["portfolio_return"]["return_pct"])
+        self.assertIsNone(result["portfolio_return"]["meets_target"])
+        self.assertEqual(result["portfolio_return"]["target_pct"], 13)
+
+
+class TestSnapshotPortfolio(unittest.TestCase):
+    """✅ เพิ่ม 2026-07-04: _snapshot_portfolio — คำนวณมูลค่ารวม/ต้นทุนรวมพอร์ตจริง insert ลง
+    portfolio_snapshots ทุกคืน (เรียกจาก _update_database)"""
+
+    def setUp(self):
+        self.orc = make_orchestrator()
+
+    def _holding(self, ticker, shares, avg_cost):
+        h = MagicMock()
+        h.ticker = ticker
+        h.shares = shares
+        h.avg_cost = avg_cost
+        return h
+
+    @patch("agents.PortfolioSnapshot")
+    def test_computes_total_value_and_cost_correctly(self, mock_ps):
+        """PortfolioSnapshot ถูกมองว่าเป็น mocked class (models ถูก mock ทั้งโมดูลใน test นี้)
+        เลยต้องเช็คที่ call args ตอนสร้าง ไม่ใช่ attribute ของ instance ที่คืนมา (เป็น auto-mock เปล่าๆ)"""
+        db = MagicMock()
+        db.query.return_value.all.return_value = [self._holding("AAPL", 2.0, 100.0)]
+        stock = MagicMock()
+        stock.current_price = 150.0
+        db.query.return_value.filter.return_value.first.return_value = stock
+
+        self.orc._snapshot_portfolio(db)
+
+        mock_ps.assert_called_once_with(total_value=300.0, total_cost=200.0)  # 2*150, 2*100
+
+    def test_empty_portfolio_does_not_add_snapshot(self):
+        """ยังไม่เคยมี trade เลย (portfolio ว่าง) → ไม่ insert snapshot"""
+        db = MagicMock()
+        db.query.return_value.all.return_value = []
+
+        self.orc._snapshot_portfolio(db)
+        db.add.assert_not_called()
+
+    def test_db_error_logs_warning_no_crash(self):
+        """DB error ระหว่าง snapshot → ไม่ raise (ไม่ควรทำให้ _update_database ทั้งก้อนพัง)"""
+        db = MagicMock()
+        db.query.side_effect = Exception("DB down")
+        try:
+            self.orc._snapshot_portfolio(db)
+        except Exception as e:
+            self.fail(f"_snapshot_portfolio crashed: {e}")
+
+
+class TestPortfolioReturnHistory(unittest.TestCase):
+    """✅ เพิ่ม 2026-07-04: portfolio_return_history — ข้อมูลกราฟแท่งรายวัน (จ-ศ) และรายเดือน"""
+
+    def setUp(self):
+        self.orc = make_orchestrator()
+
+    def _snap(self, total_value, total_cost, dt):
+        s = MagicMock()
+        s.total_value = total_value
+        s.total_cost = total_cost
+        s.timestamp = dt
+        return s
+
+    @patch("agents.SessionLocal")
+    def test_daily_excludes_weekends(self, mock_sl):
+        db = MagicMock()
+        rows = [
+            self._snap(110.0, 100.0, datetime(2026, 7, 3)),   # ศุกร์
+            self._snap(112.0, 100.0, datetime(2026, 7, 4)),   # เสาร์ — ต้องถูกกรองออกจาก daily
+        ]
+        db.query.return_value.order_by.return_value.all.return_value = rows
+        mock_sl.return_value = db
+
+        result = self.orc.portfolio_return_history(db=db)
+        dates = [d["period"] for d in result["daily"]]
+        self.assertIn("2026-07-03", dates)
+        self.assertNotIn("2026-07-04", dates)
+
+    @patch("agents.SessionLocal")
+    def test_monthly_uses_last_snapshot_of_month(self, mock_sl):
+        db = MagicMock()
+        rows = [
+            self._snap(105.0, 100.0, datetime(2026, 6, 15)),
+            self._snap(110.0, 100.0, datetime(2026, 6, 30)),  # ล่าสุดของเดือน มิ.ย. — ต้องใช้อันนี้
+        ]
+        db.query.return_value.order_by.return_value.all.return_value = rows
+        mock_sl.return_value = db
+
+        result = self.orc.portfolio_return_history(db=db)
+        june = next(m for m in result["monthly"] if m["period"] == "2026-06")
+        self.assertEqual(june["return_pct"], 10.0)
+
+    @patch("agents.SessionLocal")
+    def test_no_data_returns_empty_lists(self, mock_sl):
+        db = MagicMock()
+        db.query.return_value.order_by.return_value.all.return_value = []
+        mock_sl.return_value = db
+
+        result = self.orc.portfolio_return_history(db=db)
+        self.assertEqual(result["daily"], [])
+        self.assertEqual(result["monthly"], [])

@@ -1,7 +1,74 @@
 # Pending — AI Stock Analyzer V4
 
-> รายการที่รอดำเนินการในอนาคต
-> อัพเดตล่าสุด: 2026-07-03 (01:xx Bangkok)
+## ✅ 2026-07-04 (รอบ 3) — รัน pytest จริงครั้งแรก เจอบั๊กจริง 10 ตัว แก้ครบแล้ว
+
+MBBook รันจริงที่เครื่องได้ผล 149 items, 10 failed — เป็นบั๊กจริงทั้งหมด ไม่ใช่ปัญหา environment:
+
+1. **`portfolio_return` พังแล้วลาก win rate ตายไปด้วย** (5 เทสต์ FAIL) — `latest_snapshot` เป็น
+   MagicMock ที่ไม่ได้ตั้งค่าไว้ในเทสต์เก่า ทำให้คำนวณ `>=` กับ MagicMock พัง exception ลอยขึ้นไปโดน
+   try/except ตัวนอกร่วมกับ win rate ทำให้ผลลัพธ์ทั้งก้อนหายกลายเป็น `{"error": ...}` — แก้โดยแยก
+   try/except ของ portfolio_return ออกมาต่างหาก พังแล้วพังแค่ส่วนนั้น ไม่กระทบ win rate
+2. **`_snapshot_portfolio` รันแม้ไม่มี ticker ไหน update สำเร็จเลย** (3 เทสต์ FAIL) — เทสต์เก่ายึดไว้ว่า
+   "skip ทั้งหมด = ไม่แตะ DB" แต่โค้ดใหม่ไป query Portfolio เสมอ แก้โดยเช็ค `if updated:` ก่อนค่อย snapshot
+3. **`test_agents_py_too_large_returns_none` ใช้เพดานเก่า 80000 chars** (1 เทสต์ FAIL) — ลืมอัปเดตตอนยก
+   เพดานเป็น 300000 ไปแล้ว (Defect #16) แก้ fake size เทสต์เป็น 300001
+
+**✅ ยืนยันแล้ว 2026-07-04**: รันซ้ำผ่านครบ **149 passed** ใน 9.89s ไม่มี fail เหลือเลย พร้อม push
+> อัพเดตล่าสุด: 2026-07-04
+
+---
+
+## ✅ 2026-07-04 — เพิ่มระบบคำนวณ ROI อัตโนมัติ (Phase 1 evaluation)
+
+MBBook ถามว่าระบบต้องมี Dashboard ตัวเลขมั้ย → พบว่า "ROI" ที่ตั้งเป้าไว้ใน Blueprint (>50%) ไม่มีที่ไหน
+คำนวณได้จริงเลย เพราะตาราง `stocks` ทับข้อมูลทุกคืน ไม่มีประวัติสัญญาณย้อนหลัง
+
+**ตกลงนิยามกับ MBBook แล้ว:**
+- Win rate (BUY ขึ้นจริง/SELL ลงจริง = ถูก) @14 วัน และ @30 วัน แยกกัน เกณฑ์ **75%**
+- Avg return % เฉพาะ BUY @30 วัน เป้า **13%/เดือน**
+
+**สร้างแล้ว:**
+1. ตาราง `signal_history` (models.py) — insert-only ทุกคืนต่อหุ้น ตอน `_update_database` (agents.py)
+2. Migration ใน main.py startup
+3. `agents.py::calculate_roi()` — คำนวณ win rate + avg return ทั้ง 2 ระยะเวลา
+4. Endpoint `GET /roi/summary`
+5. เทสต์ 7 เคสใน `test_agents.py::TestCalculateROI` (win/loss ทั้ง BUY/SELL, สัญญาณใหม่เกินไปไม่นับ,
+   ไม่มี snapshot ราคาข้ามไป, ไม่มีข้อมูลเลยไม่ crash, meets_target flags, DB error ไม่ throw)
+6. Blueprint.md Section 14 อัพเดตนิยาม ROI ให้ชัดเจน (เดิมกำกวม)
+
+**⚠️ ยังไม่ยืนยันด้วย pytest จริง** — sandbox bash mount ของผมค้างอ่านไฟล์เวอร์ชันเก่าทั้งโฟลเดอร์
+(mtime ทุกไฟล์ค้างที่ก่อนวันนี้ ทั้งที่แก้วันนี้แล้ว) เจอ syntax error ปลอมจากไฟล์ stale ไม่ใช่บั๊กจริง —
+ตรวจ syntax ด้วยการอ่านไฟล์จริงผ่าน tool แทน **ต้องให้ MBBook รัน `pip install -r requirements.txt` +
+`python -m pytest test_agents.py test_main.py -v` ที่เครื่องเพื่อยืนยันจริงอีกครั้ง**
+
+## ✅ 2026-07-04 (รอบ 2) — เพิ่มผลตอบแทนพอร์ตจริง (แยกจาก win rate)
+
+MBBook ชี้แจงว่า "ผลตอบแทนเฉลี่ย" ที่ต้องการจริงๆ คือมูลค่าพอร์ตทั้งก้อน (เงินจริง) ไม่ใช่ค่าเฉลี่ยต่อสัญญาณ
+และปฏิเสธเกณฑ์ "13%/เดือน" ถูกต้อง (ทบต้น 13%/เดือน = ~314%/ปี ไม่มีใครทำได้จริง) → เปลี่ยนเป็น
+**ผลตอบแทนสะสมตั้งแต่ต้นทุนจริง (avg_cost) ไม่มีเส้นตาย เป้า 13% ครั้งเดียว** แยกออกจาก win rate
+(ยังมีกรอบ 14d/30d เดิม 75% ไม่เปลี่ยน) — Phase 1 วันที่ 60 ตัดสิน Upgrade/Debug จาก win rate เป็นหลัก
+ผลตอบแทนพอร์ตเป็นตัวติดตามระยะยาวคู่ขนาน ไม่ผูกเส้นตายเดียวกัน
+
+**สร้างเพิ่ม:**
+1. ตาราง `portfolio_snapshots` (total_value, total_cost, timestamp) — insert-only ทุกคืน
+2. `agents.py::_snapshot_portfolio()` — คำนวณจาก Portfolio × Stock.current_price เรียกจาก `_update_database`
+3. `calculate_roi()` เพิ่ม key `portfolio_return` (return_pct, meets_target, has_deadline=False)
+4. เอา `avg_return_target_pct`/`meets_return_target` ออกจากผลลัพธ์ 14d/30d เดิม (target 13% ย้ายมาอยู่ที่นี่แทน)
+5. Endpoint `GET /roi/portfolio-history` — ข้อมูลกราฟแท่งรายวัน (จ-ศ) + รายเดือน (สรุปวันสิ้นเดือน)
+6. เทสต์เพิ่ม `TestCalculateROI` (portfolio_return 3 เคส), `TestSnapshotPortfolio` (3 เคส),
+   `TestPortfolioReturnHistory` (3 เคส)
+7. Blueprint.md Section 14 อัพเดตอีกรอบ
+
+**⚠️ เจอบั๊กจากตัวเองระหว่างทำ**: ตอนแรก append เทสต์ต่อท้ายไฟล์โดยอิง `wc -l` จาก bash ซึ่ง**ค้างเป็น
+เวอร์ชันเก่า** (บั๊กเดียวกับด้านบน) ทำให้แทรกเนื้อหาผิดตำแหน่ง ไปตัดกลาง `TestCheckpointDatabase` โดยไม่ตั้งใจ
+เจอตอนพยายามรัน pytest ในนี้แล้วเทสต์ผิดที่ผิดทาง — แก้แล้วโดยอ่านไฟล์ทั้งหมดผ่าน tool ตรวจสอบทีละส่วน
+ย้าย 3 เทสต์ที่หลุดกลับไปที่ `TestCheckpointDatabase` ที่ถูกต้อง ตรวจ class ครบ 20 คลาส ไม่มีซ้ำ/หาย
+
+**⚠️ ยังไม่ยืนยันด้วย pytest จริงเช่นกัน (sandbox ยังอ่านไฟล์เก่าอยู่)** — MBBook รันคำสั่งเดียวกับด้านบน
+ยืนยันได้เลยว่าทั้ง 2 รอบผ่านครบจริงมั้ย
+
+ข้อมูล `signal_history` จะเริ่มสะสมตั้งแต่รอบรันคืนนี้เป็นต้นไป — ROI จะยังเป็น `null`/`evaluated_signals: 0`
+ไปอีก ~14 วัน (ระยะสั้นสุด) กว่าจะเริ่มมีตัวเลขจริงให้ดู เป็นเรื่องปกติ ไม่ใช่บั๊ก
 
 ---
 

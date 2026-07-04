@@ -67,6 +67,35 @@ class WorkflowLog(Base):
     include_weekend = Column(Boolean, default=False)  # True = Monday mode
     cost_usd        = Column(Float,   default=0.0)    # ค่าใช้จ่าย API ของ run นี้ (USD)
 
+class SignalHistory(Base):
+    """✅ เพิ่ม 2026-07-04: เก็บสัญญาณ + ราคา ณ เวลานั้นทุกคืน แบบ insert-only (ไม่ทับเหมือน
+    ตาราง stocks) เพื่อคำนวณ ROI ย้อนหลังได้จริงตอนครบ 60 วัน (Phase 1 evaluation)
+    วิธีจับคู่ราคาอนาคต: หา row ของ ticker เดียวกันที่ timestamp ห่างจากวันสัญญาณ ~14/~30 วัน
+    (มีอยู่แล้วเพราะ insert ทุกคืนทุกหุ้นอยู่แล้ว ไม่ต้องมีตารางราคาแยกต่างหาก)
+    นิยาม ROI ที่ตกลงกับ MBBook (ดู Blueprint.md):
+      - win rate (BUY ราคาขึ้น / SELL ราคาลง = ถูก) เทียบเกณฑ์ 75% ที่ระยะ 14 และ 30 วัน
+      - avg return % (เฉพาะสัญญาณ BUY) เทียบเป้า 13%/เดือน ที่ระยะ 30 วัน"""
+    __tablename__ = "signal_history"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    ticker     = Column(String,  nullable=False, index=True)
+    signal     = Column(String,  nullable=False)   # BUY / HOLD / SELL
+    confidence = Column(Float,   default=0.0)
+    price      = Column(Float,   nullable=False)
+    timestamp  = Column(DateTime, default=datetime.utcnow, index=True)
+
+class PortfolioSnapshot(Base):
+    """✅ เพิ่ม 2026-07-04: snapshot มูลค่ารวมของพอร์ตทั้งก้อนทุกคืน (insert-only ไม่ทับ)
+    ใช้คำนวณผลตอบแทนสะสมของพอร์ตจริง (ไม่มีเส้นตาย ต่างจาก win rate ที่มีกรอบ 60 วัน)
+    เทียบเป้า 13% ที่ตกลงกับ MBBook — baseline = total_cost (ต้นทุนจริงตอนซื้อ ไม่ใช่วันที่เริ่ม track)
+    ดู Blueprint.md Section 14 และ agents.py::calculate_roi"""
+    __tablename__ = "portfolio_snapshots"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    total_value = Column(Float, nullable=False)   # มูลค่าปัจจุบันรวมทั้งพอร์ต (current_price × shares)
+    total_cost  = Column(Float, nullable=False)   # ต้นทุนรวมจริงทั้งพอร์ต (avg_cost × shares) — baseline
+    timestamp   = Column(DateTime, default=datetime.utcnow, index=True)
+
 class HourlyCache(Base):
     """Cache ราคา + fundamentals ของหุ้นแต่ละตัว — pre-fetch รายชั่วโมงโดย GitHub Actions
     ที่ 22:00 นัตตี้อ่านจากตารางนี้แทนการ fetch live → ประหยัดเวลา 10-15 นาที"""
