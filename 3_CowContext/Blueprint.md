@@ -42,11 +42,11 @@
 | GET | `/health` | Health check — ต้องตอบ `{status: "ok"}` เสมอ |
 | GET | `/` | Root |
 | POST | `/stocks` | เพิ่ม ticker |
-| GET | `/stocks` | ดูรายชื่อ + signal ทั้งหมด |
+| GET | `/stocks` | ดูรายชื่อ + signal ทั้งหมด — ✅ แก้ 2026-07-05 เพิ่ม market_cap/pe_ratio/week52_high/low/beta/eps/peg_ratio/earnings_date_thai (join `hourly_cache` ล่าสุดต่อ ticker) |
 | DELETE | `/stocks/{ticker}` | ลบ ticker |
 | POST | `/trade-update?ticker=&action=&shares=&price=` | บันทึก trade จริง + อัพเดต position (ถัวเฉลี่ยต้นทุนตอน BUY, ลด shares ตอน SELL) — ✅ แก้ 2026-07-03 เดิม endpoint นี้บันทึกแค่ log เฉยๆ ไม่เคยอัพเดต portfolio จริง |
 | POST | `/trade-parse-image` (multipart file) | ✅ เพิ่ม 2026-07-03 — โคลสัน (Haiku vision) อ่านรูปสลิปซื้อขาย (เช่น Dime app) → คืน JSON {ticker, action, shares, price} ให้ frontend pre-fill ฟอร์ม ไม่บันทึก DB ที่ endpoint นี้ (save จริงผ่าน `/trade-update`) |
-| GET | `/portfolio` | ดู portfolio holdings — current_value/gain คำนวณสดจาก `Stock.current_price` |
+| GET | `/portfolio` | ดู portfolio holdings — ✅ แก้ 2026-07-05 current_price ดึงจาก `hourly_cache` ล่าสุดก่อน (fallback `Stock.current_price` → `avg_cost`) + เพิ่ม usd_thb_rate/total_value_thb/total_cost_thb/total_gain_thb/current_value_thb ต่อ holding (Frankfurter.app, cache 1 ชม.) |
 | GET | `/analysis/latest` | สรุป signal ล่าสุด |
 | POST | `/workflow` | เริ่ม workflow ใน background (non-blocking) |
 | GET | `/workflow/status` | ดู job status (idle/running/completed/error) |
@@ -57,7 +57,7 @@
 | GET | `/workflow/reports?limit=7` | ✅ เพิ่ม 2026-07-03 (รอบ 2) — รายงานตลาดย้อนหลังหลายคืน (กันเคส MBBook ไม่ว่างเข้ามาดูหลายวัน) — ใช้ตัวนี้แทน `/workflow/latest-report` ในหน้าเว็บ |
 | GET | `/nik/suggestions` | ดู NikSuggestion 10 รายการล่าสุด |
 | GET | `/roi/summary` | ✅ เพิ่ม 2026-07-04 — win rate @14d/@30d (เกณฑ์ 75%) + portfolio_return สะสมไม่มีเส้นตาย (เป้า 13%) |
-| GET | `/roi/portfolio-history` | ✅ เพิ่ม 2026-07-04 — ข้อมูลกราฟแท่งผลตอบแทนพอร์ต รายวัน (จ-ศ) + รายเดือน |
+| GET | `/roi/portfolio-history?start_date=&end_date=` | ✅ เพิ่ม 2026-07-04, แก้ 2026-07-05 เพิ่ม query param `start_date`/`end_date` (YYYY-MM-DD, optional) filter ช่วงเวลา — ไม่ส่งมา = คืนทั้งหมดเหมือนเดิม |
 
 ---
 
@@ -69,7 +69,7 @@
 | `trades` | ticker, action, shares, price, timestamp | โคลสัน |
 | `portfolio` | ticker, shares, avg_cost, current_value, total_gain | แฮรี่ |
 | `workflow_logs` | timestamp, status (COMPLETE/REJECTED), stocks_analyzed, buy/sell/hold signals, needs_review, summary, cost_usd | เอ |
-| `hourly_cache` | ticker, price, week52_high/low, pe_ratio, market_cap, source, at_new_high/low, fetched_at | นัตตี้ prefetch |
+| `hourly_cache` | ticker, price, week52_high/low, pe_ratio, market_cap, beta, eps, peg_ratio (✅ ทดลอง — field `pegRatio` ยังไม่ยืนยันจริง ดู Pending.md), earnings_date, earnings_hour (✅ เพิ่ม 2026-07-05), source, at_new_high/low, fetched_at | นัตตี้ prefetch |
 | `news_cache` | ticker, news_json, news_count, fetched_at | นัตตี้ prefetch |
 | `nik_suggestions` | summary, diff_text, status (pending/complete/failed), error_message, applied_at | นิก |
 

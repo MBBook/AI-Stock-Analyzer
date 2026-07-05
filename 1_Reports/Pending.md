@@ -1,5 +1,39 @@
 # Pending — AI Stock Analyzer V4
 
+## ⏳ 2026-07-05 — เพิ่ม Beta/EPS/PEG/วันประกาศงบ ใน /stocks — PEG ต้อง verify field จริง
+
+**บริบท**: MBBook ขอเพิ่มข้อมูลเชิงลึกใน Tickers tab (task #56) — Beta, EPS, PEG ratio, วันประกาศงบ
+(ถ้ายังไม่รู้ให้ใส่ "-")
+
+**ทำเสร็จ**:
+1. `models.py` — เพิ่ม `HourlyCache.beta/eps/peg_ratio/earnings_date/earnings_hour` (5 คอลัมน์ใหม่)
+2. `agents.py` — `_fetch_finnhub_full()` ดึง `beta`/`epsNormalizedAnnual` เพิ่ม (ยืนยันแล้วว่ามี field
+   จริงจาก sample response จริงที่เจอ — `beta` ยืนยัน 100%, `epsNormalizedAnnual` มั่นใจสูงเพราะจับคู่กับ
+   `peNormalizedAnnual` ที่ใช้อยู่แล้ว) + yfinance fallback ดึง `beta`/`trailingEps`/`pegRatio` เพิ่ม
+3. `agents.py` — เพิ่ม `_fetch_finnhub_earnings()` เรียก `/calendar/earnings` (ยืนยัน field จาก
+   GitHub/doc: date, hour bmo/amc/dmh) — เรียกไม่บ่อย (แค่ทุก 20 ชม./ครั้งต่อ ticker กันชน rate limit
+   60 req/min ของ Finnhub เพราะเพิ่มอีก 1 call/ticker) โดย carry-forward ค่าเดิมไปใส่ row ใหม่ทุกชั่วโมง
+   (ไม่งั้น "latest row" ที่ endpoint อื่นอ่านจะเห็น earnings_date เป็น None เกือบตลอดเวลา)
+4. `main.py` — migration เพิ่ม 5 คอลัมน์ใหม่ + `/stocks` join `HourlyCache` ล่าสุดต่อ ticker เพิ่ม
+   market_cap/pe_ratio/week52_high/low/beta/eps/peg_ratio/earnings_date_thai (เดิม endpoint นี้ไม่เคย
+   ส่งข้อมูลพวกนี้ให้ frontend เลยทั้งที่ HourlyCache เก็บไว้อยู่แล้วบางส่วน) — earnings date แปลงเป็น
+   วันเวลาไทยโดยประมาณด้วย `zoneinfo` (Finnhub ให้แค่วันที่ + session bmo/amc/dmh ไม่มีนาทีจริง จึง
+   ประมาณเวลา ET จาก session แล้วค่อยแปลง DST-aware เป็น Asia/Bangkok — ระบุ "(ประมาณ)" ในผลลัพธ์)
+
+**⚠️ PEG Ratio ยังไม่ยืนยัน — field `pegRatio` ใน Finnhub `metric=all`**: ค้นหาจาก doc/GitHub/บทความ
+จริงหลายแหล่งไม่เจอ field นี้ยืนยันชัดเจน (ต่างจาก `beta` ที่เจอ sample response จริง) — Finnhub free
+tier อาจไม่มี PEG ตรงๆ เพราะต้องใช้ earnings growth estimate ซึ่งมักเป็น paid feature ใน API อื่นๆ
+**MBBook เลือกให้ลอง field เดาไปก่อน + verify จาก log จริงหลัง deploy** (2026-07-05)
+
+**ต้องทำต่อ**: หลัง deploy รอบหน้า เช็ค log `นัตตี้-prefetch` หรือ query `/stocks` ตรงๆ ว่า `peg_ratio`
+ได้ค่าจริงหรือ `None` ตลอดทุก ticker — ถ้า `None` ตลอด แปลว่า field เดาผิด ต้องหาแหล่งข้อมูลอื่น (เช่น
+Alpha Vantage OVERVIEW ที่มี `PEGRatio` ยืนยันแล้ว แต่ rate limit ต่ำมาก 25 req/day ใช้แทนไม่ได้ทั้ง 30
+tickers ทุกชั่วโมง — ต้องคิดวิธีใหม่ถ้าจะเอาจริง)
+
+**ยังไม่ได้ทำ**: ยืนยันด้วย pytest จริง (เพิ่ม column ใหม่ยังไม่มีเทสต์คลุม) — ควรเพิ่มก่อน mark งานนี้ปิดเคส
+
+---
+
 ## ✅ 2026-07-04 (รอบ 3) — รัน pytest จริงครั้งแรก เจอบั๊กจริง 10 ตัว แก้ครบแล้ว
 
 MBBook รันจริงที่เครื่องได้ผล 149 items, 10 failed — เป็นบั๊กจริงทั้งหมด ไม่ใช่ปัญหา environment:

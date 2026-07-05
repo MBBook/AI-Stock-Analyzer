@@ -8,10 +8,55 @@ import requests
 import base64
 from dotenv import load_dotenv
 from database import get_db, engine
-from models import Base, Stock, Trade, Portfolio
+from models import Base, Stock, Trade, Portfolio, HourlyCache
 from datetime import datetime, timezone, timedelta
 from scheduler import setup_scheduler, shutdown_scheduler
 from agents import orchestrator
+from zoneinfo import ZoneInfo
+
+# ✅ เพิ่ม 2026-07-05 (task #56): แปลงวันประกาศงบ (จาก Finnhub, US Eastern) เป็นวันเวลาไทยโดยประมาณ
+# Finnhub ให้แค่วันที่ + session (bmo/amc/dmh) ไม่มีนาทีจริง เลยประมาณเวลาไทยจาก session โดยใช้
+# zoneinfo (DST-aware) แปลง ET→ICT แทนการ hardcode offset ชั่วโมงตรงๆ (ผิดช่วง DST ได้)
+_EARNINGS_SESSION_HOUR_ET = {"bmo": 8, "amc": 16, "dmh": 12}
+_EARNINGS_SESSION_LABEL_TH = {"bmo": "ก่อนตลาดเปิด", "amc": "หลังตลาดปิด", "dmh": "ระหว่างวัน"}
+
+
+def _format_earnings_thai(earnings_date, earnings_hour):
+    """คืน '-' ถ้ายังไม่มีข้อมูล ไม่งั้นคืนวันเวลาไทยโดยประมาณ (ระบุ (ประมาณ) เพราะ Finnhub
+    ไม่ได้ให้นาทีจริง แค่ session bmo/amc/dmh)"""
+    if not earnings_date:
+        return "-"
+    try:
+        hour_et = _EARNINGS_SESSION_HOUR_ET.get(earnings_hour, 9)
+        et_dt = earnings_date.replace(hour=hour_et, minute=0, second=0, tzinfo=ZoneInfo("America/New_York"))
+        th_dt = et_dt.astimezone(ZoneInfo("Asia/Bangkok"))
+        label = _EARNINGS_SESSION_LABEL_TH.get(earnings_hour)
+        suffix = f" ({label})" if label else " (ประมาณ)"
+        return th_dt.strftime("%d/%m/%Y %H:%M") + " น." + suffix
+    except Exception:
+        return "-"
+
+
+# ✅ เพิ่ม 2026-07-05 (task #52): USD→THB conversion สำหรับ Portfolio tab
+# ใช้ Frankfurter.app (ฟรี ไม่ต้องมี API key) — cache ในหน่วยความจำ 1 ชั่วโมงกันยิงถี่เกินไป
+_fx_rate_cache = {"rate": None, "fetched_at": None}
+
+
+def _get_usd_thb_rate():
+    """คืนอัตราแลกเปลี่ยน USD→THB ล่าสุด (cache 1 ชม.) ถ้า fetch พลาดและเคย cache ไว้ก่อน
+    จะคืนค่าเก่าแทนการ error ทั้งก้อน — ถ้าไม่เคย fetch สำเร็จเลยจะคืน None (frontend แสดงแค่ USD)"""
+    now = datetime.utcnow()
+    cached_at = _fx_rate_cache["fetched_at"]
+    if _fx_rate_cache["rate"] and cached_at and (now - cached_at) < timedelta(hours=1):
+        return _fx_rate_cache["rate"]
+    try:
+        resp = requests.get("https://api.frankfurter.app/latest?from=USD&to=THB", timeout=10)
+        rate = resp.json()["rates"]["THB"]
+        _fx_rate_cache["rate"] = rate
+        _fx_rate_cache["fetched_at"] = now
+        return rate
+    except Exception:
+        return _fx_rate_cache["rate"]
 
 load_dotenv()
 
@@ -322,6 +367,18 @@ async def startup():
             print("[MIGRATION] portfolio_snapshots table ready")
         except Exception as e:
             print(f"[MIGRATION] {e}")
+        try:
+            # ✅ เพิ่ม 2026-07-05 (task #56): beta/eps/peg_ratio + วันประกาศงบ ใน hourly_cache
+            # peg_ratio เป็นค่าทดลอง (field 'pegRatio' จาก Finnhub ยังไม่ยืนยัน — รอ verify จาก log จริง)
+            conn.execute(text("ALTER TABLE hourly_cache ADD COLUMN IF NOT EXISTS beta FLOAT"))
+            conn.execute(text("ALTER TABLE hourly_cache ADD COLUMN IF NOT EXISTS eps FLOAT"))
+            conn.execute(text("ALTER TABLE hourly_cache ADD COLUMN IF NOT EXISTS peg_ratio FLOAT"))
+            conn.execute(text("ALTER TABLE hourly_cache ADD COLUMN IF NOT EXISTS earnings_date TIMESTAMP"))
+            conn.execute(text("ALTER TABLE hourly_cache ADD COLUMN IF NOT EXISTS earnings_hour VARCHAR(10)"))
+            conn.commit()
+            print("[MIGRATION] hourly_cache beta/eps/peg_ratio/earnings_date/earnings_hour columns ready")
+        except Exception as e:
+            print(f"[MIGRATION] {e}")
 
     # ⛔ ปิด APScheduler แล้ว 2026-07-02 (Defect #14) — หยุดยิง prefetch เงียบๆ นาน 22+ ชม.
     # (รอบ 09:05-13:05 วันที่ 2 ก.ค. ขาดหมด) โดยไม่มี error/log ให้ debug เลย เพราะเป็น
@@ -420,25 +477,56 @@ async def add_stock(ticker: str, db: Session = Depends(get_db)):
 
 @app.get("/stocks")
 async def get_stocks(db: Session = Depends(get_db)):
+    """✅ แก้ 2026-07-05 (task #56): เพิ่มข้อมูลเชิงลึกจาก HourlyCache (market cap, PE, 52wk, beta, EPS,
+    วันประกาศงบ) เข้ามาด้วย — ก่อนหน้านี้ endpoint นี้คืนแค่ signal/price/reasoning จาก Stock table
+    เฉยๆ ทั้งที่ HourlyCache มีข้อมูลพวกนี้เก็บไว้อยู่แล้วแต่ไม่เคยถูกส่งออกให้ frontend (Tickers tab) เลย
+    PEG (peg_ratio) เป็นค่าทดลอง — field 'pegRatio' จาก Finnhub ยังไม่ยืนยันว่ามีจริง รอ verify จาก log"""
+    from sqlalchemy import func
+
     stocks = db.query(Stock).all()
-    return {
-        "count": len(stocks),
-        "stocks": [
-            {
-                "id": s.id,
-                "ticker": s.ticker,
-                "signal": s.signal,
-                "confidence": s.confidence,
-                "price": s.current_price,
-                "fair_price": s.fair_price,
-                "at_new_high": s.at_new_high or False,
-                "at_new_low":  s.at_new_low or False,
-                "reasoning": s.reasoning,  # ✅ เพิ่ม 2026-07-03: เหตุผลภาษาไทยจากหนุ่ม
-                "updated_at": s.updated_at
-            }
-            for s in stocks
-        ]
-    }
+    tickers = [s.ticker for s in stocks]
+
+    latest_hourly = {}
+    if tickers:
+        latest_sq = (
+            db.query(HourlyCache.ticker, func.max(HourlyCache.fetched_at).label("max_at"))
+            .filter(HourlyCache.ticker.in_(tickers))
+            .group_by(HourlyCache.ticker)
+            .subquery()
+        )
+        rows = (
+            db.query(HourlyCache)
+            .join(latest_sq, (HourlyCache.ticker == latest_sq.c.ticker) &
+                             (HourlyCache.fetched_at == latest_sq.c.max_at))
+            .all()
+        )
+        latest_hourly = {r.ticker: r for r in rows}
+
+    result = []
+    for s in stocks:
+        hc = latest_hourly.get(s.ticker)
+        result.append({
+            "id": s.id,
+            "ticker": s.ticker,
+            "signal": s.signal,
+            "confidence": s.confidence,
+            "price": s.current_price,
+            "fair_price": s.fair_price,
+            "at_new_high": s.at_new_high or False,
+            "at_new_low":  s.at_new_low or False,
+            "reasoning": s.reasoning,  # ✅ เพิ่ม 2026-07-03: เหตุผลภาษาไทยจากหนุ่ม
+            "market_cap":  hc.market_cap  if hc else None,
+            "pe_ratio":    hc.pe_ratio    if hc else None,
+            "week52_high": hc.week52_high if hc else None,
+            "week52_low":  hc.week52_low  if hc else None,
+            "beta":        hc.beta        if hc else None,
+            "eps":         hc.eps         if hc else None,
+            "peg_ratio":   hc.peg_ratio   if hc else None,
+            "earnings_date_thai": _format_earnings_thai(hc.earnings_date, hc.earnings_hour) if hc else "-",
+            "updated_at": s.updated_at
+        })
+
+    return {"count": len(result), "stocks": result}
 
 @app.delete("/stocks/{ticker}")
 async def remove_stock(ticker: str, db: Session = Depends(get_db)):
@@ -513,15 +601,44 @@ async def update_trade(ticker: str, action: str, shares: float, price: float, db
 @app.get("/portfolio")
 async def get_portfolio(db: Session = Depends(get_db)):
     """✅ แก้ 2026-07-03: current_value/gain คำนวณสดจาก Stock.current_price ตอน query
-    แทนที่จะพึ่งค่าที่ snapshot ไว้ตอนบันทึก trade (ซึ่งไม่มีอะไรมาอัพเดตให้เป็นปัจจุบัน)"""
+    แทนที่จะพึ่งค่าที่ snapshot ไว้ตอนบันทึก trade (ซึ่งไม่มีอะไรมาอัพเดตให้เป็นปัจจุบัน)
+    ✅ แก้ 2026-07-05: Stock.current_price อัปเดตแค่คืนละครั้ง (ตอน workflow หลัก 22:00)
+    ราคาที่โชว์ใน Portfolio เลยไม่ตรงกับ Tickers ที่ใช้ hourly_cache (อัปเดตทุกชั่วโมง)
+    ตอนนี้ดึงราคาล่าสุดจาก hourly_cache ก่อน ถ้าไม่มี (เช่น ticker เพิ่งเพิ่มยังไม่เคย prefetch)
+    ค่อย fallback ไป Stock.current_price แล้วค่อย avg_cost ตามลำดับเดิม"""
+    from sqlalchemy import func
+
     holdings = db.query(Portfolio).all()
     result_holdings = []
     total_value = 0.0
     total_cost = 0.0
 
+    tickers = [h.ticker for h in holdings]
+    latest_hourly_price = {}
+    if tickers:
+        latest_sq = (
+            db.query(HourlyCache.ticker, func.max(HourlyCache.fetched_at).label("max_at"))
+            .filter(HourlyCache.ticker.in_(tickers))
+            .group_by(HourlyCache.ticker)
+            .subquery()
+        )
+        hourly_rows = (
+            db.query(HourlyCache)
+            .join(latest_sq, (HourlyCache.ticker == latest_sq.c.ticker) &
+                             (HourlyCache.fetched_at == latest_sq.c.max_at))
+            .all()
+        )
+        latest_hourly_price = {r.ticker: r.price for r in hourly_rows if r.price}
+
+    usd_thb = _get_usd_thb_rate()  # ✅ task #52 — None ถ้า fetch ไม่เคยสำเร็จเลย (frontend แสดงแค่ USD)
+
     for h in holdings:
         stock = db.query(Stock).filter(Stock.ticker == h.ticker).first()
-        current_price = stock.current_price if stock and stock.current_price else h.avg_cost
+        current_price = (
+            latest_hourly_price.get(h.ticker)
+            or (stock.current_price if stock and stock.current_price else None)
+            or h.avg_cost
+        )
         current_value = h.shares * current_price
         cost_basis = h.shares * h.avg_cost
         gain = current_value - cost_basis
@@ -535,14 +652,20 @@ async def get_portfolio(db: Session = Depends(get_db)):
             "avg_cost": h.avg_cost,
             "current_price": current_price,
             "current_value": current_value,
+            "current_value_thb": round(current_value * usd_thb, 2) if usd_thb else None,
             "gain": gain,
             "gain_pct": (gain / cost_basis * 100) if cost_basis else 0.0
         })
 
+    total_gain = total_value - total_cost
     return {
         "total_value": total_value,
         "total_cost": total_cost,
-        "total_gain": total_value - total_cost,
+        "total_gain": total_gain,
+        "usd_thb_rate": usd_thb,
+        "total_value_thb": round(total_value * usd_thb, 2) if usd_thb else None,
+        "total_cost_thb": round(total_cost * usd_thb, 2) if usd_thb else None,
+        "total_gain_thb": round(total_gain * usd_thb, 2) if usd_thb else None,
         "holdings_count": len(result_holdings),
         "holdings": result_holdings
     }
@@ -797,10 +920,26 @@ async def get_roi_summary(db: Session = Depends(get_db)):
 
 
 @app.get("/roi/portfolio-history")
-async def get_roi_portfolio_history(db: Session = Depends(get_db)):
+async def get_roi_portfolio_history(
+    start_date: str = None,
+    end_date: str = None,
+    db: Session = Depends(get_db),
+):
     """✅ เพิ่ม 2026-07-04: ข้อมูลกราฟแท่ง 2 ชุดสำหรับผลตอบแทนพอร์ตจริง — รายวัน (จ-ศ หลังตลาดปิด)
-    และรายเดือน (สรุปวันสิ้นเดือน) ให้ frontend ทำกราฟแท่งจากข้อมูลนี้โดยตรง"""
-    return orchestrator.portfolio_return_history(db)
+    และรายเดือน (สรุปวันสิ้นเดือน) ให้ frontend ทำกราฟแท่งจากข้อมูลนี้โดยตรง
+    ✅ แก้ 2026-07-05: เพิ่ม query param start_date/end_date (รูปแบบ YYYY-MM-DD, optional)
+    สำหรับ filter ช่วงเวลา — ไม่ส่งมา = คืนทั้งหมดเหมือนเดิม (ไม่กระทบ tab "สะสม" ที่ใช้ข้อมูลเต็ม)
+    ใช้ string compare ตรงกับ period key ได้เลยเพราะ format คงที่จาก portfolio_return_history()
+    (daily = YYYY-MM-DD, monthly = YYYY-MM ตัด start/end_date เหลือ 7 ตัวแรกให้ตรง format)"""
+    result = orchestrator.portfolio_return_history(db)
+    if isinstance(result, dict) and "error" not in result:
+        if start_date:
+            result["daily"] = [p for p in result["daily"] if p["period"] >= start_date]
+            result["monthly"] = [p for p in result["monthly"] if p["period"] >= start_date[:7]]
+        if end_date:
+            result["daily"] = [p for p in result["daily"] if p["period"] <= end_date]
+            result["monthly"] = [p for p in result["monthly"] if p["period"] <= end_date[:7]]
+    return result
 
 
 @app.get("/workflow/latest-report")

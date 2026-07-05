@@ -280,11 +280,41 @@ class AgentOrchestrator:
                 "at_new_low":  at_new_low,
                 "pe_ratio":    self._safe_float(metric.get("peNormalizedAnnual")),
                 "market_cap":  self._safe_positive_float(metric.get("marketCapitalization")),
+                # ✅ เพิ่ม 2026-07-05 (task #56): beta ยืนยันแล้วว่ามี field นี้จริงใน metric=all
+                # eps ใช้คู่กับ pe_ratio ("peNormalizedAnnual" → "epsNormalizedAnnual")
+                # peg_ratio ยังไม่ยืนยัน field ชัดเจน — ลองชื่อ "pegRatio" ไปก่อน ต้องเช็ค log จริง
+                "beta":        self._safe_float(metric.get("beta")),
+                "eps":         self._safe_float(metric.get("epsNormalizedAnnual")),
+                "peg_ratio":   self._safe_float(metric.get("pegRatio")),
                 "source":      "finnhub"
             }
         except Exception as e:
             self.log_action("นัตตี้", f"Finnhub full fetch fail for {ticker}: {str(e)}", "WARNING")
             return None
+
+    def _fetch_finnhub_earnings(self, ticker, api_key):
+        """ดึงวันประกาศงบถัดไป/ล่าสุดจาก Finnhub /calendar/earnings
+        ✅ เพิ่ม 2026-07-05 (task #56) — เรียกไม่บ่อย (เช็คเงื่อนไขที่ natty_prefetch_prices ก่อนเรียก
+        เพราะข้อมูลนี้เปลี่ยนแค่ทุกไตรมาส ต่างจากราคาที่ต้องอัพเดตทุกชั่วโมง กันชน rate limit Finnhub
+        คืน (earnings_date: datetime|None, earnings_hour: 'bmo'/'amc'/'dmh'|None)"""
+        try:
+            from datetime import date, timedelta as _td
+            today = date.today()
+            to_date = today + _td(days=180)
+            url = (f"https://finnhub.io/api/v1/calendar/earnings?"
+                   f"from={today.isoformat()}&to={to_date.isoformat()}&symbol={ticker}&token={api_key}")
+            rows = requests.get(url, timeout=10).json().get("earningsCalendar", [])
+            if not rows:
+                return None, None
+            rows.sort(key=lambda r: r.get("date") or "9999-99-99")
+            nearest = rows[0]
+            earnings_date = (
+                datetime.strptime(nearest["date"], "%Y-%m-%d") if nearest.get("date") else None
+            )
+            return earnings_date, nearest.get("hour")
+        except Exception as e:
+            self.log_action("นัตตี้", f"Finnhub earnings calendar fail for {ticker}: {str(e)}", "WARNING")
+            return None, None
 
     def _fetch_alpha_vantage_overview(self, ticker, api_key):
         """ดึงข้อมูลจาก Alpha Vantage OVERVIEW endpoint (Tier 3 - last resort)
@@ -411,6 +441,7 @@ class AgentOrchestrator:
         ที่ 22:00 natty_get_news() จะอ่านจาก cache แทนการ fetch live → เร็วขึ้น ~10 นาที
         Returns: dict {ticker: data} ที่ fetch สำเร็จ"""
         from models import HourlyCache
+        from sqlalchemy import func as _func
         FINNHUB_KEY = os.getenv("FINNHUB_API_KEY")
         if not FINNHUB_KEY:
             self.log_action("นัตตี้-prefetch", "⚠️ FINNHUB_API_KEY not set — prefetch aborted", "ERROR")
@@ -418,6 +449,38 @@ class AgentOrchestrator:
 
         self.log_action("นัตตี้-prefetch", f"Pre-fetching {len(stocks)} tickers via Finnhub...", "INFO")
         fetched = {}
+
+        # ✅ เพิ่ม 2026-07-05 (task #56): earnings_date เปลี่ยนแค่ทุกไตรมาส ไม่ต้องเรียก
+        # /calendar/earnings ทุกรอบ prefetch รายชั่วโมงเหมือนราคา (กัน rate limit Finnhub 60 req/min)
+        # หา row ล่าสุดที่มี earnings_date ต่อ ticker — ถ้า fetch มาไม่เกิน 20 ชม. ใช้ค่าเดิม (carry forward
+        # ไปใส่ row ใหม่ทุกชั่วโมง เพราะแต่ละรอบ insert row ใหม่เสมอ ไม่ overwrite row เก่า)
+        # ถ้าเก่ากว่า 20 ชม. (หรือไม่เคยมีเลย) ค่อยเรียก Finnhub ใหม่รอบนี้
+        earnings_carry = {}    # {ticker: (earnings_date, earnings_hour)}
+        earnings_is_fresh = {} # {ticker: True/False}
+        db_check = None
+        try:
+            db_check = SessionLocal()
+            latest_sq = (
+                db_check.query(HourlyCache.ticker, _func.max(HourlyCache.fetched_at).label("max_at"))
+                .filter(HourlyCache.ticker.in_(stocks), HourlyCache.earnings_date.isnot(None))
+                .group_by(HourlyCache.ticker)
+                .subquery()
+            )
+            rows = (
+                db_check.query(HourlyCache)
+                .join(latest_sq, (HourlyCache.ticker == latest_sq.c.ticker) &
+                                 (HourlyCache.fetched_at == latest_sq.c.max_at))
+                .all()
+            )
+            recent_cutoff = datetime.now() - __import__("datetime").timedelta(hours=20)
+            for row in rows:
+                earnings_carry[row.ticker] = (row.earnings_date, row.earnings_hour)
+                earnings_is_fresh[row.ticker] = row.fetched_at >= recent_cutoff
+        except Exception as e:
+            self.log_action("นัตตี้-prefetch", f"เช็ค earnings freshness ล้มเหลว (ไม่กระทบราคา): {str(e)}", "WARNING")
+        finally:
+            if db_check:
+                db_check.close()
 
         for ticker in stocks:
             data = None
@@ -442,6 +505,10 @@ class AgentOrchestrator:
                             "52week_low":  self._safe_positive_float(info.get("fiftyTwoWeekLow")),
                             "pe_ratio":    self._safe_float(info.get("trailingPE")),
                             "market_cap":  self._safe_positive_float(info.get("marketCap")),
+                            # ✅ เพิ่ม 2026-07-05 (task #56): beta/eps/peg จาก yfinance fallback
+                            "beta":        self._safe_float(info.get("beta")),
+                            "eps":         self._safe_float(info.get("trailingEps")),
+                            "peg_ratio":   self._safe_float(info.get("pegRatio")),
                             "source":      "yfinance",
                         }
                         # ATH/ATL
@@ -451,6 +518,19 @@ class AgentOrchestrator:
                         self.log_action("นัตตี้-prefetch", f"✅ {ticker} OK via yfinance (${price})", "INFO")
                 except Exception as e:
                     self.log_action("นัตตี้-prefetch", f"❌ {ticker} failed: {str(e)}", "WARNING")
+
+            # ✅ เพิ่ม 2026-07-05 (task #56): ดึงวันประกาศงบใหม่เฉพาะตอนข้อมูลเก่าเกิน 20 ชม.
+            # ไม่งั้น carry ค่าเดิมมาใส่ row ใหม่ (กัน row ล่าสุดของทุกชั่วโมงมี earnings_date เป็น None)
+            if data:
+                if earnings_is_fresh.get(ticker):
+                    data["earnings_date"], data["earnings_hour"] = earnings_carry[ticker]
+                else:
+                    e_date, e_hour = self._fetch_finnhub_earnings(ticker, FINNHUB_KEY)
+                    if e_date is None and ticker in earnings_carry:
+                        # Finnhub ไม่คืนค่าใหม่ (เช่น เน็ตมีปัญหาชั่วคราว) — ใช้ค่าเก่าไปก่อนดีกว่าหาย
+                        data["earnings_date"], data["earnings_hour"] = earnings_carry[ticker]
+                    else:
+                        data["earnings_date"], data["earnings_hour"] = e_date, e_hour
 
             if data:
                 fetched[ticker] = data
@@ -462,16 +542,21 @@ class AgentOrchestrator:
             now = datetime.now()
             for ticker, d in fetched.items():
                 entry = HourlyCache(
-                    ticker      = ticker,
-                    price       = d.get("price"),
-                    week52_high = d.get("52week_high"),
-                    week52_low  = d.get("52week_low"),
-                    pe_ratio    = d.get("pe_ratio"),
-                    market_cap  = d.get("market_cap"),
-                    source      = d.get("source", "unknown"),
-                    at_new_high = d.get("at_new_high", False),
-                    at_new_low  = d.get("at_new_low", False),
-                    fetched_at  = now,
+                    ticker        = ticker,
+                    price         = d.get("price"),
+                    week52_high   = d.get("52week_high"),
+                    week52_low    = d.get("52week_low"),
+                    pe_ratio      = d.get("pe_ratio"),
+                    market_cap    = d.get("market_cap"),
+                    beta          = d.get("beta"),
+                    eps           = d.get("eps"),
+                    peg_ratio     = d.get("peg_ratio"),
+                    earnings_date = d.get("earnings_date"),
+                    earnings_hour = d.get("earnings_hour"),
+                    source        = d.get("source", "unknown"),
+                    at_new_high   = d.get("at_new_high", False),
+                    at_new_low    = d.get("at_new_low", False),
+                    fetched_at    = now,
                 )
                 db.add(entry)
 
@@ -520,6 +605,12 @@ class AgentOrchestrator:
                     "52week_low":  row.week52_low,
                     "pe_ratio":    row.pe_ratio,
                     "market_cap":  row.market_cap,
+                    # ✅ เพิ่ม 2026-07-05 (task #56)
+                    "beta":          row.beta,
+                    "eps":           row.eps,
+                    "peg_ratio":     row.peg_ratio,
+                    "earnings_date": row.earnings_date,
+                    "earnings_hour": row.earnings_hour,
                     "source":      row.source or "cache",
                     "at_new_high": row.at_new_high or False,
                     "at_new_low":  row.at_new_low  or False,

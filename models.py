@@ -108,6 +108,17 @@ class HourlyCache(Base):
     week52_low  = Column(Float,    nullable=True)
     pe_ratio    = Column(Float,    nullable=True)
     market_cap  = Column(Float,    nullable=True)
+    # ✅ เพิ่ม 2026-07-05 (task #56): Beta/EPS ดึงจาก Finnhub metric=all response เดิม
+    # (ไม่ต้องเรียก API เพิ่ม) — PEG ยังไม่ยืนยัน field ชัดเจน ลอง 'pegRatio' ไปก่อน
+    # ต้อง verify จาก log จริงหลัง deploy ว่าได้ค่าจริงหรือ None ตลอด (ดู Pending.md)
+    beta        = Column(Float,    nullable=True)
+    eps         = Column(Float,    nullable=True)
+    peg_ratio   = Column(Float,    nullable=True)
+    # ✅ เพิ่ม 2026-07-05 (task #56): วันประกาศงบถัดไป — ดึงจาก Finnhub /calendar/earnings
+    # เปลี่ยนไม่บ่อย (ทุกไตรมาส) จึงไม่เรียกทุกรอบ prefetch รายชั่วโมง (ดู natty_prefetch_prices)
+    # แค่รีเฟรชถ้าข้อมูลเก่ากว่า 20 ชม. กัน rate limit Finnhub (60 req/min)
+    earnings_date = Column(DateTime, nullable=True)   # วันที่ (UTC/US) จาก Finnhub ตรงๆ ยังไม่แปลงเวลาไทย
+    earnings_hour = Column(String,  nullable=True)    # 'bmo' (ก่อนตลาดเปิด) / 'amc' (หลังตลาดปิด) / 'dmh'
     source      = Column(String,   nullable=True)   # 'finnhub' | 'yfinance'
     at_new_high = Column(Boolean,  default=False)
     at_new_low  = Column(Boolean,  default=False)
