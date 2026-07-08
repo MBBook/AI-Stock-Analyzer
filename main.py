@@ -379,6 +379,14 @@ async def startup():
             print("[MIGRATION] hourly_cache beta/eps/peg_ratio/earnings_date/earnings_hour columns ready")
         except Exception as e:
             print(f"[MIGRATION] {e}")
+        try:
+            # ✅ เพิ่ม 2026-07-05 (รอบ 5): ชื่อเต็มบริษัท + คำอธิบายบริษัท (popup ไม่มีข้อมูลนี้มาตลอด)
+            conn.execute(text("ALTER TABLE hourly_cache ADD COLUMN IF NOT EXISTS company_name VARCHAR(255)"))
+            conn.execute(text("ALTER TABLE hourly_cache ADD COLUMN IF NOT EXISTS company_description TEXT"))
+            conn.commit()
+            print("[MIGRATION] hourly_cache company_name/company_description columns ready")
+        except Exception as e:
+            print(f"[MIGRATION] {e}")
 
     # ⛔ ปิด APScheduler แล้ว 2026-07-02 (Defect #14) — หยุดยิง prefetch เงียบๆ นาน 22+ ชม.
     # (รอบ 09:05-13:05 วันที่ 2 ก.ค. ขาดหมด) โดยไม่มี error/log ให้ debug เลย เพราะเป็น
@@ -480,8 +488,16 @@ async def get_stocks(db: Session = Depends(get_db)):
     """✅ แก้ 2026-07-05 (task #56): เพิ่มข้อมูลเชิงลึกจาก HourlyCache (market cap, PE, 52wk, beta, EPS,
     วันประกาศงบ) เข้ามาด้วย — ก่อนหน้านี้ endpoint นี้คืนแค่ signal/price/reasoning จาก Stock table
     เฉยๆ ทั้งที่ HourlyCache มีข้อมูลพวกนี้เก็บไว้อยู่แล้วแต่ไม่เคยถูกส่งออกให้ frontend (Tickers tab) เลย
-    PEG (peg_ratio) เป็นค่าทดลอง — field 'pegRatio' จาก Finnhub ยังไม่ยืนยันว่ามีจริง รอ verify จาก log"""
+    PEG (peg_ratio) เป็นค่าทดลอง — field 'pegRatio' จาก Finnhub ยังไม่ยืนยันว่ามีจริง รอ verify จาก log
+
+    ✅ เพิ่ม 2026-07-09: MBBook ทักว่า column "เปลี่ยนแปลง" ใน Tickers tab (frontend) ว่างเปล่า — ไม่มี
+    day-change ต่อ ticker เลย เดิมคิดว่าต้องเพิ่มตารางเก็บราคาปิดใหม่ แต่ signal_history เก็บราคาไว้ทุกคืน
+    ต่อ ticker อยู่แล้ว (insert-only, ใช้คำนวณ win rate/ROI — ดู models.py::SignalHistory) เอา 2 แถวล่าสุด
+    ต่อ ticker มาเทียบกันได้เลย ไม่ต้องเพิ่มตารางใหม่ (ล่าสุด = คืนนี้, รองล่าสุด = รันครั้งก่อนหน้า ไม่ได้
+    การันตีว่าห่างกันพอดี 24 ชม. เป๊ะ ถ้ามีคืนที่ skip ไป — แบบเดียวกับที่ getPortfolioDayChange ฝั่ง
+    frontend เทียบ snapshot ล่าสุด 2 ตัวเหมือนกัน)"""
     from sqlalchemy import func
+    from models import SignalHistory
 
     stocks = db.query(Stock).all()
     tickers = [s.ticker for s in stocks]
@@ -502,6 +518,21 @@ async def get_stocks(db: Session = Depends(get_db)):
         )
         latest_hourly = {r.ticker: r for r in rows}
 
+    change_pct_by_ticker = {}
+    if tickers:
+        hist_rows = (
+            db.query(SignalHistory.ticker, SignalHistory.price)
+            .filter(SignalHistory.ticker.in_(tickers))
+            .order_by(SignalHistory.ticker, SignalHistory.timestamp.desc())
+            .all()
+        )
+        prices_by_ticker = {}
+        for ticker, price in hist_rows:
+            prices_by_ticker.setdefault(ticker, []).append(price)
+        for ticker, prices in prices_by_ticker.items():
+            if len(prices) >= 2 and prices[1]:
+                change_pct_by_ticker[ticker] = round((prices[0] - prices[1]) / prices[1] * 100, 2)
+
     result = []
     for s in stocks:
         hc = latest_hourly.get(s.ticker)
@@ -511,10 +542,16 @@ async def get_stocks(db: Session = Depends(get_db)):
             "signal": s.signal,
             "confidence": s.confidence,
             "price": s.current_price,
+            "change_pct": change_pct_by_ticker.get(s.ticker),  # ✅ เพิ่ม 2026-07-09 — None ถ้ามีข้อมูลไม่ถึง 2 คืน
             "fair_price": s.fair_price,
             "at_new_high": s.at_new_high or False,
             "at_new_low":  s.at_new_low or False,
             "reasoning": s.reasoning,  # ✅ เพิ่ม 2026-07-03: เหตุผลภาษาไทยจากหนุ่ม
+            "s1": s.s1,  # ✅ เพิ่ม 2026-07-05 (task #66): แนวรับไม้ 1-3 — หนุ่มคำนวณให้ทุกคืนอยู่แล้ว
+            "s2": s.s2,  # (models.py Stock.s1/s2/s3) แต่ไม่เคยถูกส่งออกให้ frontend เลย ก่อนหน้านี้
+            "s3": s.s3,  # ใช้ตรงๆ ได้ ไม่ต้องเพิ่ม logic ใหม่
+            "company_name":        hc.company_name        if hc else None,  # ✅ เพิ่ม 2026-07-05 (รอบ 5)
+            "company_description": hc.company_description if hc else None,
             "market_cap":  hc.market_cap  if hc else None,
             "pe_ratio":    hc.pe_ratio    if hc else None,
             "week52_high": hc.week52_high if hc else None,
