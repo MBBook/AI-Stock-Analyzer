@@ -119,6 +119,11 @@ class HourlyCache(Base):
     # แค่รีเฟรชถ้าข้อมูลเก่ากว่า 20 ชม. กัน rate limit Finnhub (60 req/min)
     earnings_date = Column(DateTime, nullable=True)   # วันที่ (UTC/US) จาก Finnhub ตรงๆ ยังไม่แปลงเวลาไทย
     earnings_hour = Column(String,  nullable=True)    # 'bmo' (ก่อนตลาดเปิด) / 'amc' (หลังตลาดปิด) / 'dmh'
+    # ✅ เพิ่ม 2026-07-05 (รอบ 5): ชื่อเต็มบริษัท (Finnhub /stock/profile2 field 'name' — ยืนยันจริง)
+    # + คำอธิบายบริษัท (yfinance 'longBusinessSummary' — ไม่มีใน Finnhub free tier) เปลี่ยนไม่บ่อย
+    # (แทบไม่เปลี่ยนเลย) ใช้ carry-forward เหมือน earnings_date กัน rate limit
+    company_name        = Column(String, nullable=True)
+    company_description = Column(Text,   nullable=True)
     source      = Column(String,   nullable=True)   # 'finnhub' | 'yfinance'
     at_new_high = Column(Boolean,  default=False)
     at_new_low  = Column(Boolean,  default=False)
