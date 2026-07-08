@@ -518,20 +518,27 @@ async def get_stocks(db: Session = Depends(get_db)):
         )
         latest_hourly = {r.ticker: r for r in rows}
 
+    # ⚠️ แก้ 2026-07-09: MBBook เจอ /stocks 500 (Internal Server Error) ทั้งเส้นหลังเพิ่ม block นี้ —
+    # tickers หายหมดที่หน้า Tickers (จริงๆ endpoint พัง ไม่ใช่ข้อมูลหาย) ห่อ try/except กันไม่ให้ส่วน
+    # change_pct (ยังหาสาเหตุจริงไม่เจอ รอ log จาก Render) ทำให้ endpoint ทั้งตัวล่ม — พังแค่ change_pct
+    # เป็น None แทน ดีกว่าพังทั้งหน้า
     change_pct_by_ticker = {}
     if tickers:
-        hist_rows = (
-            db.query(SignalHistory.ticker, SignalHistory.price)
-            .filter(SignalHistory.ticker.in_(tickers))
-            .order_by(SignalHistory.ticker, SignalHistory.timestamp.desc())
-            .all()
-        )
-        prices_by_ticker = {}
-        for ticker, price in hist_rows:
-            prices_by_ticker.setdefault(ticker, []).append(price)
-        for ticker, prices in prices_by_ticker.items():
-            if len(prices) >= 2 and prices[1]:
-                change_pct_by_ticker[ticker] = round((prices[0] - prices[1]) / prices[1] * 100, 2)
+        try:
+            hist_rows = (
+                db.query(SignalHistory.ticker, SignalHistory.price)
+                .filter(SignalHistory.ticker.in_(tickers))
+                .order_by(SignalHistory.ticker, SignalHistory.timestamp.desc())
+                .all()
+            )
+            prices_by_ticker = {}
+            for ticker, price in hist_rows:
+                prices_by_ticker.setdefault(ticker, []).append(price)
+            for ticker, prices in prices_by_ticker.items():
+                if len(prices) >= 2 and prices[1]:
+                    change_pct_by_ticker[ticker] = round((prices[0] - prices[1]) / prices[1] * 100, 2)
+        except Exception as e:
+            print(f"[STOCKS] change_pct calculation failed: {e}")
 
     result = []
     for s in stocks:
