@@ -1,7 +1,7 @@
 # Blueprint — AI Stock Analyzer V4
 
 > อ่านไฟล์นี้ก่อนเริ่มงานทุกครั้ง
-> อัพเดตล่าสุด: 2026-07-01
+> อัพเดตล่าสุด: 2026-07-08
 
 ---
 
@@ -42,7 +42,7 @@
 | GET | `/health` | Health check — ต้องตอบ `{status: "ok"}` เสมอ |
 | GET | `/` | Root |
 | POST | `/stocks` | เพิ่ม ticker |
-| GET | `/stocks` | ดูรายชื่อ + signal ทั้งหมด — ✅ แก้ 2026-07-05 เพิ่ม market_cap/pe_ratio/week52_high/low/beta/eps/peg_ratio/earnings_date_thai (join `hourly_cache` ล่าสุดต่อ ticker) |
+| GET | `/stocks` | ดูรายชื่อ + signal ทั้งหมด — ✅ แก้ 2026-07-05 เพิ่ม market_cap/pe_ratio/week52_high/low/beta/eps/peg_ratio/earnings_date_thai (join `hourly_cache` ล่าสุดต่อ ticker) + s1/s2/s3 (แนวรับไม้ 1-3 จาก `stocks` table เอง — หนุ่มคำนวณให้ทุกคืนอยู่แล้ว แค่ไม่เคยถูกส่งออกมาก่อน) + company_name/company_description (รอบ 5 — Finnhub profile2 + yfinance longBusinessSummary, carry-forward เหมือน earnings_date) · ✅ เพิ่ม 2026-07-09 `change_pct` ต่อ ticker (เทียบ 2 แถวล่าสุดจาก `signal_history`, `null` ถ้าข้อมูลไม่ถึง 2 คืน) — ดู Defect #17 เรื่อง outage ที่เกิดตอน deploy ฟีเจอร์นี้ |
 | DELETE | `/stocks/{ticker}` | ลบ ticker |
 | POST | `/trade-update?ticker=&action=&shares=&price=` | บันทึก trade จริง + อัพเดต position (ถัวเฉลี่ยต้นทุนตอน BUY, ลด shares ตอน SELL) — ✅ แก้ 2026-07-03 เดิม endpoint นี้บันทึกแค่ log เฉยๆ ไม่เคยอัพเดต portfolio จริง |
 | POST | `/trade-parse-image` (multipart file) | ✅ เพิ่ม 2026-07-03 — โคลสัน (Haiku vision) อ่านรูปสลิปซื้อขาย (เช่น Dime app) → คืน JSON {ticker, action, shares, price} ให้ frontend pre-fill ฟอร์ม ไม่บันทึก DB ที่ endpoint นี้ (save จริงผ่าน `/trade-update`) |
@@ -223,6 +223,12 @@ Dashboard_Share/
 │   ├── resume.yml            # ⛔ ปิด schedule แล้ว — workflow_dispatch เท่านั้น
 │   └── rotate-api-key.yml    # หมุน API key ทุกวันที่ 1/15 — ยังทำงานปกติ ไม่เกี่ยวกับ trigger
 ├── frontend/           # React dashboard — ห้ามย้าย (deploy pipeline แยก)
+│   └── src/
+│       ├── App.jsx        # component หลักเดียว (DashboardV4) — ทุก tab/popup เป็น helper function
+│       │                  # ซ้อนอยู่ข้างในไฟล์เดียวกันทั้งหมด (เจตนา กันบั๊ก remount — ดู comment
+│       │                  # บรรทัดบนของไฟล์) 1,973 บรรทัด (2026-07-08, ลดจาก 2,081)
+│       └── constants.js   # ✅ เพิ่ม 2026-07-08 — ค่าคงที่ล้วนๆ (COLORS/SP/MOCK_NEWS/COMPANY_NAMES/
+│                          # GLOBAL_CSS/API_URL) แยกออกจาก App.jsx ลดขนาดไฟล์ ไม่กระทบ logic
 │
 ├── 1_Reports/          # ไฟล์ที่ Cow เขียนรายงาน/สรุปให้ MBBook
 │   ├── Output.md        # ผลลัพธ์คำสั่ง PowerShell ที่ MBBook รัน (ยาวเกิน copy)
@@ -253,29 +259,28 @@ Dashboard_Share/
 
 ## 13. Architectural Defect Log (2026-06-27)
 
-| # | Defect | สถานะ | Action |
+> ✅ 2026-07-08: ย่อให้เหลือแค่สรุปสั้นต่อรายการ — narrative การสืบสวนแบบเต็มย้ายไป
+> `3_CowContext/Blueprint_Defect_Archive.md` แล้ว (เปิดอ่านเฉพาะตอนต้องสืบสาเหตุปัญหาเก่าแบบละเอียด)
+
+| # | Defect | สถานะ | สรุปสั้น |
 |---|--------|--------|--------|
-| 1 | Colson ไม่อยู่ใน workflow order | ✅ แก้แล้ว | เพิ่ม note ใน Blueprint ว่าเป็น Event-Driven Agent ผ่าน `/trade-update` |
-| 2 | OOM Risk บน Render 512MB | ⏳ Monitor (แก้ไข 2026-07-01 ค่ำ, เช็คซ้ำ 2026-07-02 — ไม่มีหลักฐานใหม่) | ตอนแรกสงสัยว่า instance เปลี่ยนบ่อย (cmvkw → 5j8m9 → c5lgt) มาจาก OOM/crash — เช็ค Render Events API แล้วพบว่า**ไม่ใช่** ทุก instance ตรงกับ `deploy_started/ended` ที่สำเร็จทั้งหมด (10 deploys วันนี้ ไม่มี `server_failed`/`server_hardware_failure` เลย) ส่วน instance ที่ไม่ตรง deploy ไหน (~21:40 น.) อธิบายได้จาก Render free-tier sleep/wake ปกติ (keepalive Step 1 wake+retry ทำงานถูกต้อง) ไม่ใช่ OOM — **ไม่มี tool เข้าถึง Render Events API ได้ตรงๆ ในเซสชันนี้** ถ้าอยากเช็คซ้ำต้องดูจาก Render dashboard เอง (Events tab) — ปล่อย Monitor แบบ passive ต่อไป ไม่มีอะไรต้องทำเพิ่มจนกว่าจะมีอาการจริง (deploy ล้ม/response ช้าผิดปกติ) |
-| 3 | Race Condition `/workflow/resume` | ❌ ไม่มี defect | Code มี guard บรรทัด 378 อยู่แล้ว: `if _job["status"] == "running": return already_running` |
-| 4 | Budget $0.85 ไม่พอ 40 tickers | ✅ **ปิดเคส 2026-07-02 — มีข้อมูลจริงแล้ว ไม่ได้เกิดขึ้นจริง** | Tue-Thu วัดจริงครบ 4 รอบ (30 tickers, ระบบปัจจุบัน): $0.515 / $0.526 / $0.539 / $0.510 เฉลี่ย **$0.5225/run** เทียบ budget ปัจจุบัน $0.60/วัน = ใช้ไปแค่ ~87% มี buffer เหลือ — prompt caching + ลดจาก 40→30 tickers ทำให้งบพอสบายๆ ดู section 6 |
-| 5 | Timezone Mismatch (นิก / budget) | ❌ ไม่มี defect | 22:00 Bangkok = 15:00 UTC = วันเดียวกันเสมอ ไม่ข้ามวัน weekday() ถูกต้อง |
-| 6 | Resume loop หลัง BUDGET_EXCEEDED | ✅ แก้แล้ว | เพิ่ม check ใน `/workflow/resume`: ถ้า last log วันนี้เป็น BUDGET_EXCEEDED/COMPLETE/ABORTED → return skipped |
-| 7 | DB Concurrency Lock (Harry vs Colson) | ❌ ไม่มี defect | PostgreSQL MVCC จัดการ read/write concurrency ได้เอง แฮรี่ read-only → ไม่มี deadlock risk |
-
-| 8 | Monday Mode Budget Deficit | ⏳ Monitor — รอข้อมูลจริง 2026-07-06 | ข้อมูลเก่า (2026-06-29, 40 tickers): cost จริง $1.36 เทียบ budget เดิม $1.20 ตอนนั้น = **เกิน budget ~13%** — แต่ตอนนี้เปลี่ยน 2 อย่างแล้ว: (1) ลดเหลือ 30 tickers (2) budget Monday ปรับเป็น $0.85 (ตึงกว่าเดิมอีก) ยังไม่มีข้อมูลจริงกับ config ปัจจุบัน **Monday ถัดไปคือ 2026-07-06 — เช็ค `cost_usd` ใน `/workflow/history` วันนั้นแล้วเทียบ $0.85 ทันที** ถ้ายังเกินอีกค่อยพิจารณาลด news window จาก 72hr เหลือ 48hr หรือ downgrade บางส่วนไป Haiku |
-| 9 | LLM ล้มเมื่อ PE/MarketCap = None | ❌ ไม่มี defect | Prompt บรรทัด 668 รองรับแล้ว: "ถ้า P/E หรือ Market Cap เป็น N/A ให้วิเคราะห์จาก price แทน" + `_safe_float()` จัดการ edge cases |
-| 10 | LINE Notification Spam | ❌ ไม่มี defect | `_send_line_notification()` ถูกเรียกแค่ 2 จุด: จบสำเร็จ 1 ครั้ง + exception 1 ครั้ง ไม่มีการส่งรายตัว |
-| 11 | Prefetch 2 ระบบซ้อนกัน (GitHub Actions + APScheduler) | ✅ แก้แล้ว (2026-07-01) | Commit ก่อนหน้าเพิ่ม APScheduler แต่ลืมปิด `AI_Stocks_Prefetch` cron เดิม → log ยืนยันมี POST `/prefetch` จากภายนอก (GH Actions) ทำงานอยู่จริง แยกไม่ออกว่ารอบไหนทำงาน → ปิด schedule ใน `prefetch.yml` เหลือแค่ `workflow_dispatch` (manual/debug) ให้ APScheduler เป็นระบบเดียว |
-| 12 | Workflow 22:00 ไม่เคยเสร็จอัตโนมัติเลย ~2 สัปดาห์ | ✅ แก้แล้ว + **ยืนยันผลจริงครั้งแรก 2026-07-02 22:10 น.** — run id 9, COMPLETE, 30 หุ้น, QA PASS, BUY 6/HOLD 24/SELL 0, cost $0.51 — trigger โดย cron-job.org (Job C2) auto ล้วนๆ ไม่ต้อง manual เลย (2026-07-01) | ตรวจ `/workflow/history` พบ 7 runs ทั้งหมดตั้งแต่ 23 มิ.ย. เสร็จเวลาไม่แน่นอน (21:29-21:31 UTC หรือ 01:53 UTC) ไม่เคยใกล้ 22:00-23:00 Bangkok เลย ต้นเหตุ 2 จุด: (1) Render free-tier sleep ฆ่า background thread กลางคัน — ก่อนหน้านี้พึ่งแค่ GitHub Actions Keepalive ภายนอกซึ่งไม่แม่นยำพอ (2) **จุดอ่อนสำคัญกว่า**: `_checkpoint_database()` เดิมเรียกแค่ครั้งเดียวหลังมด validate ครบทั้งชุด 30 ตัว ไม่ได้ save ทีละตัวระหว่างหนุ่มวิเคราะห์ (ขั้นตอนที่นานสุด/เสี่ยงโดนขัดจังหวะสุด) → โดนฆ่ากลางคันแล้วงานหายหมด ไม่มีอะไรให้ resume ต่อ ซ้ำร้าย `keepalive.yml` self-heal เดิมยิง `/workflow` (restart ใหม่ทั้งชุด) ไม่ใช่ `/workflow/resume` → เสียเงินวิเคราะห์ซ้ำ. **แก้แล้ว**: (a) ย้าย checkpoint มา save ทีละตัวทันทีหลังหนุ่มวิเคราะห์แต่ละหุ้นเสร็จ (agents.py `num_analyze_stocks`) (b) แก้ `keepalive.yml` self-heal ให้ยิง `/workflow/resume` แทน `/workflow` (c) ปิด schedule ของ `resume.yml` เดิม (ซ้ำซ้อนกับ keepalive self-heal ที่ครอบคลุมกว้างกว่าแล้ว) เหลือแค่ `workflow_dispatch` — พิจารณา Render Starter ($7/mo, ไม่มี sleep เลย) แล้ว **MBBook เลือกไม่อัพเกรด ใช้ free tier ต่อ** (2026-07-01) |
-
-| 13 | LINE แจ้ง BUDGET_EXCEEDED ตอนตี 3-4 ทุกคืน (3 วันติด) | ✅ แก้แล้ว (2026-07-02) | หลัง workflow COMPLETE ตอน 22:xx แล้ว keepalive self-heal (เดิมไม่มีเพดานบน HOUR — ไล่ยิงทุก 10 นาทีจน 23:59 UTC = ตี 7 เช้า Bangkok) ยังพยายาม `/workflow/resume` ต่อไปเรื่อยๆ ทั้งคืน ปัญหาซ้อน 2 จุด: (1) `BUDGET_EXCEEDED` ไม่เคยถูกบันทึกลง WorkflowLog เลย (ต่างจาก COMPLETE/REJECTED ที่บันทึก) ทำให้ `/workflow/resume` เช็ค "วันนี้จบหรือยัง" ไม่เจอ พยายามซ้ำได้เรื่อยๆ (2) `REJECTED` ไม่อยู่ใน skip-list ของ `/workflow/resume` (มีแค่ BUDGET_EXCEEDED/COMPLETE/ABORTED) ทำให้ถ้า QA reject self-heal ก็ยังพยายามต่อ จนกว่าจะชน daily budget แล้วได้ BUDGET_EXCEEDED ซึ่งก็ไม่บันทึกอีก วนแบบนี้ไปเรื่อยๆ จนกว่า UTC date จะเปลี่ยน (~ตี 7 Bangkok) ถึงจะหยุดเพราะ budget reset — อธิบายได้ว่าทำไมมาตอนตี 3-4 ทุกคืน **แก้แล้ว**: (a) บันทึก WorkflowLog ให้ BUDGET_EXCEEDED ด้วย (ไม่เรียก LLM ไม่เสียเงินเพิ่ม) (b) เพิ่ม REJECTED เข้า skip-list (c) จำกัดหน้าต่าง self-heal ใน keepalive.yml เหลือ 15:00-18:59 UTC (22:00-01:59 Bangkok) แทนที่จะไล่ยาวทั้งคืน |
-
-| 14 | Prefetch cache ค้าง 22+ ชม. — root cause จริงคือ `/prefetch` ไม่มี lock กันรันซ้อน + GitHub Actions cron ไม่ยอมยิง schedule เอง | ✅ แก้ปัญหา lock แล้ว + ยืนยันผลจริง (2026-07-02 14:32 น. — manual trigger จบสมบูรณ์) **แต่เจอปัญหาต่อเนื่อง**: schedule ของ `AI_Stocks_Prefetch` (GitHub Actions) ไม่ยอมยิงเองเลยสักครั้ง แม้ผ่านรอบ 15:05/16:05/17:05 ไปแล้ว (ยืนยันจาก MBBook เช็คเองสด ไม่ใช่ tool cache) ลองทั้ง manual trigger + ย้าย comment/push resync ก็ไม่ช่วย → **แก้แบบเด็ดขาด 2026-07-02 17:33**: ลบ `prefetch.yml` เดิมทิ้ง สร้างไฟล์ใหม่คนละ path (`prefetch_hourly.yml`) เพื่อบังคับ GitHub ลงทะเบียนเป็น workflow ใหม่ (สมมติฐาน: ไฟล์เดิมผ่านการเปิด-ปิด-เปิดหลายรอบอาจมี state ค้างฝั่ง GitHub ผูกกับ path เดิม) — รอผลรอบ 18:05 น. ถ้ายังไม่ยิงอีก แผนถัดไปคือเปิด APScheduler กลับมา + พิจารณา Render Starter จริงจัง (ดู Pending.md) | ตรวจ `/prefetch/status` วันที่ 2026-07-02 เวลา 13:41 น. พบ `latest_fetch` ค้างมา 22+ ชม. ตอนแรกสงสัยว่า APScheduler หยุดยิง (สลับไปใช้ GitHub Actions `AI_Stocks_Prefetch` แทนแล้ว) **แต่หลัง manual POST /prefetch เพื่อทดสอบ พบว่า cache ยังไม่ขยับเลย** — สืบต่อพบ root cause จริง: `POST /prefetch` ใน `main.py` **ไม่มี lock กันรันซ้อนเลย** (endpoint เดิม เทียบกับ `scheduler.py` ที่มี `_prefetch_lock` อยู่แล้ว) ในขณะที่ 1 รอบ prefetch ใช้เวลาจริง ~11-13 นาที (ข่าว sleep 20s/ticker × 30 ticker) แต่ `keepalive.yml` Step 3 self-heal ยิงทุก 10 นาทีถ้า cache stale >70 นาที — ทำให้ทุกรอบที่ยังไม่ทันเสร็จ (เกือบทุกรอบ เพราะ 11-13 นาที > รอบเช็ค 10 นาที) โดน trigger ซ้อนอีกรอบเรื่อยๆ ทั้งวัน หลายสิบ background task แย่งกัน fetch ticker เดียวกันพร้อมกัน ชน rate limit จนไม่มีรอบไหนเสร็จสมบูรณ์เลยสักครั้ง **แก้แล้ว**: เพิ่ม `_prefetch_lock` + `_prefetch_running` flag ใน `main.py`'s `/prefetch` endpoint — ถ้ามีรอบทำงานอยู่แล้ว trigger ใหม่จะได้ `{"status":"already_running"}` แทนที่จะสร้าง background task ซ้อน พร้อมโชว์ `prefetch_running` ใน `/prefetch/status` ด้วย (เพิ่มเติมจากที่สลับ trigger กลับไป GitHub Actions ไปแล้วก่อนหน้า) |
-
-| 15 | GitHub Actions cron ไม่เสถียรทั้งระบบ (ไม่ใช่แค่ prefetch.yml) | ✅ แก้แล้ว + ยืนยันผลจริง (2026-07-02 22:10 น.) — ย้ายไป cron-job.org สำเร็จ | เช็คย้อนหลัง `keepalive.yml` (ตั้ง cron ทุก 10 นาที ตั้งแต่ 26 มิ.ย. 21:50) พบว่ารันจริงแค่ **21 ครั้ง ใน 5.5 วัน** (ควรรัน ~790 ครั้ง — ห่างเกือบ 40 เท่า) แปลว่า self-heal ทั้งฝั่งกลางวัน (prefetch) และกลางคืน (workflow resume) ที่พึ่ง keepalive.yml อยู่ ไม่เคยทำงานได้จริงตลอด 2 สัปดาห์ที่ผ่านมา — การแก้ Defect #14 ด้วยการสร้าง `prefetch_hourly.yml` ใหม่ (17:33 น.) จึงมีโอกาสสูงว่าไม่ช่วยอะไร เพราะรากปัญหาคือ GitHub Actions cron ของทั้งเรพอไม่น่าเชื่อถือ ไม่ใช่ปัญหาเฉพาะไฟล์ใดไฟล์หนึ่ง (ยืนยันจาก GitHub community: scheduled workflow เป็น "best effort" เท่านั้น). **แผนแก้**: ย้าย trigger ทั้งหมด (keepalive/wake, prefetch, workflow trigger, workflow resume) ไปใช้ **cron-job.org** แทน (external cron service ฟรี ยิงถี่สุด 1 นาที) — สคริปต์ตั้งค่าอัตโนมัติอยู่ที่ `setup_cronjob_org.py` (สร้าง 6 jobs ผ่าน REST API) ไม่ปิด GitHub Actions schedule ทันที (ปล่อยรันคู่ขนาน เพราะ endpoint มี lock/idempotency guard อยู่แล้ว ยิงซ้อนได้ปลอดภัย) รอ cron-job.org พิสูจน์เสถียรจริง 2-3 วันค่อยปิด GitHub Actions schedule ทิ้ง ดูรายละเอียดที่ Pending.md |
-
-| 16 | นิก ข้าม optimization ทุกวันศุกร์มาตลอด — ไม่เคยพบเลยจนกว่าจะ audit | ✅ แก้แล้ว 2026-07-04 | พบระหว่าง audit ระบบเต็มรูปแบบ: `/workflow/logs` ของ run วันศุกร์ 2026-07-03 แสดง `"agents.py ใหญ่เกินไป (105872 chars) — ข้าม optimization รอบนี้"` — โค้ดมี hard-coded guard `if len(current_code) > 80000: return None` ใน `nik_optimize()` (agents.py) แต่ agents.py จริงโตเกิน 80000 chars ไปนานแล้ว (105872 chars ก่อนแก้ session นี้ด้วยซ้ำ ยิ่งโตขึ้นอีกจากงานวันนี้) ทำให้นิกไม่เคยได้วิเคราะห์อะไรเลยตั้งแต่ไฟล์โตเกินเพดาน ไม่มี error ให้เห็นที่ไหน มีแค่ log WARNING เงียบๆ ที่ไม่มีใครไปดู — **แก้**: ยกเพดานเป็น 300000 chars ให้นิกกลับมาทำงานได้ ⚠️ **ข้อจำกัดที่ยังไม่แก้**: system prompt ของนิกส่ง `current_code[:8000]` (แค่ 8000 ตัวอักษรแรกของไฟล์) ให้ Claude วิเคราะห์เท่านั้น ไม่ว่าไฟล์จะยาวแค่ไหน — แปลว่านิกจะไม่เคยเห็นโค้ดส่วนท้ายไฟล์เลย (เช่น agent ล่าสุดๆ ที่เพิ่มเข้ามา) คุณภาพ suggestion อาจจำกัดอยู่แค่ช่วงต้นไฟล์ — ยังไม่ได้แก้ ต้องออกแบบใหม่ (เช่น ส่งเฉพาะส่วนที่เกี่ยวกับ error ในนั้น แทนที่จะส่งทั้งไฟล์) |
+| 1 | Colson ไม่อยู่ใน workflow order | ✅ แก้แล้ว | เป็น Event-Driven Agent ผ่าน `/trade-update` ไม่ใช่ pipeline |
+| 2 | OOM Risk บน Render 512MB | ⏳ Monitor (passive, ไม่มีหลักฐานใหม่) | ไม่ใช่ OOM — instance เปลี่ยนบ่อยมาจาก Render free-tier sleep/wake ปกติ |
+| 3 | Race Condition `/workflow/resume` | ❌ ไม่มี defect | มี guard `if _job["status"]=="running"` อยู่แล้ว |
+| 4 | Budget $0.85 ไม่พอ 40 tickers | ✅ ปิดเคส — ไม่เกิดขึ้นจริง | เฉลี่ยจริง $0.5225/run เทียบ budget $0.60 มี buffer |
+| 5 | Timezone Mismatch (นิก/budget) | ❌ ไม่มี defect | 22:00 Bangkok = 15:00 UTC เสมอ ไม่ข้ามวัน |
+| 6 | Resume loop หลัง BUDGET_EXCEEDED | ✅ แก้แล้ว | เช็ค last log วันนี้ก่อน resume |
+| 7 | DB Concurrency Lock (Harry vs Colson) | ❌ ไม่มี defect | PostgreSQL MVCC จัดการเอง แฮรี่ read-only |
+| 8 | Monday Mode Budget Deficit | ✅ ปิดเคส (ข้อมูลจริง 2026-07-06 อยู่ในเกณฑ์) | ลดเหลือ 30 tickers + budget $0.85 แก้ปัญหาได้ |
+| 9 | LLM ล้มเมื่อ PE/MarketCap = None | ❌ ไม่มี defect | Prompt + `_safe_float()` รองรับ N/A แล้ว |
+| 10 | LINE Notification Spam | ❌ ไม่มี defect | เรียกแค่ 2 จุด (จบสำเร็จ/exception) ไม่ส่งรายตัว |
+| 11 | Prefetch 2 ระบบซ้อนกัน (GH Actions + APScheduler) | ✅ แก้แล้ว | ปิด `prefetch.yml` schedule เดิม เหลือ APScheduler ระบบเดียว |
+| 12 | Workflow 22:00 ไม่เคยเสร็จอัตโนมัติเลย ~2 สัปดาห์ | ✅ แก้แล้ว + ยืนยันจริง 2026-07-02 | root cause: checkpoint เดิม save ครั้งเดียวท้าย batch (ไม่ทีละตัว) + self-heal ยิง `/workflow` ผิด endpoint — แก้ทั้งคู่แล้ว |
+| 13 | LINE แจ้ง BUDGET_EXCEEDED ตี 3-4 ทุกคืน (3 วันติด) | ✅ แก้แล้ว | BUDGET_EXCEEDED/REJECTED ไม่เคยถูกบันทึก/skip ทำให้ self-heal ไล่ยิงทั้งคืน — แก้บันทึก+skip-list+จำกัดหน้าต่างเวลา |
+| 14 | Prefetch cache ค้าง 22+ ชม. | ✅ แก้แล้ว + ยืนยันจริง | `/prefetch` ไม่มี lock กันรันซ้อน ชน rate limit ทั้งวัน — เพิ่ม `_prefetch_lock` |
+| 15 | GitHub Actions cron ไม่เสถียรทั้งระบบ | ✅ แก้แล้ว + ยืนยันจริง 2026-07-02 | keepalive.yml รันจริงแค่ 21/790 ครั้ง — ย้าย trigger ทั้งหมดไป **cron-job.org** แล้ว |
+| 16 | นิก ข้าม optimization ทุกวันศุกร์มาตลอด | ✅ แก้แล้ว 2026-07-04 | agents.py โตเกิน hard guard 80000 chars เงียบๆ — ยกเพดานเป็น 300000 ⚠️ ยังส่งแค่ 8000 ตัวอักษรแรกให้ Claude วิเคราะห์อยู่ (ไม่แก้) |
+| 17 | `/stocks` 500 หลัง deploy `change_pct` (2026-07-08) | ✅ แก้แล้ว + ยืนยันจริงผ่าน browser | `main.py` อ้าง `hc.company_name` ค้าง uncommitted มาตั้งแต่ 07-05 คู่กับ `models.py` — commit `models.py` (`1145680`) แก้ (deploy รอบแรก fail ซ้ำจาก Neon ชั่วคราว, retry ผ่าน) |
 
 **ถ้า Defect 2, 4 หรือ 8 เกิดจริงวันจันทร์:**
 - OOM → เพิ่ม `gc.collect()` หลัง checkpoint แต่ละ ticker

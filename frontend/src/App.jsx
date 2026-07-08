@@ -4,8 +4,9 @@ import {
   Plus, Trash2, Upload, Search, Check, Camera, Info, X,
   ChevronDown, ChevronLeft, ChevronRight, Filter, ArrowUpDown, Eye, EyeOff,
 } from 'lucide-react';
-
-const API_URL = 'https://ai-stock-analyzer-msli.onrender.com';
+// ✅ 2026-07-08: ย้ายค่าคงที่ (COLORS/SP/MOCK_NEWS/COMPANY_NAMES/GLOBAL_CSS/API_URL) ไป constants.js
+// แยกแล้ว (ลดขนาดไฟล์นี้ — ไม่กระทบ logic ใดๆ ค่าเดิมทุกตัว แค่ import แทนการประกาศตรงนี้)
+import { API_URL, COLORS, SP, MAX_TICKERS, MOCK_NEWS, COMPANY_NAMES, GLOBAL_CSS } from './constants';
 
 // ✅ REBUILD 2026-07-05 (รอบ 2): เขียนใหม่ทั้งไฟล์ตาม 3_CowContext/UI_Spec.md ที่ MBBook confirm
 // ทีละจุดผ่านรูปจริง (ไม่ใช่แค่สรุปจากความจำแล้ว) — รอบแรกที่ทำไปพลาดหลายจุด (ไม่มีกราฟ, THB
@@ -21,116 +22,6 @@ const API_URL = 'https://ai-stock-analyzer-msli.onrender.com';
 // Rules of Hooks) ด้วยเหตุนี้ animation "count-up ตัวเลข" (ที่คุยไว้ใน mockup) จึงถูกงดไว้ก่อนในรอบนี้
 // (ต้องทำที่ state ระดับบนสุดของ DashboardV4 เท่านั้นถึงจะปลอดภัย) — pulse บน badge ใช้วิธี
 // key-remount + CSS keyframe แทน (ไม่ต้องใช้ hook เลยเลี่ยงปัญหานี้ได้)
-
-const COLORS = {
-  bgGradient: 'linear-gradient(160deg, #0B1130 0%, #050714 100%)',
-  cardBg: 'rgba(148,163,184,0.08)',
-  cardBgHover: 'rgba(148,163,184,0.13)',
-  cardBorder: 'rgba(148,163,184,0.14)',
-  text: '#E7ECF5',
-  muted: '#94A3B8',
-  faint: '#5B6478',
-  purple: '#A855F7',
-  purpleSoft: 'rgba(168,85,247,0.16)',
-  gold: '#F5C46B',
-  goldDark: '#EF9F27',
-  goldLight: '#F7CE85',
-  green: '#97C459',
-  greenSoft: 'rgba(151,196,89,0.16)',
-  red: '#E24B4A',
-  redSoft: 'rgba(226,75,74,0.16)',
-};
-
-const SP = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 };
-const MAX_TICKERS = 30;
-
-// ⚠️ MOCK DATA — News tab backend (task #51 ใน Pending.md) ยังไม่ได้สร้าง (ยังไม่มี NewsArticle
-// table/endpoint จริง) ข้อมูลด้านล่างนี้ใช้แค่โชว์ดีไซน์/pagination ให้ครบตาม mockup เท่านั้น
-// ห้ามอ้างว่าเป็นข่าวจริง — ต่อ API จริงทันทีที่ backend #51 เสร็จ (แทนที่ MOCK_NEWS ทั้งก้อนนี้)
-const MOCK_NEWS_TEMPLATES = [
-  { tickers: ['NVDA', 'IONQ'], headline: 'NVIDIA ประกาศความร่วมมือด้านควอนตัมคอมพิวติ้งกับพันธมิตรรายใหม่', sentiment: 'Positive', impact: 'สูง', source: 'Bloomberg', body: 'ข่าวสัญญาควอนตัมคอมพิวติ้งกับ NVIDIA หนุนราคาระยะสั้น โมเมนตัมยังเป็นขาขึ้นจากปริมาณซื้อขาย นักวิเคราะห์มองเป็นบวกต่อ supply chain ทั้งกลุ่ม' },
-  { tickers: ['MU'], headline: 'Micron เผชิญแรงกดดันราคาชิปหน่วยความจำจากคู่แข่งจีน', sentiment: 'Negative', impact: 'ปานกลาง', source: 'Bloomberg', body: 'ผู้ผลิตชิปจีนหลายรายเพิ่มกำลังการผลิต NAND flash อย่างรวดเร็ว ส่งผลให้ราคาตลาดโลกมีแนวโน้มปรับตัวลงในไตรมาสหน้า แต่นักวิเคราะห์บางส่วนมองว่ามาจาก data center AI จะช่วยพยุงราคาส่วนหนึ่ง' },
-  { tickers: ['WDC'], headline: 'Western Digital รายงานผลประกอบการดีกว่าคาดจาก demand data center', sentiment: 'Positive', impact: 'ปานกลาง', source: 'CNBC', body: 'รายได้จากกลุ่ม enterprise storage เติบโตต่อเนื่อง หนุนจาก investment ด้าน AI infrastructure ของ hyperscaler รายใหญ่ ราคาหุ้นตอบรับเชิงบวกหลังประกาศงบ' },
-  { tickers: ['NBIS'], headline: 'Nebius ขยายกำลังการผลิต GPU cloud รองรับดีมานด์ AI training', sentiment: 'Neutral', impact: 'ต่ำ', source: 'Yahoo Finance', body: 'บริษัทประกาศแผนลงทุนเพิ่มศูนย์ข้อมูลใหม่ในยุโรป นักวิเคราะห์มองเป็นกลางเนื่องจากต้องรอดูอัตราการใช้งานจริงก่อนประเมินผลตอบแทน' },
-];
-// ✅ แก้ 2026-07-05 (รอบ 8): MBBook ทักท้วงว่าวันที่โดดไปมา — เดิม date คำนวณจาก `(i % 7) + 1` วนซ้ำ
-// ไม่เกี่ยวกับลำดับ index เลย แล้ว list ก็ไม่เคย sort ตามวันที่เลย เลยดูสุ่ม แก้โดยให้แต่ละข่าวมี
-// timestamp จริง (ms) ไล่ย้อนหลังจาก "ตอนนี้" ทุกๆ 7 ชม. (id ยิ่งมาก ยิ่งเก่า) แล้วให้ NewsList
-// sort ตาม timestamp ใหม่→เก่าเสมอ (ไม่พึ่งลำดับ array ตรงๆ กันพลาดถ้ามีข่าวแทรกเข้ามาไม่เรียงในอนาคต)
-const MOCK_NEWS = Array.from({ length: 24 }, (_, i) => {
-  const t = MOCK_NEWS_TEMPLATES[i % MOCK_NEWS_TEMPLATES.length];
-  const ts = new Date(Date.now() - i * 7 * 60 * 60 * 1000);
-  return {
-    id: i + 1, ...t, timestamp: ts.getTime(),
-    date: `${ts.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })} · ${ts.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}`,
-  };
-});
-
-// ⚠️ ชื่อเต็มบริษัท — backend ยังไม่มี field นี้ (ดู Pending.md gap) ใส่ไว้เป็น fallback ฝั่ง client
-// เฉพาะบริษัทที่รู้จริง (ข้อมูลสาธารณะทั่วไป ไม่ใช่การเดา) — ticker ที่ไม่อยู่ใน dict นี้จะโชว์แค่ ticker
-// เฉยๆ ไม่ fabricate ชื่อขึ้นมา ต่อ field จริงจาก backend ทีหลังแล้วลบ dict นี้ทิ้งได้เลย
-const COMPANY_NAMES = {
-  NVDA: 'NVIDIA Corporation', IONQ: 'IonQ, Inc.', MU: 'Micron Technology, Inc.',
-  WDC: 'Western Digital Corporation', NBIS: 'Nebius Group N.V.', META: 'Meta Platforms, Inc.',
-  AAPL: 'Apple Inc.', MSFT: 'Microsoft Corporation', GOOGL: 'Alphabet Inc.', AMZN: 'Amazon.com, Inc.',
-  TSLA: 'Tesla, Inc.', AMD: 'Advanced Micro Devices, Inc.', ORCL: 'Oracle Corporation',
-};
-
-const GLOBAL_CSS = `
-  * { box-sizing: border-box; }
-  button { font-family: inherit; }
-  .clay-btn {
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-    box-shadow: 4px 4px 9px rgba(0,0,0,0.45), -3px -3px 7px rgba(255,224,168,0.25), inset 1px 1px 2px rgba(255,255,255,0.35);
-  }
-  .clay-btn:hover { transform: scale(1.06); box-shadow: 6px 6px 14px rgba(0,0,0,0.5), -4px -4px 10px rgba(255,224,168,0.3), inset 1px 1px 2px rgba(255,255,255,0.4); }
-  .clay-btn:active { transform: scale(0.92); box-shadow: 2px 2px 5px rgba(0,0,0,0.5), -1px -1px 3px rgba(255,224,168,0.2), inset 2px 2px 4px rgba(0,0,0,0.3); }
-  .press-btn { transition: transform 0.12s ease; }
-  .press-btn:active { transform: scale(0.94); }
-  .nav-btn { transition: transform 0.15s ease, background-color 0.15s ease; }
-  .nav-btn:hover:not(.nav-btn-active) { transform: translateY(-2px); background-color: rgba(168,85,247,0.12); }
-  .glass-row { transition: transform 0.15s ease, background-color 0.15s ease; cursor: pointer; }
-  .glass-row:hover { transform: translateY(-1px); background-color: ${COLORS.cardBgHover}; }
-  .glass-row:active { transform: scale(0.98); }
-  .icon-btn { transition: transform 0.15s ease, background-color 0.15s ease; }
-  .icon-btn:hover { background-color: rgba(168,85,247,0.14); }
-  .icon-btn:active { transform: scale(0.9); }
-  .modal-backdrop { transition: opacity 0.28s ease; }
-  .pill-btn { transition: transform 0.12s ease; }
-  .pill-btn:active { transform: scale(0.92); }
-  ::-webkit-scrollbar { width: 8px; height: 8px; }
-  ::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.25); border-radius: 8px; }
-
-  @keyframes pulseBadge {
-    0% { transform: scale(1); }
-    40% { transform: scale(1.18); }
-    100% { transform: scale(1); }
-  }
-  .signal-pulse { animation: pulseBadge 0.45s ease; display: inline-block; }
-
-  @keyframes barGrow {
-    from { transform: scaleY(0); }
-    to { transform: scaleY(1); }
-  }
-  .chart-bar { transform-origin: bottom; animation: barGrow 0.45s cubic-bezier(.34,1.2,.64,1); transition: height 0.3s ease; }
-
-  @keyframes lineDraw {
-    from { stroke-dashoffset: 2000; }
-    to { stroke-dashoffset: 0; }
-  }
-  .line-draw { stroke-dasharray: 2000; animation: lineDraw 1.1s ease forwards; }
-
-  @keyframes toastUp {
-    from { transform: translate(-50%, 20px); opacity: 0; }
-    to { transform: translate(-50%, 0); opacity: 1; }
-  }
-  @keyframes toastDown {
-    from { transform: translate(-50%, 0); opacity: 1; }
-    to { transform: translate(-50%, 20px); opacity: 0; }
-  }
-  .toast-in { animation: toastUp 0.28s cubic-bezier(.34,1.4,.64,1) forwards; }
-  .toast-out { animation: toastDown 0.22s ease forwards; }
-`;
 
 export default function DashboardV4() {
   const [activeTab, setActiveTab] = useState('portfolio');
@@ -741,14 +632,18 @@ export default function DashboardV4() {
   // ด้วยมือ (getBoundingClientRect) ที่เคยเจอบั๊กแท่งกระตุกตกค้างมาก่อน — วิธีนี้ปลอดภัยกว่า (React
   // reconcile ด้วย key เอง) แลกกับ animation ที่ไม่ใช่ FLIP แบบเป๊ะๆ ถ้าอยากได้แบบ pixel-perfect FLIP
   // ทีหลังค่อยอัปเกรดจุดนี้ทีเดียว
-  const BarChart = ({ points }) => {
+  // ✅ 2026-07-08: เพิ่ม `fill` — ใช้ตอนอยู่ใน DesktopChartBlock (grid item ที่ถูก stretch ให้สูงเท่า
+  // คอลัมน์ KPI cards ข้างๆ) height:200 ตายตัวเดิมทำให้การ์ดกราฟเตี้ยกว่า 3 การ์ด KPI เพราะไม่ยอมโต
+  // ตาม container ที่ stretch ไว้ — flex:1 (แทน height คงที่) ให้มันโตเต็มพื้นที่ที่เหลือใน flex column
+  // ของ DesktopChartBlock เอง (Mobile ไม่ส่ง fill มา เลยยังคงสูง 200 คงที่เหมือนเดิม ไม่กระทบ)
+  const BarChart = ({ points, fill }) => {
     if (!points || points.length === 0) {
       return <div style={{ ...styles.cardTight, textAlign: 'center', color: COLORS.faint, fontSize: 13 }}>ยังไม่มีข้อมูลกราฟในช่วงที่เลือก</div>;
     }
     const maxAbs = Math.max(...points.map(p => Math.abs(p.return_pct)), 1);
     const MIN_COL_W = isMobile ? 40 : 48;
     return (
-      <div style={{ ...styles.cardTight, display: 'flex', alignItems: 'flex-end', gap: 4, height: 200, overflowX: 'auto', minWidth: 0 }}>
+      <div style={{ ...styles.cardTight, display: 'flex', alignItems: 'flex-end', gap: 4, ...(fill ? { flex: 1, minHeight: 200 } : { height: 200 }), overflowX: 'auto', minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: '100%', width: '100%', minWidth: points.length * MIN_COL_W }}>
           {points.map(p => {
             const heightPct = Math.max((Math.abs(p.return_pct) / maxAbs) * 100, 4);
@@ -771,7 +666,7 @@ export default function DashboardV4() {
     );
   };
 
-  const CumulativeLineChart = ({ points }) => {
+  const CumulativeLineChart = ({ points, fill }) => {
     if (!points || points.length === 0) {
       return <div style={{ ...styles.cardTight, textAlign: 'center', color: COLORS.faint, fontSize: 13 }}>ยังไม่มีข้อมูลสะสม</div>;
     }
@@ -788,15 +683,23 @@ export default function DashboardV4() {
     const path = coords.map((c, i) => `${i === 0 ? 'M' : 'L'} ${c[0].toFixed(1)} ${c[1].toFixed(1)}`).join(' ');
     const last = points[points.length - 1];
     const lastCoord = coords[coords.length - 1];
+    // ✅ 2026-07-08: MBBook ทักว่าตัวเลข "+X%" ในการ์ดกราฟสะสม ใหญ่แปลกๆ ไม่สมส่วน — root cause คือ
+    // เดิม label เป็น <text> ในหน่วย viewBox (600x180) ร่วมกับ preserveAspectRatio="none" (ยืด SVG
+    // ไม่รักษาสัดส่วนให้เต็ม container) พอการ์ดกราฟเปลี่ยนความสูง (จาก fill:true ที่เพิ่งแก้ไป) อัตราส่วน
+    // กว้าง:สูงของ container เปลี่ยนไปจาก viewBox เดิมมาก → ตัวเลขถูกยืดเพี้ยนไปด้วย ย้าย label ออกมา
+    // เป็น <span> HTML ธรรมดาแทน (วางตำแหน่งด้วย % ของ container แต่ font-size เป็น px จริง ไม่ยืดตาม
+    // viewBox เลยนิ่งเสมอไม่ว่าการ์ดจะสัดส่วนแบบไหน)
+    const labelLeftPct = Math.min(Math.max((lastCoord[0] / W) * 100, 8), 92);
+    const labelTopPct = Math.max((lastCoord[1] / H) * 100 - 10, 4);
     return (
-      <div style={{ ...styles.cardTight, height: 200 }}>
+      <div style={{ ...styles.cardTight, position: 'relative', ...(fill ? { flex: 1, minHeight: 200 } : { height: 200 }) }}>
         <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: '100%', overflow: 'visible' }} preserveAspectRatio="none">
           <path d={path} fill="none" stroke={COLORS.purple} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" className="line-draw" vectorEffect="non-scaling-stroke" />
           <circle cx={lastCoord[0]} cy={lastCoord[1]} r={4} fill={COLORS.gold} />
-          <text x={Math.max(lastCoord[0] - 44, 0)} y={Math.max(lastCoord[1] - 10, 14)} fontSize="15" fontWeight="700" fill={last.return_pct >= 0 ? COLORS.gold : COLORS.red}>
-            {last.return_pct >= 0 ? '+' : ''}{last.return_pct}%
-          </text>
         </svg>
+        <span style={{ position: 'absolute', left: `${labelLeftPct}%`, top: `${labelTopPct}%`, transform: 'translateX(-50%)', fontSize: 15, fontWeight: 700, whiteSpace: 'nowrap', color: last.return_pct >= 0 ? COLORS.gold : COLORS.red }}>
+          {last.return_pct >= 0 ? '+' : ''}{last.return_pct}%
+        </span>
       </div>
     );
   };
@@ -1335,14 +1238,14 @@ export default function DashboardV4() {
   const DesktopChartBlock = () => {
     const points = getChartPoints();
     return (
-      <div style={styles.stack(SP.md)}>
+      <div style={{ ...styles.stack(SP.md), height: '100%' }}>
         <div style={{ ...styles.row(SP.md), justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <p style={styles.sectionTitle}>ผลตอบแทนพอร์ตตามช่วงเวลา</p>
           <div style={{ ...styles.row(SP.sm), flexWrap: 'wrap' }}>
             {SlidingPill({ options: PORTFOLIO_PERIOD_OPTIONS, value: periodMode, onChange: setPeriodMode })}
           </div>
         </div>
-        {periodMode === 'cumulative' ? CumulativeLineChart({ points }) : BarChart({ points })}
+        {periodMode === 'cumulative' ? CumulativeLineChart({ points, fill: true }) : BarChart({ points, fill: true })}
       </div>
     );
   };
@@ -1361,24 +1264,30 @@ export default function DashboardV4() {
     const roi = portfolioData?.total_cost ? ((portfolioData.total_gain / portfolioData.total_cost) * 100) : null;
     const dayChangeThb = (dayChange && rate != null) ? dayChange.diffUsd * rate : null;
 
+    // ✅ 2026-07-08: MBBook ทักว่า row แรก (กราฟ + 3 การ์ด) ในโหมด sidebar กินพื้นที่เยอะเกินไป —
+    // เทียบกับ mockup ต้นฉบับ (.kpi-label 11.5px, .kpi-change padding 3px 9px font 11.5px, gap 10px)
+    // การ์ดฝั่ง React ใหญ่กว่ามาก (label 13.5px, badge padding 4px 12px font 13px, gap 12px) ทำให้
+    // คอลัมน์ KPI สูงกว่าที่ควร (การ์ดกราฟ fill:true เลยถูกลากให้สูงตามไปด้วย) ย่อเฉพาะโหมด sidebar
+    // ให้ใกล้เคียง mockup ไม่กระทบ Mobile (sidebar=false ยังใช้ label/Badge ขนาดเดิม)
     const Badge = ({ text, color }) => (
-      <span style={{ fontSize: 13, fontWeight: 700, padding: '4px 12px', borderRadius: 20, backgroundColor: `${color}22`, color }}>{text}</span>
+      <span style={{ fontSize: sidebar ? 11.5 : 13, fontWeight: 700, padding: sidebar ? '3px 9px' : '4px 12px', borderRadius: 20, backgroundColor: `${color}22`, color }}>{text}</span>
     );
 
     const containerStyle = sidebar
-      ? { display: 'flex', flexDirection: 'column', gap: SP.md }
+      ? { display: 'flex', flexDirection: 'column', gap: 10 }
       : { display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: SP.md };
     const cardStyle = sidebar
-      ? { ...styles.cardTight, flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }
+      ? { ...styles.cardTight, padding: '14px 16px', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }
       : styles.cardTight;
+    const labelStyle = sidebar ? { ...styles.label, fontSize: 11.5, marginBottom: 6 } : styles.label;
 
     return (
       <div style={containerStyle}>
         <div style={cardStyle}>
-          <p style={styles.label}>มูลค่ารวม</p>
-          {MoneyDual({ thb: portfolioData?.total_value_thb, usd: portfolioData?.total_value, mainSize: desktop ? 26 : 22, mainColor: COLORS.gold })}
+          <p style={labelStyle}>มูลค่ารวม</p>
+          {MoneyDual({ thb: portfolioData?.total_value_thb, usd: portfolioData?.total_value, mainSize: sidebar ? 22 : (desktop ? 26 : 22), mainColor: COLORS.gold })}
           {desktop ? (
-            <div style={{ ...styles.row(SP.xs), marginTop: SP.sm, flexWrap: 'wrap' }}>
+            <div style={{ ...styles.row(SP.xs), marginTop: sidebar ? 6 : SP.sm, flexWrap: 'wrap' }}>
               {cumPct != null && Badge({ text: `${cumPct >= 0 ? '+' : ''}${cumPct.toFixed(1)}% สะสม`, color: COLORS.green })}
               {dayChange && Badge({ text: `${dayChange.pct >= 0 ? '+' : ''}${dayChange.pct.toFixed(1)}% วันนี้`, color: dayChange.pct >= 0 ? COLORS.green : COLORS.red })}
             </div>
@@ -1392,14 +1301,14 @@ export default function DashboardV4() {
           )}
         </div>
         <div style={cardStyle}>
-          <p style={styles.label}>ต้นทุน</p>
+          <p style={labelStyle}>ต้นทุน</p>
           {MoneyDual({ thb: portfolioData?.total_cost_thb, usd: portfolioData?.total_cost, mainSize: desktop ? 21 : 18 })}
         </div>
         <div style={cardStyle}>
-          <p style={styles.label}>{desktop ? 'กำไรสุทธิ' : 'กำไร'}</p>
+          <p style={labelStyle}>{desktop ? 'กำไรสุทธิ' : 'กำไร'}</p>
           {MoneyDual({ thb: portfolioData?.total_gain_thb, usd: totalGain, mainSize: desktop ? 21 : 18, mainColor: totalGain >= 0 ? COLORS.green : COLORS.red })}
           {desktop && (
-            <div style={{ ...styles.row(SP.xs), marginTop: SP.sm, flexWrap: 'wrap' }}>
+            <div style={{ ...styles.row(SP.xs), marginTop: sidebar ? 6 : SP.sm, flexWrap: 'wrap' }}>
               {roi != null && Badge({ text: `ROI ${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%`, color: COLORS.purple })}
               {dayChangeThb != null && Badge({ text: hideAmounts ? `฿${MASK} วันนี้` : `${dayChangeThb >= 0 ? '+' : ''}${fmtTHB(dayChangeThb)} วันนี้`, color: dayChangeThb >= 0 ? COLORS.green : COLORS.red })}
             </div>
