@@ -1629,3 +1629,158 @@ class TestPortfolioReturnHistory(unittest.TestCase):
         result = self.orc.portfolio_return_history(db=db)
         self.assertEqual(result["daily"], [])
         self.assertEqual(result["monthly"], [])
+
+
+# ============================================================
+# SECTION: PEG Ratio via Alpha Vantage (เพิ่ม 2026-07-08)
+# ============================================================
+def _av_resp(payload):
+    """สร้าง mock response ของ requests.get สำหรับ Alpha Vantage"""
+    m = MagicMock()
+    m.json.return_value = payload
+    return m
+
+
+class TestPegAlphaVantage(unittest.TestCase):
+    """PEG ratio จาก Alpha Vantage OVERVIEW — rotation รายวัน + carry-forward + rate-limit guard
+    (design ตายตัวจาก Sonnet5_Workplan.md งานที่ 3 — ห้ามแก้เกณฑ์โดยไม่อัพเดต workplan)"""
+
+    PRICE_DATA = {"price": 100.0, "52week_high": 120.0, "52week_low": 80.0,
+                  "pe_ratio": 20.0, "market_cap": 1e12, "beta": 1.1, "eps": 5.0,
+                  "peg_ratio": None, "source": "finnhub",
+                  "at_new_high": False, "at_new_low": False}
+
+    def setUp(self):
+        self.orc = make_orchestrator()
+
+    def _make_db(self, rows):
+        """mock SessionLocal — carry-forward ทั้ง 3 block (earnings/profile/peg) ใช้
+        query chain แบบเดียวกัน (query→join→all) จึงได้ rows ชุดเดียวกันหมด"""
+        db = MagicMock()
+        db.query.return_value.join.return_value.all.return_value = rows
+        return db
+
+    def _row(self, ticker, peg, hours_ago):
+        row = MagicMock()
+        row.ticker = ticker
+        row.peg_ratio = peg
+        row.fetched_at = datetime.now() - timedelta(hours=hours_ago)
+        row.earnings_date = "2026-08-01"
+        row.earnings_hour = "amc"
+        row.company_name = f"{ticker} Inc."
+        row.company_description = "desc"
+        return row
+
+    # --- Test 1: fetch สำเร็จ → ได้ค่า float ถูกต้อง ---
+    @patch("time.sleep")
+    @patch("agents.requests.get")
+    def test_fetch_success_returns_float(self, mock_get, _sleep):
+        mock_get.return_value = _av_resp({"PEGRatio": "1.85"})
+        result = self.orc._fetch_peg_alpha_vantage(["AAPL"], "test_key")
+        self.assertEqual(result, {"AAPL": 1.85})
+        called_url = mock_get.call_args[0][0]
+        self.assertIn("OVERVIEW", called_url)
+        self.assertIn("AAPL", called_url)
+
+    # --- Test 2: rate-limit response → break ทั้ง batch ไม่ยิงต่อ ---
+    @patch("time.sleep")
+    @patch("agents.requests.get")
+    def test_rate_limit_note_breaks_batch(self, mock_get, _sleep):
+        mock_get.return_value = _av_resp({"Note": "API call frequency exceeded"})
+        result = self.orc._fetch_peg_alpha_vantage(["AAPL", "MSFT", "GOOG"], "test_key")
+        self.assertEqual(result, {})
+        self.assertEqual(mock_get.call_count, 1)  # หยุดทันที ไม่ยิงตัวถัดไป
+
+    @patch("time.sleep")
+    @patch("agents.requests.get")
+    def test_rate_limit_information_breaks_batch(self, mock_get, _sleep):
+        mock_get.return_value = _av_resp({"Information": "rate limit reached"})
+        result = self.orc._fetch_peg_alpha_vantage(["AAPL", "MSFT"], "test_key")
+        self.assertEqual(result, {})
+        self.assertEqual(mock_get.call_count, 1)
+
+    # --- Test 5: PEGRatio 'None'/'-'/dict ว่าง → _safe_float คืน None ไม่ crash ---
+    @patch("time.sleep")
+    @patch("agents.requests.get")
+    def test_peg_none_dash_missing_are_safe(self, mock_get, _sleep):
+        mock_get.side_effect = [
+            _av_resp({"PEGRatio": "None"}),
+            _av_resp({"PEGRatio": "-"}),
+            _av_resp({}),  # AV คืน dict ว่างสำหรับ symbol ที่ไม่รู้จัก
+        ]
+        result = self.orc._fetch_peg_alpha_vantage(["A", "B", "C"], "test_key")
+        self.assertEqual(result, {"A": None, "B": None, "C": None})
+
+    # --- Test 6a: exception รายตัว → ข้ามตัวนั้น ไปต่อตัวถัดไป ---
+    @patch("time.sleep")
+    @patch("agents.requests.get")
+    def test_per_ticker_exception_skips_and_continues(self, mock_get, _sleep):
+        mock_get.side_effect = [ConnectionError("boom"), _av_resp({"PEGRatio": "2.10"})]
+        result = self.orc._fetch_peg_alpha_vantage(["BAD", "MSFT"], "test_key")
+        self.assertEqual(result, {"MSFT": 2.1})
+
+    # --- Test 4: นอกรอบ PEG_REFRESH_UTC_HOUR → ไม่ยิง AV เลย + carry-forward ทำงาน ---
+    @patch.object(AgentOrchestrator, "_fetch_finnhub_earnings", return_value=(None, None))
+    @patch.object(AgentOrchestrator, "_fetch_company_profile", return_value=(None, None))
+    @patch.object(AgentOrchestrator, "_fetch_finnhub_full")
+    @patch("agents.requests.get")
+    @patch("agents.SessionLocal")
+    def test_outside_refresh_hour_no_av_call_and_carry_forward(self, mock_sl, mock_get, mock_full, *_):
+        self.orc.PEG_REFRESH_UTC_HOUR = (datetime.utcnow().hour + 3) % 24  # บังคับให้ "นอกรอบ" เสมอ
+        mock_sl.return_value = self._make_db([self._row("AAPL", 2.5, hours_ago=60)])
+        mock_full.side_effect = lambda *a, **k: dict(self.PRICE_DATA)
+
+        result = self.orc.natty_prefetch_prices(["AAPL"])
+
+        self.assertEqual(result["AAPL"]["peg_ratio"], 2.5)  # carry-forward จาก DB
+        mock_get.assert_not_called()                        # ห้ามยิง Alpha Vantage นอกรอบ
+
+    # --- Test 1b: ในรอบ refresh → ค่าใหม่จาก AV ชนะ carry ---
+    @patch.object(AgentOrchestrator, "_fetch_finnhub_earnings", return_value=(None, None))
+    @patch.object(AgentOrchestrator, "_fetch_company_profile", return_value=(None, None))
+    @patch.object(AgentOrchestrator, "_fetch_finnhub_full")
+    @patch("time.sleep")
+    @patch("agents.requests.get")
+    @patch("agents.SessionLocal")
+    def test_in_refresh_hour_fresh_value_wins(self, mock_sl, mock_get, _sleep, mock_full, *_):
+        self.orc.PEG_REFRESH_UTC_HOUR = datetime.utcnow().hour  # บังคับให้ "ในรอบ"
+        mock_sl.return_value = self._make_db([self._row("AAPL", 2.5, hours_ago=60)])  # stale > 48 ชม.
+        mock_full.side_effect = lambda *a, **k: dict(self.PRICE_DATA)
+        mock_get.return_value = _av_resp({"PEGRatio": "1.85"})
+
+        result = self.orc.natty_prefetch_prices(["AAPL"])
+        self.assertEqual(result["AAPL"]["peg_ratio"], 1.85)
+
+    # --- Test 3: hard cap — 30 ตัว stale → ยิงแค่ 20 ---
+    @patch.object(AgentOrchestrator, "_fetch_finnhub_earnings", return_value=(None, None))
+    @patch.object(AgentOrchestrator, "_fetch_company_profile", return_value=(None, None))
+    @patch.object(AgentOrchestrator, "_fetch_finnhub_full")
+    @patch("time.sleep")
+    @patch("agents.requests.get")
+    @patch("agents.SessionLocal")
+    def test_daily_cap_20_of_30_stale(self, mock_sl, mock_get, _sleep, mock_full, *_):
+        self.orc.PEG_REFRESH_UTC_HOUR = datetime.utcnow().hour
+        mock_sl.return_value = self._make_db([])  # ไม่เคยมี PEG เลย → stale ทั้ง 30 ตัว
+        mock_full.side_effect = lambda *a, **k: dict(self.PRICE_DATA)
+        mock_get.return_value = _av_resp({"PEGRatio": "1.0"})
+
+        tickers = [f"T{i:02d}" for i in range(30)]
+        self.orc.natty_prefetch_prices(tickers)
+        self.assertEqual(mock_get.call_count, 20)  # PEG_DAILY_CAP — เหลือ quota 5 ให้ Tier-3
+
+    # --- Test 6b: AV ล่มทั้งระบบ → prefetch หลัก (ราคา) ต้องไม่ล้ม ---
+    @patch.object(AgentOrchestrator, "_fetch_finnhub_earnings", return_value=(None, None))
+    @patch.object(AgentOrchestrator, "_fetch_company_profile", return_value=(None, None))
+    @patch.object(AgentOrchestrator, "_fetch_finnhub_full")
+    @patch("time.sleep")
+    @patch("agents.requests.get")
+    @patch("agents.SessionLocal")
+    def test_av_failure_does_not_break_prefetch(self, mock_sl, mock_get, _sleep, mock_full, *_):
+        self.orc.PEG_REFRESH_UTC_HOUR = datetime.utcnow().hour
+        mock_sl.return_value = self._make_db([])
+        mock_full.side_effect = lambda *a, **k: dict(self.PRICE_DATA)
+        mock_get.side_effect = ConnectionError("Alpha Vantage down")
+
+        result = self.orc.natty_prefetch_prices(["AAPL"])  # ต้องไม่ raise
+        self.assertIn("AAPL", result)                      # ราคาหลักยังมาครบ
+        self.assertIsNone(result["AAPL"]["peg_ratio"])     # PEG ไม่มี — ยอมรับได้

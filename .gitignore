@@ -13,3 +13,4 @@ build/
 output.txt
 workflow_result.json
 *.lock
+.claude/

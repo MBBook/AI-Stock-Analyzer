@@ -109,6 +109,16 @@ class AgentOrchestrator:
         4: 0.75,  # Friday    — + นิก optimize
     }
 
+    # ==================== PEG RATIO (Alpha Vantage) ====================
+    # ✅ เพิ่ม 2026-07-08: Finnhub field 'pegRatio' เดาผิด (null ทุกตัว — ยืนยันจาก prod จริง)
+    # ใช้ Alpha Vantage OVERVIEW.PEGRatio แทน (ยืนยันจาก doc ว่ามีจริง) แต่ free tier
+    # จำกัด 25 req/day → refresh เฉพาะ prefetch รอบชั่วโมง PEG_REFRESH_UTC_HOUR
+    # สูงสุด PEG_DAILY_CAP ตัว/วัน เรียงจาก stale สุด (หมุนครบ 30 ตัวใน 2 วัน)
+    # รอบ prefetch อื่นๆ carry-forward ค่าล่าสุดจาก DB เหมือน earnings_date
+    PEG_REFRESH_UTC_HOUR = 2   # 02:xx UTC = prefetch รอบ 09:05 Bangkok (รอบแรกของวัน)
+    PEG_DAILY_CAP = 20         # เหลือ quota 5/25 ให้ Tier-3 price fallback ที่ใช้ Alpha Vantage อยู่แล้ว
+    PEG_STALE_HOURS = 48       # PEG เปลี่ยนช้า — อายุเกิน 48 ชม. ค่อยถือว่า stale
+
     def claude_call(self, system_prompt, user_message, agent_name="Claude", model=None, use_cache=False, max_tokens=4096):
         """ใช้ Claude API สำหรับ Agent (with auto-fallback + model selection + caching)
         ✅ model: ระบุ model ที่ต้องการ (default = Sonnet)
@@ -316,6 +326,60 @@ class AgentOrchestrator:
             self.log_action("นัตตี้", f"Finnhub earnings calendar fail for {ticker}: {str(e)}", "WARNING")
             return None, None
 
+    def _fetch_company_profile(self, ticker, api_key):
+        """✅ เพิ่ม 2026-07-05 (รอบ 5): ชื่อเต็มบริษัท + คำอธิบายบริษัท — MBBook ขอให้หามาเพิ่ม
+        (popup Tickers/Portfolio ไม่มีข้อมูลนี้เลยมาตลอด)
+        - ชื่อเต็ม: Finnhub /stock/profile2 field 'name' — endpoint ฟรี ยืนยันจาก doc จริง
+        - คำอธิบาย: Finnhub profile2 ไม่มี field คำอธิบายธุรกิจ ต้องใช้ yfinance
+          'longBusinessSummary' แทน (ภาษาอังกฤษ ยาว ตัดเหลือ ~400 ตัวอักษรกันยาวเกินไปใน popup)
+        เรียกไม่บ่อย (เหมือน earnings_date) เพราะข้อมูลนี้แทบไม่เปลี่ยนเลย"""
+        name = None
+        description = None
+        try:
+            profile_url = f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker}&token={api_key}"
+            profile = requests.get(profile_url, timeout=10).json()
+            name = profile.get("name") or None
+        except Exception as e:
+            self.log_action("นัตตี้", f"Finnhub profile2 fail for {ticker}: {str(e)}", "WARNING")
+
+        try:
+            import time as _time
+            _time.sleep(0.5)
+            info = yf.Ticker(ticker).info
+            summary = info.get("longBusinessSummary")
+            if summary:
+                description = summary[:400].rsplit(" ", 1)[0] + "..." if len(summary) > 400 else summary
+            if not name:
+                name = info.get("longName") or info.get("shortName") or None
+        except Exception as e:
+            self.log_action("นัตตี้", f"yfinance longBusinessSummary fail for {ticker}: {str(e)}", "WARNING")
+
+        return name, description
+
+    def _fetch_peg_alpha_vantage(self, tickers, api_key):
+        """✅ เพิ่ม 2026-07-08: ดึง PEG ratio จาก Alpha Vantage OVERVIEW (field 'PEGRatio')
+        เรียกทีละตัว + sleep 1s ระหว่างตัว (free tier: 5 req/min, 25 req/day)
+        - เจอ rate-limit response ({'Note':...}/{'Information':...}) → หยุดทั้ง batch ทันที ไม่ยิงต่อ
+        - error รายตัว → log แล้วข้ามไปตัวถัดไป
+        Returns: {ticker: peg_float_หรือ_None} เฉพาะตัวที่ได้ response ปกติ"""
+        import time as _time
+        fresh = {}
+        for i, ticker in enumerate(tickers):
+            try:
+                if i > 0:
+                    _time.sleep(1)  # กัน 5 req/min limit
+                url = f"https://www.alphavantage.co/query?function=OVERVIEW&symbol={ticker}&apikey={api_key}"
+                resp = requests.get(url, timeout=10).json()
+                if not isinstance(resp, dict) or "Note" in resp or "Information" in resp:
+                    self.log_action("นัตตี้-prefetch",
+                                    f"⚠️ Alpha Vantage rate limit ระหว่างดึง PEG ({ticker}) — หยุด batch นี้ "
+                                    f"(ได้มา {len(fresh)}/{len(tickers)} ตัว ที่เหลือ carry-forward)", "WARNING")
+                    break
+                fresh[ticker] = self._safe_float(resp.get("PEGRatio"))
+            except Exception as e:
+                self.log_action("นัตตี้-prefetch", f"PEG fetch fail {ticker}: {str(e)}", "WARNING")
+        return fresh
+
     def _fetch_alpha_vantage_overview(self, ticker, api_key):
         """ดึงข้อมูลจาก Alpha Vantage OVERVIEW endpoint (Tier 3 - last resort)
         ✅ FIX #3: safe_float อัปเดตรองรับ edge cases ครบ ("-", "N/A", " " ฯลฯ)
@@ -482,6 +546,76 @@ class AgentOrchestrator:
             if db_check:
                 db_check.close()
 
+        # ✅ เพิ่ม 2026-07-05 (รอบ 5): ชื่อเต็มบริษัท/คำอธิบาย — carry-forward เหมือน earnings
+        # (เปลี่ยนแทบไม่เคยเปลี่ยนเลย ไม่ต้องเรียก Finnhub/yfinance ใหม่ทุกชั่วโมง)
+        profile_carry = {}
+        profile_is_fresh = {}
+        db_check2 = None
+        try:
+            db_check2 = SessionLocal()
+            latest_sq2 = (
+                db_check2.query(HourlyCache.ticker, _func.max(HourlyCache.fetched_at).label("max_at"))
+                .filter(HourlyCache.ticker.in_(stocks), HourlyCache.company_name.isnot(None))
+                .group_by(HourlyCache.ticker)
+                .subquery()
+            )
+            rows2 = (
+                db_check2.query(HourlyCache)
+                .join(latest_sq2, (HourlyCache.ticker == latest_sq2.c.ticker) &
+                                   (HourlyCache.fetched_at == latest_sq2.c.max_at))
+                .all()
+            )
+            recent_cutoff2 = datetime.now() - __import__("datetime").timedelta(hours=20)
+            for row in rows2:
+                profile_carry[row.ticker] = (row.company_name, row.company_description)
+                profile_is_fresh[row.ticker] = row.fetched_at >= recent_cutoff2
+        except Exception as e:
+            self.log_action("นัตตี้-prefetch", f"เช็ค company profile freshness ล้มเหลว (ไม่กระทบราคา): {str(e)}", "WARNING")
+        finally:
+            if db_check2:
+                db_check2.close()
+
+        # ✅ เพิ่ม 2026-07-08: PEG ratio — carry-forward จาก row ล่าสุดที่มีค่า + refresh ผ่าน
+        # Alpha Vantage เฉพาะรอบ PEG_REFRESH_UTC_HOUR สูงสุด PEG_DAILY_CAP ตัว/วัน (ดู constants)
+        peg_carry = {}  # {ticker: peg ล่าสุดที่ไม่ null}
+        peg_age = {}    # {ticker: fetched_at ของ row นั้น}
+        db_check3 = None
+        try:
+            db_check3 = SessionLocal()
+            latest_sq3 = (
+                db_check3.query(HourlyCache.ticker, _func.max(HourlyCache.fetched_at).label("max_at"))
+                .filter(HourlyCache.ticker.in_(stocks), HourlyCache.peg_ratio.isnot(None))
+                .group_by(HourlyCache.ticker)
+                .subquery()
+            )
+            rows3 = (
+                db_check3.query(HourlyCache)
+                .join(latest_sq3, (HourlyCache.ticker == latest_sq3.c.ticker) &
+                                  (HourlyCache.fetched_at == latest_sq3.c.max_at))
+                .all()
+            )
+            for row in rows3:
+                peg_carry[row.ticker] = row.peg_ratio
+                peg_age[row.ticker] = row.fetched_at
+        except Exception as e:
+            self.log_action("นัตตี้-prefetch", f"เช็ค PEG freshness ล้มเหลว (ไม่กระทบราคา): {str(e)}", "WARNING")
+        finally:
+            if db_check3:
+                db_check3.close()
+
+        peg_fresh = {}
+        try:
+            AV_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+            if AV_KEY and datetime.utcnow().hour == self.PEG_REFRESH_UTC_HOUR:
+                stale_cutoff = datetime.now() - __import__("datetime").timedelta(hours=self.PEG_STALE_HOURS)
+                stale = [t for t in stocks if t not in peg_age or peg_age[t] < stale_cutoff]
+                stale.sort(key=lambda t: peg_age.get(t, datetime.min))  # เก่าสุด/ไม่เคยมี ขึ้นก่อน
+                stale = stale[:self.PEG_DAILY_CAP]
+                if stale:
+                    peg_fresh = self._fetch_peg_alpha_vantage(stale, AV_KEY)
+        except Exception as e:
+            self.log_action("นัตตี้-prefetch", f"PEG refresh ล้มเหลว (ไม่กระทบราคา): {str(e)}", "WARNING")
+
         for ticker in stocks:
             data = None
 
@@ -532,6 +666,26 @@ class AgentOrchestrator:
                     else:
                         data["earnings_date"], data["earnings_hour"] = e_date, e_hour
 
+            # ✅ เพิ่ม 2026-07-05 (รอบ 5): ชื่อเต็มบริษัท/คำอธิบาย — ดึงใหม่เฉพาะตอนข้อมูลเก่าเกิน 20 ชม.
+            if data:
+                if profile_is_fresh.get(ticker):
+                    data["company_name"], data["company_description"] = profile_carry[ticker]
+                else:
+                    p_name, p_desc = self._fetch_company_profile(ticker, FINNHUB_KEY)
+                    if not p_name and ticker in profile_carry:
+                        data["company_name"], data["company_description"] = profile_carry[ticker]
+                    else:
+                        data["company_name"] = p_name or (profile_carry.get(ticker) or (None, None))[0]
+                        data["company_description"] = p_desc or (profile_carry.get(ticker) or (None, None))[1]
+
+            # ✅ เพิ่ม 2026-07-08: PEG — priority: Alpha Vantage ค่าใหม่ > ค่าจาก price source
+            # (เผื่อ Finnhub/yfinance คืนค่าจริงในอนาคต) > carry-forward ค่าล่าสุดจาก DB
+            if data:
+                if peg_fresh.get(ticker) is not None:
+                    data["peg_ratio"] = peg_fresh[ticker]
+                elif data.get("peg_ratio") is None and ticker in peg_carry:
+                    data["peg_ratio"] = peg_carry[ticker]
+
             if data:
                 fetched[ticker] = data
 
@@ -553,6 +707,8 @@ class AgentOrchestrator:
                     peg_ratio     = d.get("peg_ratio"),
                     earnings_date = d.get("earnings_date"),
                     earnings_hour = d.get("earnings_hour"),
+                    company_name        = d.get("company_name"),
+                    company_description = d.get("company_description"),
                     source        = d.get("source", "unknown"),
                     at_new_high   = d.get("at_new_high", False),
                     at_new_low    = d.get("at_new_low", False),
@@ -2278,7 +2434,7 @@ Identify top issues and output diff blocks."""
                         correct = price_later < price_then
 
                     if correct:
-                        wins += 1
+                            wins += 1
                     else:
                         losses += 1
 
