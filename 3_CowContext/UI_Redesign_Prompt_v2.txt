@@ -1,0 +1,89 @@
+Act as an elite Senior Frontend Engineer and UI/UX Architect specializing in modern trading dashboards. Build a fully interactive, production-ready, high-density dashboard for "AI Stock Analyzer" using React, Tailwind CSS, and Lucide React icons (no emoji as icons — SVG only, consistent 1.5–2px stroke width across the whole app).
+
+### ⚠️ CRITICAL ARCHITECTURAL RULE
+Desktop and Mobile are completely different designs. DO NOT implement them as a single component tree that uses CSS media queries/breakpoints to stretch or shrink layouts.
+- Write strictly separate component trees: `Desktop*` and `Mobile*` components per tab, chosen by a single `isMobile` boolean at the top of the app (real viewport/device detection in production — see note at the very end about the preview toggle).
+- Never call a helper render function as a JSX tag (e.g. `<Foo/>`) if `Foo` is redefined on every render of the parent — call it as `Foo()` directly, or hoist it to a real component outside the render body. Calling a freshly-recreated function as a JSX tag makes React unmount/remount the whole subtree every re-render (inputs lose focus while typing — this has bitten this project before).
+- All `useState`/`useEffect` must live at the top level of the top-level dashboard component, never inside a conditionally-invoked helper function (Rules of Hooks).
+- For the design-review preview only: add a `viewMode` state + a small floating toggle button ("Switch to Mobile View" / "Switch to Desktop View") so both implementations can be inspected side by side. This toggle is a **preview-only convenience** — it must be removed or disabled in the real production build, where `isMobile` comes from an actual viewport check. Don't ship debug/test-only UI controls into production (this project has been bitten before by a leftover "+ ข่าวทดสอบ" test button that had to be torn out later — don't repeat that pattern here).
+
+---
+
+### 1. Global Design System (Both Views)
+- Background: Strict dark mode only, no light mode. Deep navy/slate-blue (`bg-[#0d111c]` or `bg-[#090d16]`).
+- Primary interactive colors: Vibrant Purple ↔ Neon Blue. Never use red/green for branding/interactive elements — reserve red/green exclusively for gain/loss and BUY/SELL semantics, and always pair that color with an icon or text label (arrow ↑/↓, "+X%"/"-X%"), never color alone (colorblind accessibility).
+- Gold gradient `#F7CE85 → #EF9F27` — reserved strictly for the two primary action buttons ("+" add, "+ Trade"). Claymorphism: simultaneous dark drop-shadow + soft inner light highlight (dual shadow, never a single flat drop-shadow — looks flat on a dark background).
+- All other cards/containers: Glassmorphism — translucent fill, `backdrop-blur`, crisp 1px border at low opacity.
+- Geometry: Squircle corners, `rounded-2xl`/`rounded-3xl`, consistent radius scale (don't mix arbitrary radii).
+- Typography: Inter (or existing sans-serif) for numbers/UI chrome + Noto Sans Thai for Thai copy, loaded together so Thai and English glyphs share the same vertical rhythm. Use tabular/monospaced number figures (`font-variant-numeric: tabular-nums`) on all prices/values/tables so digits don't jitter sideways on update.
+- Spacing rhythm: 4/8px scale throughout, denser (8–32px) on desktop tables, slightly more breathing room (12–24px) on mobile cards.
+- Accessibility floor: text contrast ≥ 4.5:1 on navy background (double-check gold-on-navy and purple-on-navy body text specifically — verify, don't assume), visible focus rings on every interactive element, all icon-only buttons (e.g. bare "+") need `aria-label`, minimum touch target 44×44px on mobile, respect `prefers-reduced-motion` by shortening/removing the decorative motion in section 7 (keep functional feedback like press states).
+
+---
+
+### 2. DESKTOP IMPLEMENTATION SPECIFICATION
+- Layout density: dense padding (`py-2 px-3` max on rows), tight gaps, 8px spacing rhythm.
+- Typography: titles `text-lg`/`text-xl` bold max, table/body data strict `text-sm` (14px), meta `text-xs` (12px).
+- Navigation: top/side nav, 4 tabs — Portfolio / Tickers / News / System. Hover on a nav tab lifts it `translateY(-2px)`; active tab has a clear persistent highlight (not just on hover).
+- **Portfolio View:**
+  - Chart card: fixed height (`h-[360px]`), `overflow-hidden`, zero scrollbars. Purple sliding-pill period selector underneath (รายวัน / รายเดือน / สะสม).
+    - รายวัน / รายเดือน → **bar chart**, values shown as ฿K with a dashed connector line across bar tops. Switching between the two granularities must FLIP-morph the existing bars (remove exiting bars from flex flow before measuring final positions of the rest, to avoid a jump/flicker — this is a real bug hit before, don't reintroduce it).
+    - สะสม (cumulative) → **always a line chart**, never bar (bar→line "morphing" was tried and rejected as ugly — implement as a fully separate chart component). Animate the path drawing left→right via `stroke-dasharray` on mount/update, gold dot + "%"-suffixed value label at the line's end point.
+  - Summary row: 3 compact KPI cards side by side (มูลค่ารวม / ต้นทุน / กำไร) — THB large + $USD stacked small/gray underneath, always shown together, **never a currency toggle switch**.
+  - Holdings list: **a real data table** (`HoldingsTable`), not cards — columns: สินทรัพย์ (ticker + avatar) / จำนวนหุ้น / ต้นทุนเฉลี่ย-หุ้น / ต้นทุนทั้งหมด / ราคาปัจจุบัน (THB + USD stacked) / เปลี่ยนแปลง (color + arrow + %). Table must not force horizontal scroll at common desktop widths (≥1280px) — collapse the least critical column first if needed rather than letting the table overflow.
+  - Action row above/beside the table: กรอง / เรียง / **+ Trade** (gold claymorphism, fixed position in this row — not a floating FAB).
+- **Tickers View:** Header is the full "หุ้นที่จับตามอง" (not a bare "Tickers" label), with a subtitle showing tracked count / limit (e.g. "12 / 30 ตัว · ราคาอัปเดตทุกชั่วโมง"). Add button is a bare "+" icon (`aria-label="เพิ่มหุ้น"`). Body is **a real data table** (`TickersTable`), not cards — columns: หุ้น (ticker + company name, small gray) / Confidence (progress-style or numeric %) / ราคาปัจจุบัน (THB+USD) / เปลี่ยนแปลง.
+- **News View:** **Single column list — never a multi-column grid**, on desktop or mobile (a 3-column news grid was tried before and rejected for being visually noisy/hard to scan — don't reintroduce it). Header is the full "ข่าวหุ้น" + subtitle. Show an "อ่านทั้งหมด" button top-right, visible only when unread items exist. Each card: ticker tag(s), sentiment badge (Positive/Negative/Neutral), bold headline, snippet, footer with date + publisher (e.g. "4 ก.ค. 2569 · Bloomberg") on the left and Impact (สูง/ปานกลาง/ต่ำ) on the right. Unread articles get a small gold "New" badge; list always sorts by real timestamp (newest first), even if a new item is inserted mid-list. Bottom-right: circular-number sliding-pill pagination ("แสดงข่าวที่ 1–10 จาก N ข่าว" on the left, page circles on the right — current page = purple fill).
+- **System View:** grid layout, balanced two-column arrangement containing: (1) Token/cost chart card with the same period-selector pattern as Portfolio — cumulative mode is a line chart too, but its end-of-line label is in **"$"** not "%" (system cost has no percentage baseline to compare against); (2) Win Rate bullet-style progress bar with a visible target-tick at 75% and a caption stating over/under target by X%; (3) "รายงานจากนิก" table (ข้อเสนอ / วันที่แจ้ง / สถานะ) — this is a real recurring feature (weekly AI code-review suggestions), don't drop it; (4) a "รันล่าสุด" status card with cumulative portfolio return vs. the 13% target.
+
+---
+
+### 3. MOBILE IMPLEMENTATION SPECIFICATION
+- Navigation: fixed bottom nav bar, 4 items with icon + label (no icon-only nav — hurts discoverability), current tab clearly highlighted.
+- **Portfolio View:**
+  - Header: "Portfolio Analytics" + `text-xs` subtitle ("30 หุ้น · THB/USD · อัปเดตล่าสุดชั่วโมงที่แล้ว").
+  - Status row: green "พอร์ตบวกวันนี้" badge (or the losing-day equivalent) left, current date right (e.g. "ณ 5 ก.ค. 2569").
+  - Period section: sliding-pill (รายวัน/รายเดือน/สะสม) left, date-range dropdown ("7 วันล่าสุด ▾") right — same custom-range options as before (วันนี้ / 7 วัน / 30 วัน / เดือนก่อน / กำหนดเอง).
+  - Vertical stack: chart first, then the 3 summary cards stacked.
+  - Holdings section: "หุ้นที่ถืออยู่" header + position count right; action row of 3 fixed buttons (กรอง / เรียง / + Trade gold claymorphism, not a floating FAB); holding cards (avatar, bold ticker, BUY/SELL/HOLD badge, weight %, THB price + ≈$USD stacked always, %-change row with arrow).
+  - Sticky bottom summary bar: total positions, green/red win-ratio counters, total ROI in purple.
+- **Tickers View:** same header rule as desktop (full "หุ้นที่จับตามอง" + tracked-count subtitle), same card layout as Portfolio holding cards.
+- **News View:** same rules as desktop News (single column, "New" badge, "อ่านทั้งหมด" button, full header, pill pagination) — just single-column stacked cards sized for phone width.
+- UX baseline (all tabs): pull-to-refresh + background auto-poll every 5 minutes while the app is open (not more frequent — save requests); skeleton-card loading state (not a blank screen or spinner-only) while data loads; explicit empty/error states for zero holdings, zero tracked tickers, zero news, and FX-rate fetch failure — never a blank or raw-error screen.
+
+---
+
+### 4. Shared Stock Detail Central Popup
+Triggered from any Portfolio holding row or Tickers row, desktop or mobile alike. Opens as a FLIP-style expansion from the row/card that was clicked (scale + opacity overshoot easing, not a linear fade — think iOS folder opening), closes on tap/click anywhere outside the popup (not primarily via an X button).
+
+Structure top→bottom:
+1. Ticker – company name + BUY/SELL/HOLD badge.
+2. ถืออยู่ (shares held) / สัดส่วน (portfolio weight %) — **show this row only if the stock is actually held in the portfolio; hide entirely otherwise, don't show zeros.**
+3. ต้นทุนเฉลี่ย/หุ้น / ต้นทุนทั้งหมด — shown only alongside row 2, same condition.
+4. Confidence signal — label + horizontal purple progress bar.
+5. เหตุผล — 2–3 sentence Thai reasoning text.
+6. Insights, 2-column grid: Market Cap / P/E (show "— (ยังไม่กำไร)" if negative/missing) — EPS / PEG (PEG is experimental data, fine to show but don't imply more certainty than the source data has) — Beta / 52-week range — S1/S2/S3 support levels.
+7. Earnings date box (Thai date+time, or "-" + "ยังไม่ประกาศกำหนดการ" if missing).
+8. เกี่ยวกับบริษัทนี้ — short company description.
+
+---
+
+### 5. Animation System (apply consistently, both platforms unless noted)
+- Micro-interactions 150–300ms, ease-out on enter / ease-in on exit, never linear for UI transitions.
+- Every button: press feedback `scale(0.92)` + inset shadow. Desktop-only: nav tabs and the gold action button lift/scale slightly on hover (`translateY(-2px)` / `scale(1.06)`) — mobile has no hover state, press-only.
+- Popups/modals: open via FLIP-style expansion from the trigger element with scale+opacity overshoot easing; close on outside tap.
+- Numeric values (prices, totals): count-up animation on update (Robinhood-style), using tabular figures so width doesn't jump.
+- BUY/SELL/HOLD signal badges: brief pulse animation when a value changes.
+- Toasts: slide up from the bottom edge, hold 2–3s, slide back down — use for add/delete ticker, save trade, "อ่านทั้งหมด", and similar confirmations. Don't just swap button text in place.
+- All decorative motion above must reduce/disable under `prefers-reduced-motion`; functional feedback (press states, focus rings) stays.
+
+---
+
+### 6. Data & Integrity Notes
+- Ship with functional mock data for this design pass, but wire field names to match the real backend contract so swapping to live data later is a drop-in: `/stocks` → `ticker, signal, confidence, price, s1, s2, s3, market_cap, pe_ratio, eps, peg_ratio, beta, week52_high/low, earnings_date_thai, company_name, company_description`; `/portfolio` → holdings with `current_price, usd_thb_rate, total_value_thb, total_cost_thb, total_gain_thb`; `/roi/summary` → win-rate + portfolio return.
+- Never fabricate company names/descriptions in the final build — pull from the real backend field or an explicitly-public fallback table; if data is missing, show a plain "ไม่มีข้อมูล" state, not an invented one.
+
+---
+
+### 7. Preview Deliverable
+Generate the complete React + Tailwind layout code with functional mock data, fully switchable between the true Mobile experience and the Dense Desktop dashboard via the `viewMode` toggle described above (preview-only, see the architectural rule at the top for why this must not ship to production as-is).

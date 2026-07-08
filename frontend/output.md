@@ -1,8 +1,22 @@
-============================= test session starts =============================
-platform win32 -- Python 3.14.6, pytest-9.1.1, pluggy-1.6.0 -- D:\AI_Project\Dashboard_Share\.venv\Scripts\python.exe
-cachedir: .pytest_cache
-rootdir: D:\AI_Project\Dashboard_Share\frontend
-plugins: anyio-3.7.1, timeout-2.4.0
-collecting ... collected 0 items
+On branch main
+Your branch is up to date with 'origin/main'.
 
-============================ no tests ran in 0.05s ============================
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   ../1_Reports/Pending.md
+	modified:   ../3_CowContext/Blueprint.md
+	modified:   ../agents.py
+	modified:   src/App.jsx
+	modified:   ../main.py
+	modified:   ../models.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	../3_CowContext/Handoff.md
+	../3_CowContext/UI_Preview_v1.html
+	../3_CowContext/UI_Redesign_Prompt_v2.txt
+	../3_CowContext/UI_Redesign_Prompt_v3.txt
+	../3_CowContext/UI_Spec.md
+
+no changes added to commit (use "git add" and/or "git commit -a")
