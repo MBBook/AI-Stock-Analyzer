@@ -137,14 +137,48 @@ async def _auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+# ✅ เพิ่ม 2026-07-09 (รอบ 2): rate limit หน้า login — MBBook ขอ PIN 6 หลักแบบแอปธนาคาร
+# PIN สั้น brute-force ง่าย (แค่ 1 ล้านแบบ) → ชดเชยด้วย lockout เหมือนแอปธนาคารจริง:
+# ผิดเกิน LOGIN_MAX_FAILS ครั้งต่อ IP → ล็อก LOGIN_LOCK_MINUTES นาที (เก็บ in-memory พอ —
+# Render มี instance เดียว และรีสตาร์ทแล้ว reset ก็ไม่เป็นไร)
+_login_attempts = {}  # ip -> {"fails": int, "lock_until": datetime|None}
+LOGIN_MAX_FAILS = 5
+LOGIN_LOCK_MINUTES = 5
+
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for")  # Render อยู่หลัง proxy — IP จริงอยู่ header นี้
+    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "unknown")
+
+
 @app.post("/auth/login")
-async def auth_login(payload: dict = Body(...)):
+async def auth_login(request: Request, payload: dict = Body(...)):
     """แลก password → token สำหรับ X-Auth-Token — ถ้า auth ปิด (ไม่ตั้ง env) บอก frontend ตรงๆ"""
     password = os.getenv("DASHBOARD_PASSWORD")
     if not password:
         return {"token": None, "auth_disabled": True}
+
+    if len(_login_attempts) > 1000:
+        _login_attempts.clear()  # กัน dict โตไม่จำกัดถ้าโดน spray จากหลาย IP — reset ง่ายๆ พอ
+
+    ip = _client_ip(request)
+    now = datetime.utcnow()
+    rec = _login_attempts.get(ip)
+    if rec and rec.get("lock_until") and now < rec["lock_until"]:
+        wait_min = int((rec["lock_until"] - now).total_seconds() // 60) + 1
+        return _JSONResponse(status_code=429,
+                             content={"detail": f"ผิดหลายครั้งเกินไป ลองใหม่ใน {wait_min} นาที"},
+                             headers={"Access-Control-Allow-Origin": "*"})
+
     if _hmac.compare_digest(str(payload.get("password", "")), password):
+        _login_attempts.pop(ip, None)  # เข้าถูก → ล้างประวัติผิดของ IP นี้
         return {"token": _dash_token(password)}
+
+    rec = _login_attempts.setdefault(ip, {"fails": 0, "lock_until": None})
+    rec["fails"] += 1
+    if rec["fails"] >= LOGIN_MAX_FAILS:
+        rec["lock_until"] = now + timedelta(minutes=LOGIN_LOCK_MINUTES)
+        rec["fails"] = 0
     return _JSONResponse(status_code=401, content={"detail": "รหัสผ่านไม่ถูกต้อง"},
                          headers={"Access-Control-Allow-Origin": "*"})
 

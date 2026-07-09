@@ -613,3 +613,51 @@ class TestDashboardAuth(unittest.TestCase):
         with patch.dict(os.environ, {"DASHBOARD_PASSWORD": self.PW}):
             resp = self.client.get("/workflow/status")
             self.assertEqual(resp.headers.get("access-control-allow-origin"), "*")
+
+class TestLoginRateLimit(unittest.TestCase):
+    """Lockout หน้า login (เพิ่ม 2026-07-09 รอบ 2 — รองรับ PIN 6 หลัก):
+    ผิดครบ LOGIN_MAX_FAILS ครั้ง → 429 ล็อก LOGIN_LOCK_MINUTES นาที แม้ใส่รหัสถูกก็ต้องรอ"""
+
+    PW = "482913"
+
+    def setUp(self):
+        _reset_job()
+        app_module._login_attempts.clear()
+        self.client = TestClient(app_module.app)
+
+    def test_lockout_after_max_fails(self):
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": self.PW}):
+            for _ in range(app_module.LOGIN_MAX_FAILS):
+                resp = self.client.post("/auth/login", json={"password": "000000"})
+                self.assertEqual(resp.status_code, 401)
+            resp = self.client.post("/auth/login", json={"password": "000000"})
+            self.assertEqual(resp.status_code, 429)
+
+    def test_locked_even_with_correct_password(self):
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": self.PW}):
+            for _ in range(app_module.LOGIN_MAX_FAILS):
+                self.client.post("/auth/login", json={"password": "000000"})
+            resp = self.client.post("/auth/login", json={"password": self.PW})
+            self.assertEqual(resp.status_code, 429)  # ล็อกคือล็อก — เหมือนแอปธนาคาร
+
+    def test_success_resets_fail_count(self):
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": self.PW}):
+            for _ in range(app_module.LOGIN_MAX_FAILS - 1):
+                self.client.post("/auth/login", json={"password": "000000"})
+            resp = self.client.post("/auth/login", json={"password": self.PW})
+            self.assertEqual(resp.status_code, 200)  # ยังไม่ครบ 5 → เข้าได้
+            # หลังเข้าถูก ประวัติผิดถูกล้าง — ผิดอีก 1 ครั้งต้องยังเป็น 401 ไม่ใช่ 429
+            resp = self.client.post("/auth/login", json={"password": "000000"})
+            self.assertEqual(resp.status_code, 401)
+
+    def test_lock_expires_after_window(self):
+        from datetime import datetime as _dt, timedelta as _td
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": self.PW}):
+            for _ in range(app_module.LOGIN_MAX_FAILS):
+                self.client.post("/auth/login", json={"password": "000000"})
+            # ย้อน lock_until ให้หมดอายุแล้ว → ต้องเข้าได้ปกติ
+            for rec in app_module._login_attempts.values():
+                rec["lock_until"] = _dt.utcnow() - _td(seconds=1)
+            resp = self.client.post("/auth/login", json={"password": self.PW})
+            self.assertEqual(resp.status_code, 200)
+

@@ -1960,14 +1960,16 @@ export default function DashboardV4() {
   // ===== ✅ เพิ่ม 2026-07-09: หน้า Login (ระบบ password) =====
   // helper ธรรมดา เรียกเป็น LoginView() ตามกติกา (ห้าม <LoginView/>) — ไม่มี hook ข้างใน
   // จอเดียวใช้ร่วม Desktop/Mobile ได้ (การ์ดเล็กกลางจอ — ข้อยกเว้นแบบเดียวกับ System tab)
-  const submitLogin = async () => {
-    if (!loginPassword || loginState.busy) return;
+  const submitLogin = async (pinOverride) => {
+    // pinOverride: ส่งค่า PIN ตรงๆ ตอน auto-submit (state ยังไม่ทัน update ใน tick เดียวกัน)
+    const pin = typeof pinOverride === 'string' ? pinOverride : loginPassword;
+    if (!pin || loginState.busy) return;
     setLoginState({ busy: true, error: null });
     try {
       const res = await fetch(`${API_URL}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: loginPassword }),
+        body: JSON.stringify({ password: pin }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && (data.token || data.auth_disabled)) {
@@ -1988,13 +1990,19 @@ export default function DashboardV4() {
       <style>{GLOBAL_CSS}</style>
       <div style={{ ...styles.card, width: 340, maxWidth: '88vw', padding: SP.xl, textAlign: 'center' }}>
         <h1 style={{ fontSize: 20, fontWeight: 700, color: COLORS.text, margin: 0, marginBottom: SP.xs }}>AI Stock Analyzer</h1>
-        <div style={{ color: COLORS.muted, fontSize: 13, marginBottom: SP.lg }}>ใส่รหัสผ่านเพื่อเข้าใช้งาน</div>
+        <div style={{ color: COLORS.muted, fontSize: 13, marginBottom: SP.lg }}>ใส่รหัส PIN 6 หลัก</div>
         <input
           type="password" value={loginPassword} autoFocus
-          onChange={(e) => { setLoginPassword(e.target.value); if (loginState.error) setLoginState({ busy: false, error: null }); }}
+          inputMode="numeric" pattern="[0-9]*" maxLength={6}
+          onChange={(e) => {
+            const v = e.target.value.replace(/\D/g, '').slice(0, 6); // ตัวเลขล้วน สูงสุด 6 หลัก
+            setLoginPassword(v);
+            if (loginState.error) setLoginState({ busy: false, error: null });
+            if (v.length === 6) submitLogin(v); // ครบ 6 หลัก → เข้าอัตโนมัติแบบแอปธนาคาร
+          }}
           onKeyDown={(e) => { if (e.key === 'Enter') submitLogin(); }}
-          placeholder="รหัสผ่าน" aria-label="รหัสผ่าน"
-          style={{ ...styles.input, width: '100%', boxSizing: 'border-box', textAlign: 'center', marginBottom: SP.sm }}
+          placeholder="••••••" aria-label="รหัส PIN 6 หลัก"
+          style={{ ...styles.input, width: '100%', boxSizing: 'border-box', textAlign: 'center', marginBottom: SP.sm, fontSize: 26, letterSpacing: 12, fontVariantNumeric: 'tabular-nums' }}
         />
         {loginState.error && (
           <div style={{ color: COLORS.red, fontSize: 12.5, marginBottom: SP.sm }}>{loginState.error}</div>
