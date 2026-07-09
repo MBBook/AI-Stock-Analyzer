@@ -121,6 +121,11 @@
 
 ## 🔴 รายการที่ยังค้างจริง (ไม่ใช่ประวัติ — ต้องติดตามต่อ)
 
+000. **costSummary/reportList: fetch แล้วไม่ได้แสดงผล** (เจอ 2026-07-09 ตอน Vercel build fail จาก
+     no-unused-vars) — `App.jsx` ยิง `/costs/summary` + `/workflow/reports` ทุกครั้งที่โหลด แต่ค่าไม่ถูก
+     อ่านไปแสดงที่ไหนเลย (เศษจากรอบรื้อ UI 07-08 — เดิม System tab เคยใช้) → ตัดสินใจ: เอากลับมาโชว์
+     หรือลบ fetch ทิ้ง (ลด request ฟรีๆ 2 ตัว/โหลด) — ตอนนี้ silence warning ไว้ด้วย `const [, setX]`
+
 00. **ล้าง + ใส่ tickers/portfolio ชุดจริง (2026-07-09 ~00:50 — รอ MBBook รันสคริปต์)** —
     MBBook ส่งสลิป Dime ครบแล้ว: **หุ้นถือจริง 13 ตัว** (GOOGL/NVDA/ASML/TSM/AMZN/BRK.B/WDC/
     NOW/VRT/NBIS/SNDK/CCJ/OKLO — ต้นทุนรวม ~$1,768, มูลค่า $1,973.46, +11.62%) + **watchlist

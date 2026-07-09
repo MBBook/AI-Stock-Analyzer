@@ -44,13 +44,15 @@ export default function DashboardV4() {
   const [tradeParsing, setTradeParsing] = useState(false);
   const [tradeParseMessage, setTradeParseMessage] = useState(null);
   const [addingTicker, setAddingTicker] = useState(false);
-  const [loading, setLoading] = useState(false);
   const [portfolioData, setPortfolioData] = useState(null);
   const [historyData, setHistoryData] = useState(null);
   const [portfolioHistory, setPortfolioHistory] = useState(null);
   const [nikSuggestions, setNikSuggestions] = useState(null);
-  const [costSummary, setCostSummary] = useState(null);
-  const [reportList, setReportList] = useState(null);
+  // ✅ 2026-07-09: ตัด costSummary/reportList/loading ฝั่งอ่านออก (ESLint no-unused-vars ทำ
+  // Vercel build fail) — setter ยังถูกเรียกใน fetch อยู่ = ดึงข้อมูลมาแล้วไม่ได้แสดง เป็นเศษจาก
+  // รอบรื้อ UI 07-08 — จดใน Pending แล้ว (พิจารณาลบ fetch ทิ้งหรือเอาข้อมูลกลับมาโชว์)
+  const [, setCostSummary] = useState(null);
+  const [, setReportList] = useState(null);
   const [roiSummary, setRoiSummary] = useState(null);
 
   // Portfolio chart controls
