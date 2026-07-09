@@ -137,4 +137,9 @@ git push | Tee-Object -FilePath output.md
 ## ⛔ รายการห้ามทำเด็ดขาด
 
 1. **ห้ามแก้โค้ดที่ Fable เขียน** (agents.py PEG block + tests) — ถ้า test fail ให้รายงาน ไม่ใช่แก้
-2. **ห้ามแตะ App.jsx / component extrac
+2. **ห้ามแตะ App.jsx / component extraction** — MBBook สั่งพักไว้
+3. ห้ามแก้ budget limits, จำนวน tickers, config cron-job.org, GitHub Actions
+4. ห้าม refactor อะไรนอกแผน — จดใส่ `Pending.md` รายงาน MBBook แทน
+5. ห้าม push ก่อน pytest ผ่านครบ 158 ที่เครื่อง MBBook
+6. ห้าม `git add .`
+7. ห้ามเปลี่ยนค่า `PEG_REFRESH_UTC_HOUR` / `PEG_DAILY_CAP` / `PEG_STALE_HOURS` — ค่าพวกนี้ผูกกับ quota จริงของ Alpha Vantage (25 req/day) และ schedule cron-job.org
