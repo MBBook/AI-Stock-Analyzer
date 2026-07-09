@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 // ✅ 2026-07-08: ย้ายค่าคงที่ (COLORS/SP/MOCK_NEWS/COMPANY_NAMES/GLOBAL_CSS/API_URL) ไป constants.js
 // แยกแล้ว (ลดขนาดไฟล์นี้ — ไม่กระทบ logic ใดๆ ค่าเดิมทุกตัว แค่ import แทนการประกาศตรงนี้)
-import { API_URL, COLORS, SP, MAX_TICKERS, MOCK_NEWS, COMPANY_NAMES, GLOBAL_CSS } from './constants';
+import { API_URL, COLORS, SP, MAX_TICKERS, MOCK_NEWS, COMPANY_NAMES, GLOBAL_CSS, authFetch, AUTH_TOKEN_KEY } from './constants';
 
 // ✅ REBUILD 2026-07-05 (รอบ 2): เขียนใหม่ทั้งไฟล์ตาม 3_CowContext/UI_Spec.md ที่ MBBook confirm
 // ทีละจุดผ่านรูปจริง (ไม่ใช่แค่สรุปจากความจำแล้ว) — รอบแรกที่ทำไปพลาดหลายจุด (ไม่มีกราฟ, THB
@@ -24,6 +24,11 @@ import { API_URL, COLORS, SP, MAX_TICKERS, MOCK_NEWS, COMPANY_NAMES, GLOBAL_CSS 
 // key-remount + CSS keyframe แทน (ไม่ต้องใช้ hook เลยเลี่ยงปัญหานี้ได้)
 
 export default function DashboardV4() {
+  // ✅ เพิ่ม 2026-07-09: ระบบ password — token อยู่ localStorage, ไม่มี token = เห็นแค่หน้า login
+  // (state ทั้ง 3 ตัวอยู่ top-level เสมอตามกฎ Rules of Hooks — ห้ามย้ายเข้า helper)
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem(AUTH_TOKEN_KEY) || '');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginState, setLoginState] = useState({ busy: false, error: null });
   const [activeTab, setActiveTab] = useState('portfolio');
   const [stocks, setStocks] = useState([]);
   const [newTicker, setNewTicker] = useState('');
@@ -291,7 +296,7 @@ export default function DashboardV4() {
 
   const fetchStocks = async () => {
     try {
-      const response = await fetch(`${API_URL}/stocks`);
+      const response = await authFetch(`${API_URL}/stocks`);
       const data = await response.json();
       setStocks(data.stocks || []);
     } catch (error) {
@@ -301,7 +306,7 @@ export default function DashboardV4() {
 
   const fetchPortfolio = async () => {
     try {
-      const response = await fetch(`${API_URL}/portfolio`);
+      const response = await authFetch(`${API_URL}/portfolio`);
       const data = await response.json();
       setPortfolioData(data);
     } catch (error) {
@@ -311,7 +316,7 @@ export default function DashboardV4() {
 
   const fetchHistory = async () => {
     try {
-      const response = await fetch(`${API_URL}/workflow/history?limit=30`);
+      const response = await authFetch(`${API_URL}/workflow/history?limit=30`);
       const data = await response.json();
       setHistoryData(data);
     } catch (error) {
@@ -323,7 +328,7 @@ export default function DashboardV4() {
   // client ตาม periodMode เพื่อสลับมุมมองได้ทันทีไม่ต้องยิง API ใหม่ — ดู getChartPoints)
   const fetchPortfolioHistory = async () => {
     try {
-      const response = await fetch(`${API_URL}/roi/portfolio-history`);
+      const response = await authFetch(`${API_URL}/roi/portfolio-history`);
       const data = await response.json();
       if (!data.error) setPortfolioHistory(data);
     } catch (error) {
@@ -333,7 +338,7 @@ export default function DashboardV4() {
 
   const fetchNikSuggestions = async () => {
     try {
-      const response = await fetch(`${API_URL}/nik/suggestions`);
+      const response = await authFetch(`${API_URL}/nik/suggestions`);
       const data = await response.json();
       setNikSuggestions(data);
     } catch (error) {
@@ -343,7 +348,7 @@ export default function DashboardV4() {
 
   const fetchCostSummary = async () => {
     try {
-      const response = await fetch(`${API_URL}/costs/summary`);
+      const response = await authFetch(`${API_URL}/costs/summary`);
       const data = await response.json();
       setCostSummary(data);
     } catch (error) {
@@ -353,7 +358,7 @@ export default function DashboardV4() {
 
   const fetchReports = async () => {
     try {
-      const response = await fetch(`${API_URL}/workflow/reports?limit=7`);
+      const response = await authFetch(`${API_URL}/workflow/reports?limit=7`);
       const data = await response.json();
       setReportList(data);
     } catch (error) {
@@ -365,7 +370,7 @@ export default function DashboardV4() {
   // rebuild System tab ที่แล้วลืมต่อเข้า UI เลย — MBBook ทักว่า "ไม่มี win rate @14/@30 Day"
   const fetchRoiSummary = async () => {
     try {
-      const response = await fetch(`${API_URL}/roi/summary`);
+      const response = await authFetch(`${API_URL}/roi/summary`);
       const data = await response.json();
       setRoiSummary(data);
     } catch (error) {
@@ -382,7 +387,7 @@ export default function DashboardV4() {
     }
     setAddingTicker(true);
     try {
-      const response = await fetch(`${API_URL}/stocks?ticker=${newTicker.toUpperCase()}`, { method: 'POST' });
+      const response = await authFetch(`${API_URL}/stocks?ticker=${newTicker.toUpperCase()}`, { method: 'POST' });
       const data = await response.json();
       if (data.status === 'added' || data.status === 'exists') {
         setNewTicker('');
@@ -398,7 +403,7 @@ export default function DashboardV4() {
 
   const handleRemoveStock = async (ticker) => {
     try {
-      await fetch(`${API_URL}/stocks/${ticker}`, { method: 'DELETE' });
+      await authFetch(`${API_URL}/stocks/${ticker}`, { method: 'DELETE' });
       fetchStocks();
       closePopup();
       showToast(`ลบ ${ticker} ออกจากรายการแล้ว`);
@@ -425,7 +430,7 @@ export default function DashboardV4() {
     try {
       const formData = new FormData();
       formData.append('file', tradeImageFile);
-      const response = await fetch(`${API_URL}/trade-parse-image`, { method: 'POST', body: formData });
+      const response = await authFetch(`${API_URL}/trade-parse-image`, { method: 'POST', body: formData });
       const data = await response.json();
       if (data.status === 'parsed') {
         setTradeTicker(data.ticker || '');
@@ -465,7 +470,7 @@ export default function DashboardV4() {
     setTradeMessage(null);
     try {
       const params = new URLSearchParams({ ticker, action: tradeAction, shares: String(shares), price: String(price) });
-      const response = await fetch(`${API_URL}/trade-update?${params}`, { method: 'POST' });
+      const response = await authFetch(`${API_URL}/trade-update?${params}`, { method: 'POST' });
       const data = await response.json();
       if (data.status === 'recorded') {
         fetchPortfolio();
@@ -1951,6 +1956,58 @@ export default function DashboardV4() {
       })}
     </div>
   );
+
+  // ===== ✅ เพิ่ม 2026-07-09: หน้า Login (ระบบ password) =====
+  // helper ธรรมดา เรียกเป็น LoginView() ตามกติกา (ห้าม <LoginView/>) — ไม่มี hook ข้างใน
+  // จอเดียวใช้ร่วม Desktop/Mobile ได้ (การ์ดเล็กกลางจอ — ข้อยกเว้นแบบเดียวกับ System tab)
+  const submitLogin = async () => {
+    if (!loginPassword || loginState.busy) return;
+    setLoginState({ busy: true, error: null });
+    try {
+      const res = await fetch(`${API_URL}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: loginPassword }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && (data.token || data.auth_disabled)) {
+        const token = data.token || 'auth-disabled';
+        localStorage.setItem(AUTH_TOKEN_KEY, token);
+        setAuthToken(token);
+        window.location.reload(); // โหลดข้อมูลใหม่ทั้งหมดด้วย token (effects รอบแรกยิงไปก่อน login แล้ว)
+      } else {
+        setLoginState({ busy: false, error: data.detail || 'รหัสผ่านไม่ถูกต้อง' });
+      }
+    } catch (e) {
+      setLoginState({ busy: false, error: 'เชื่อมต่อ server ไม่ได้ ลองใหม่อีกครั้ง' });
+    }
+  };
+
+  const LoginView = () => (
+    <div style={{ ...styles.pageBg, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
+      <style>{GLOBAL_CSS}</style>
+      <div style={{ ...styles.card, width: 340, maxWidth: '88vw', padding: SP.xl, textAlign: 'center' }}>
+        <h1 style={{ fontSize: 20, fontWeight: 700, color: COLORS.text, margin: 0, marginBottom: SP.xs }}>AI Stock Analyzer</h1>
+        <div style={{ color: COLORS.muted, fontSize: 13, marginBottom: SP.lg }}>ใส่รหัสผ่านเพื่อเข้าใช้งาน</div>
+        <input
+          type="password" value={loginPassword} autoFocus
+          onChange={(e) => { setLoginPassword(e.target.value); if (loginState.error) setLoginState({ busy: false, error: null }); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') submitLogin(); }}
+          placeholder="รหัสผ่าน" aria-label="รหัสผ่าน"
+          style={{ ...styles.input, width: '100%', boxSizing: 'border-box', textAlign: 'center', marginBottom: SP.sm }}
+        />
+        {loginState.error && (
+          <div style={{ color: COLORS.red, fontSize: 12.5, marginBottom: SP.sm }}>{loginState.error}</div>
+        )}
+        <button className="press-btn" onClick={submitLogin} disabled={loginState.busy}
+          style={{ width: '100%', padding: '12px 0', borderRadius: 12, border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 15, color: '#1a1305', background: COLORS.goldGradient || 'linear-gradient(180deg,#F7CE85,#EF9F27)', opacity: loginState.busy ? 0.6 : 1 }}>
+          {loginState.busy ? 'กำลังตรวจสอบ...' : 'เข้าสู่ระบบ'}
+        </button>
+      </div>
+    </div>
+  );
+
+  if (!authToken) return LoginView();
 
   return (
     <div style={styles.pageBg}>

@@ -97,6 +97,57 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ===== DASHBOARD AUTH (✅ เพิ่ม 2026-07-09 — MBBook ขอ password ก่อน deploy frontend สาธารณะ) =====
+# หลักการ: single-user shared secret — ตั้ง DASHBOARD_PASSWORD ใน env (Render + .env local)
+# - ถ้า "ไม่ตั้ง" env นี้ → auth ปิดทั้งระบบ (backward compatible: local dev/test เดิมไม่พัง)
+# - Frontend login ผ่าน POST /auth/login → ได้ token (sha256 ของรหัส ไม่เก็บรหัสตรงๆ ใน browser)
+#   → แนบ header X-Auth-Token ทุก request
+# - PUBLIC_ROUTES = endpoint ที่ cron-job.org/keepalive ใช้ ต้องเปิดไว้ (ไม่งั้นต้องแก้ cron 6 ตัว)
+#   หมายเหตุ: POST /workflow เปิดอยู่ → คนนอกยิง trigger ได้ แต่มี DAILY_BUDGET guard คุมเพดานเงินอยู่แล้ว
+#   และไม่มีข้อมูลพอร์ตรั่ว — ยอมรับได้ใน Phase 1 (จดไว้ใน Pending ถ้าจะตึงขึ้นภายหลัง)
+import hashlib
+import hmac as _hmac
+from fastapi.responses import JSONResponse as _JSONResponse
+from fastapi import Body, Request
+
+PUBLIC_ROUTES = {
+    ("GET", "/"), ("GET", "/health"),
+    ("POST", "/auth/login"),
+    ("POST", "/prefetch"),
+    ("POST", "/workflow"), ("POST", "/workflow/resume"),
+    ("GET", "/docs"), ("GET", "/openapi.json"),
+}
+
+
+def _dash_token(password: str) -> str:
+    return hashlib.sha256(f"dash:{password}".encode()).hexdigest()
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    password = os.getenv("DASHBOARD_PASSWORD")
+    if password and request.method != "OPTIONS" \
+            and (request.method, request.url.path) not in PUBLIC_ROUTES:
+        token = request.headers.get("x-auth-token", "")
+        if not _hmac.compare_digest(token, _dash_token(password)):
+            # ใส่ CORS header เองเพราะ middleware นี้อยู่นอก CORSMiddleware —
+            # ไม่งั้น browser อ่านสถานะ 401 ไม่ได้ (กลายเป็น network error เฉยๆ)
+            return _JSONResponse(status_code=401, content={"detail": "unauthorized"},
+                                 headers={"Access-Control-Allow-Origin": "*"})
+    return await call_next(request)
+
+
+@app.post("/auth/login")
+async def auth_login(payload: dict = Body(...)):
+    """แลก password → token สำหรับ X-Auth-Token — ถ้า auth ปิด (ไม่ตั้ง env) บอก frontend ตรงๆ"""
+    password = os.getenv("DASHBOARD_PASSWORD")
+    if not password:
+        return {"token": None, "auth_disabled": True}
+    if _hmac.compare_digest(str(payload.get("password", "")), password):
+        return {"token": _dash_token(password)}
+    return _JSONResponse(status_code=401, content={"detail": "รหัสผ่านไม่ถูกต้อง"},
+                         headers={"Access-Control-Allow-Origin": "*"})
+
 # สร้าง tables
 Base.metadata.create_all(bind=engine)
 

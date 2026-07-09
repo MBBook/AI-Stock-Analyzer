@@ -538,3 +538,78 @@ class TestNikSuggestionsEndpoint(unittest.TestCase):
 
         self.client.get("/nik/suggestions")
         db.query.return_value.order_by.return_value.limit.assert_called_with(10)
+
+# ============================================================
+# SECTION: Dashboard Auth (ระบบ password — เพิ่ม 2026-07-09)
+# ============================================================
+import hashlib as _hashlib
+
+
+class TestDashboardAuth(unittest.TestCase):
+    """DASHBOARD_PASSWORD auth — middleware + /auth/login
+    หลัก: ไม่ตั้ง env = auth ปิด (backward compat) / ตั้งแล้ว endpoint ข้อมูลต้องมี X-Auth-Token
+    ส่วน endpoint ที่ cron-job.org ใช้ (/health, /workflow, /workflow/resume, /prefetch) เปิดเสมอ"""
+
+    PW = "test-secret-123"
+    TOKEN = _hashlib.sha256(f"dash:test-secret-123".encode()).hexdigest()
+
+    def setUp(self):
+        _reset_job()
+        self.client = TestClient(app_module.app)
+
+    # --- auth ปิด (ไม่ตั้ง env) ---
+    def test_no_env_auth_disabled_protected_route_open(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DASHBOARD_PASSWORD", None)
+            resp = self.client.get("/workflow/status")
+            self.assertEqual(resp.status_code, 200)
+
+    def test_no_env_login_returns_auth_disabled_flag(self):
+        os.environ.pop("DASHBOARD_PASSWORD", None)
+        resp = self.client.post("/auth/login", json={"password": "anything"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json().get("auth_disabled"))
+
+    # --- auth เปิด ---
+    def test_protected_route_without_token_401(self):
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": self.PW}):
+            resp = self.client.get("/workflow/status")
+            self.assertEqual(resp.status_code, 401)
+
+    def test_protected_route_wrong_token_401(self):
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": self.PW}):
+            resp = self.client.get("/workflow/status", headers={"X-Auth-Token": "wrong"})
+            self.assertEqual(resp.status_code, 401)
+
+    def test_protected_route_with_token_200(self):
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": self.PW}):
+            resp = self.client.get("/workflow/status", headers={"X-Auth-Token": self.TOKEN})
+            self.assertEqual(resp.status_code, 200)
+
+    def test_login_correct_password_returns_token(self):
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": self.PW}):
+            resp = self.client.post("/auth/login", json={"password": self.PW})
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.json()["token"], self.TOKEN)
+
+    def test_login_wrong_password_401(self):
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": self.PW}):
+            resp = self.client.post("/auth/login", json={"password": "guess"})
+            self.assertEqual(resp.status_code, 401)
+
+    def test_health_stays_public_when_auth_on(self):
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": self.PW}):
+            resp = self.client.get("/health")
+            self.assertEqual(resp.status_code, 200)
+
+    def test_options_preflight_not_blocked(self):
+        """OPTIONS (CORS preflight) ต้องไม่โดน 401 — ไม่งั้น browser ยิงอะไรไม่ได้เลย"""
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": self.PW}):
+            resp = self.client.options("/stocks")
+            self.assertNotEqual(resp.status_code, 401)
+
+    def test_401_response_has_cors_header(self):
+        """401 จาก middleware อยู่นอก CORSMiddleware — ต้องใส่ ACAO เองให้ browser อ่าน status ได้"""
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": self.PW}):
+            resp = self.client.get("/workflow/status")
+            self.assertEqual(resp.headers.get("access-control-allow-origin"), "*")

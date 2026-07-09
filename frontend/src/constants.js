@@ -4,6 +4,15 @@
 
 export const API_URL = 'https://ai-stock-analyzer-msli.onrender.com';
 
+// ✅ เพิ่ม 2026-07-09: fetch ที่แนบ X-Auth-Token อัตโนมัติ (ระบบ password ของ dashboard)
+// token ได้จาก POST /auth/login เก็บใน localStorage — ฝั่ง backend ถ้าไม่ตั้ง DASHBOARD_PASSWORD
+// ใน env = auth ปิดอยู่ (header ส่วนเกินนี้ไม่มีผลอะไร ใช้ local dev ได้ปกติ)
+export const AUTH_TOKEN_KEY = 'dash_auth_token';
+export const authFetch = (url, opts = {}) => fetch(url, {
+  ...opts,
+  headers: { ...(opts.headers || {}), 'X-Auth-Token': localStorage.getItem(AUTH_TOKEN_KEY) || '' },
+});
+
 export const COLORS = {
   bgGradient: 'linear-gradient(160deg, #0B1130 0%, #050714 100%)',
   cardBg: 'rgba(148,163,184,0.08)',
