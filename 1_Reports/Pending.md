@@ -111,6 +111,10 @@
   git HEAD + re-apply edits ผ่าน bash (pattern เดิมจาก agents.py เมื่อคืน ใช้ได้ผลอีกครั้ง)
 - **รอ MBBook**: (1) `git push` (2) ตั้ง `DASHBOARD_PASSWORD` ใน Render → Environment (redeploy อัตโนมัติ)
   + ใส่ใน `.env` local ด้วย (3) รัน seed script ถ้ายังไม่ได้รัน (4) Vercel deploy เมื่อพร้อม
+- **รอบ 2 (~02:00)**: เปลี่ยนเป็น **PIN 6 หลัก** ตาม MBBook ขอ (numeric keypad บนมือถือ, auto-submit
+  เมื่อครบ 6 หลัก) + **lockout ฝั่ง server**: ผิด 5 ครั้ง/IP → ล็อก 5 นาที (ชดเชย PIN สั้น brute-force ง่าย)
+  — **172 tests passed**, commit `efb3da9` — ⚠️ MBBook ต้องตั้ง `DASHBOARD_PASSWORD` เป็น**ตัวเลข 6 หลัก**
+  (ใน Render + .env) ไม่งั้นหน้า PIN พิมพ์รหัสแบบอื่นไม่ได้
 - งานต่อยอด (ยังไม่ทำ): auto-logout เมื่อเจอ 401 กลางทาง / ปุ่ม logout / จำกัด POST /workflow
 
 ---
