@@ -13,23 +13,33 @@ export const authFetch = (url, opts = {}) => fetch(url, {
   headers: { ...(opts.headers || {}), 'X-Auth-Token': localStorage.getItem(AUTH_TOKEN_KEY) || '' },
 });
 
+// ✅ 2026-07-09: Reskin Phase 1 — เปลี่ยน design tokens ทั้งชุดให้ตรง UI_Preview_v1.html
+// (mockup ที่ MBBook confirm) — เดิมพอร์ตแค่ layout เมื่อ 07-08 แต่สี/กระจก/ฟอนต์ยังเป็นธีมเก่า
+// ค่าทุกตัว copy ตรงจาก :root ของ mockup — แก้ที่นี่ที่เดียว ไหลไปทุก component ที่ import COLORS
 export const COLORS = {
-  bgGradient: 'linear-gradient(160deg, #0B1130 0%, #050714 100%)',
-  cardBg: 'rgba(148,163,184,0.08)',
-  cardBgHover: 'rgba(148,163,184,0.13)',
-  cardBorder: 'rgba(148,163,184,0.14)',
-  text: '#E7ECF5',
-  muted: '#94A3B8',
-  faint: '#5B6478',
-  purple: '#A855F7',
-  purpleSoft: 'rgba(168,85,247,0.16)',
-  gold: '#F5C46B',
-  goldDark: '#EF9F27',
-  goldLight: '#F7CE85',
-  green: '#97C459',
-  greenSoft: 'rgba(151,196,89,0.16)',
-  red: '#E24B4A',
-  redSoft: 'rgba(226,75,74,0.16)',
+  bgGradient: `radial-gradient(ellipse 900px 500px at 10% -10%, rgba(139,123,247,0.14), transparent 60%),
+      radial-gradient(ellipse 700px 500px at 100% 0%, rgba(79,195,255,0.08), transparent 55%),
+      #0a0e17`,
+  cardBg: 'rgba(255,255,255,0.045)',        // --glass
+  cardBgHover: 'rgba(255,255,255,0.075)',   // --glass-strong
+  cardBorder: 'rgba(255,255,255,0.09)',     // --border
+  cardBorderStrong: 'rgba(255,255,255,0.18)', // --border-strong
+  text: '#f2f4fa',
+  muted: 'rgba(242,244,250,0.62)',          // --text-2
+  faint: 'rgba(242,244,250,0.38)',          // --text-3
+  purple: '#8b7bf7',
+  purple2: '#6a5cf0',                        // ปลาย gradient ม่วง
+  purpleSoft: 'rgba(139,123,247,0.18)',
+  purpleGradient: 'linear-gradient(135deg, #8b7bf7, #6a5cf0)',
+  blue: '#4fc3ff',
+  gold: '#f7ce85',
+  goldDark: '#ef9f27',
+  goldLight: '#f7ce85',
+  goldGradient: 'linear-gradient(135deg, #f7ce85, #ef9f27)',
+  green: '#33d692',
+  greenSoft: 'rgba(51,214,146,0.16)',
+  red: '#ff6570',
+  redSoft: 'rgba(255,101,112,0.16)',
 };
 
 export const SP = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 };
@@ -68,7 +78,10 @@ export const COMPANY_NAMES = {
 };
 
 export const GLOBAL_CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Noto+Sans+Thai:wght@400;600;700;800&display=swap');
   * { box-sizing: border-box; }
+  body { font-family: 'Inter','Noto Sans Thai',-apple-system,BlinkMacSystemFont,sans-serif; -webkit-font-smoothing: antialiased; }
+  .num { font-variant-numeric: tabular-nums; }
   button { font-family: inherit; }
   .clay-btn {
     transition: transform 0.15s ease, box-shadow 0.15s ease;
@@ -79,12 +92,12 @@ export const GLOBAL_CSS = `
   .press-btn { transition: transform 0.12s ease; }
   .press-btn:active { transform: scale(0.94); }
   .nav-btn { transition: transform 0.15s ease, background-color 0.15s ease; }
-  .nav-btn:hover:not(.nav-btn-active) { transform: translateY(-2px); background-color: rgba(168,85,247,0.12); }
+  .nav-btn:hover:not(.nav-btn-active) { transform: translateY(-2px); background-color: rgba(139,123,247,0.12); }
   .glass-row { transition: transform 0.15s ease, background-color 0.15s ease; cursor: pointer; }
   .glass-row:hover { transform: translateY(-1px); background-color: ${COLORS.cardBgHover}; }
   .glass-row:active { transform: scale(0.98); }
   .icon-btn { transition: transform 0.15s ease, background-color 0.15s ease; }
-  .icon-btn:hover { background-color: rgba(168,85,247,0.14); }
+  .icon-btn:hover { background-color: rgba(139,123,247,0.14); }
   .icon-btn:active { transform: scale(0.9); }
   .modal-backdrop { transition: opacity 0.28s ease; }
   .pill-btn { transition: transform 0.12s ease; }
