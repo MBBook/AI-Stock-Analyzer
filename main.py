@@ -666,6 +666,64 @@ async def remove_stock(ticker: str, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "deleted", "ticker": ticker}
 
+# News (✅ เพิ่ม 2026-07-11 — ปิดงานค้าง #51): ส่งข่าวจริงจาก news_cache ให้หน้า News
+@app.get("/news")
+async def get_news(limit: int = 60, db: Session = Depends(get_db)):
+    """ข่าวจริงที่นัตตี้ prefetch ลง news_cache รายชั่วโมงอยู่แล้ว — เดิมหน้า News โชว์ MOCK_NEWS
+    (4 template วนซ้ำ) มาตลอดเพราะไม่เคยมี endpoint ส่งข่าวออก MBBook เลยเห็นข่าวเดิมทุกวัน
+    ทั้งที่ข่าวจริงอยู่ใน DB ครบ
+
+    - อ่านแถวล่าสุดต่อ ticker (pattern เดียวกับ agents._load_news_cache แต่ไม่จำกัดอายุ —
+      news_cache เก็บย้อนหลัง ~25 ชม./ticker ตาม cleanup ใน prefetch)
+    - dedup ข้ามหุ้น: ข่าวเดียวกันโผล่หลาย ticker → รวมเป็นข่าวเดียว เก็บ tickers ทุกตัวไว้
+      (key = title 50 ตัวแรก lower-case แบบเดียวกับ agents._dedup_news ที่ dedup ภายใน ticker)
+    - id = md5(key) 12 ตัว — คงที่ข้ามรอบ prefetch เพื่อให้ระบบ mark อ่านแล้ว (localStorage
+      ฝั่ง frontend) จำถูกตัวแม้ reload
+    - ไม่มี sentiment/impact — yfinance/Finnhub ไม่ให้ field นี้มา ไม่แต่งเพิ่มเอง (กติกา Handoff
+      ข้อ 6) frontend ซ่อนป้ายเหล่านั้นเมื่อไม่มีข้อมูล"""
+    import json as _json
+    from sqlalchemy import func
+    from models import NewsCache
+
+    latest_sq = (
+        db.query(NewsCache.ticker, func.max(NewsCache.fetched_at).label("max_at"))
+        .group_by(NewsCache.ticker)
+        .subquery()
+    )
+    rows = (
+        db.query(NewsCache)
+        .join(latest_sq, (NewsCache.ticker == latest_sq.c.ticker) &
+                         (NewsCache.fetched_at == latest_sq.c.max_at))
+        .all()
+    )
+
+    by_key = {}
+    for row in rows:
+        try:
+            items = _json.loads(row.news_json) if row.news_json else []
+        except Exception:
+            continue  # news_json เสียทั้งแถว — ข้าม ticker นี้ ไม่ให้ล้มทั้ง endpoint
+        for item in items:
+            title = (item.get("title") or "").strip()
+            if not title:
+                continue
+            key = title.lower()[:50]
+            if key in by_key:
+                if row.ticker not in by_key[key]["tickers"]:
+                    by_key[key]["tickers"].append(row.ticker)
+                continue
+            by_key[key] = {
+                "id": hashlib.md5(key.encode("utf-8")).hexdigest()[:12],
+                "tickers": [row.ticker],
+                "headline": title,
+                "summary": item.get("summary") or "",
+                "source": item.get("source") or item.get("from_source") or "",
+                "published_at": item.get("published_at") or 0,  # unix seconds (frontend คูณ 1000 เอง)
+            }
+
+    articles = sorted(by_key.values(), key=lambda a: a["published_at"] or 0, reverse=True)[:limit]
+    return {"count": len(articles), "articles": articles}
+
 # Trade Updates
 @app.post("/trade-parse-image")
 async def parse_trade_image(file: UploadFile = File(...)):

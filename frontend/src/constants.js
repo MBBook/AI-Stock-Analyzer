@@ -45,27 +45,18 @@ export const COLORS = {
 export const SP = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 };
 export const MAX_TICKERS = 30;
 
-// ⚠️ MOCK DATA — News tab backend (task #51 ใน Pending.md) ยังไม่ได้สร้าง (ยังไม่มี NewsArticle
-// table/endpoint จริง) ข้อมูลด้านล่างนี้ใช้แค่โชว์ดีไซน์/pagination ให้ครบตาม mockup เท่านั้น
-// ห้ามอ้างว่าเป็นข่าวจริง — ต่อ API จริงทันทีที่ backend #51 เสร็จ (แทนที่ MOCK_NEWS ทั้งก้อนนี้)
-const MOCK_NEWS_TEMPLATES = [
-  { tickers: ['NVDA', 'IONQ'], headline: 'NVIDIA ประกาศความร่วมมือด้านควอนตัมคอมพิวติ้งกับพันธมิตรรายใหม่', sentiment: 'Positive', impact: 'สูง', source: 'Bloomberg', body: 'ข่าวสัญญาควอนตัมคอมพิวติ้งกับ NVIDIA หนุนราคาระยะสั้น โมเมนตัมยังเป็นขาขึ้นจากปริมาณซื้อขาย นักวิเคราะห์มองเป็นบวกต่อ supply chain ทั้งกลุ่ม' },
-  { tickers: ['MU'], headline: 'Micron เผชิญแรงกดดันราคาชิปหน่วยความจำจากคู่แข่งจีน', sentiment: 'Negative', impact: 'ปานกลาง', source: 'Bloomberg', body: 'ผู้ผลิตชิปจีนหลายรายเพิ่มกำลังการผลิต NAND flash อย่างรวดเร็ว ส่งผลให้ราคาตลาดโลกมีแนวโน้มปรับตัวลงในไตรมาสหน้า แต่นักวิเคราะห์บางส่วนมองว่ามาจาก data center AI จะช่วยพยุงราคาส่วนหนึ่ง' },
-  { tickers: ['WDC'], headline: 'Western Digital รายงานผลประกอบการดีกว่าคาดจาก demand data center', sentiment: 'Positive', impact: 'ปานกลาง', source: 'CNBC', body: 'รายได้จากกลุ่ม enterprise storage เติบโตต่อเนื่อง หนุนจาก investment ด้าน AI infrastructure ของ hyperscaler รายใหญ่ ราคาหุ้นตอบรับเชิงบวกหลังประกาศงบ' },
-  { tickers: ['NBIS'], headline: 'Nebius ขยายกำลังการผลิต GPU cloud รองรับดีมานด์ AI training', sentiment: 'Neutral', impact: 'ต่ำ', source: 'Yahoo Finance', body: 'บริษัทประกาศแผนลงทุนเพิ่มศูนย์ข้อมูลใหม่ในยุโรป นักวิเคราะห์มองเป็นกลางเนื่องจากต้องรอดูอัตราการใช้งานจริงก่อนประเมินผลตอบแทน' },
-];
-// ✅ แก้ 2026-07-05 (รอบ 8): MBBook ทักท้วงว่าวันที่โดดไปมา — เดิม date คำนวณจาก `(i % 7) + 1` วนซ้ำ
-// ไม่เกี่ยวกับลำดับ index เลย แล้ว list ก็ไม่เคย sort ตามวันที่เลย เลยดูสุ่ม แก้โดยให้แต่ละข่าวมี
-// timestamp จริง (ms) ไล่ย้อนหลังจาก "ตอนนี้" ทุกๆ 7 ชม. (id ยิ่งมาก ยิ่งเก่า) แล้วให้ NewsList
-// sort ตาม timestamp ใหม่→เก่าเสมอ (ไม่พึ่งลำดับ array ตรงๆ กันพลาดถ้ามีข่าวแทรกเข้ามาไม่เรียงในอนาคต)
-export const MOCK_NEWS = Array.from({ length: 24 }, (_, i) => {
-  const t = MOCK_NEWS_TEMPLATES[i % MOCK_NEWS_TEMPLATES.length];
-  const ts = new Date(Date.now() - i * 7 * 60 * 60 * 1000);
-  return {
-    id: i + 1, ...t, timestamp: ts.getTime(),
-    date: `${ts.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })} · ${ts.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}`,
-  };
-});
+// ✅ 2026-07-11: ลบ MOCK_NEWS ทิ้งทั้งก้อนแล้ว — backend #51 เสร็จ (GET /news อ่านข่าวจริงจาก
+// news_cache ที่นัตตี้ prefetch รายชั่วโมง) MBBook เจอเองว่าหน้า News โชว์ข่าวปลอม 4 ข่าววนซ้ำ
+// ทุกวันทั้งที่ข่าวจริงอยู่ใน DB ครบ — ห้ามเอา mock กลับมาใส่อีก ถ้าไม่มีข่าวให้โชว์ข้อความสถานะจริง
+
+// ✅ 2026-07-11 Reskin Phase 2 ข้อ 5: สีประจำหุ้น — palette + hash function ตรงจาก mockup
+// (AVATAR_COLORS/avatarColor ใน UI_Preview_v1.html) ticker เดิมได้สีเดิมเสมอ
+export const AVATAR_COLORS = ['#8b7bf7', '#4fc3ff', '#ef9f27', '#33d692', '#ff6570', '#c084fc', '#38bdf8'];
+export const avatarColor = (t) => {
+  let h = 0;
+  for (let i = 0; i < t.length; i++) h += t.charCodeAt(i);
+  return AVATAR_COLORS[h % AVATAR_COLORS.length];
+};
 
 // ⚠️ ชื่อเต็มบริษัท — backend ยังไม่มี field นี้ (ดู Pending.md gap) ใส่ไว้เป็น fallback ฝั่ง client
 // เฉพาะบริษัทที่รู้จริง (ข้อมูลสาธารณะทั่วไป ไม่ใช่การเดา) — ticker ที่ไม่อยู่ใน dict นี้จะโชว์แค่ ticker
@@ -83,19 +74,26 @@ export const GLOBAL_CSS = `
   body { font-family: 'Inter','Noto Sans Thai',-apple-system,BlinkMacSystemFont,sans-serif; -webkit-font-smoothing: antialiased; }
   .num { font-variant-numeric: tabular-nums; }
   button { font-family: inherit; }
+  /* ✅ 2026-07-09 Reskin Phase 2 ข้อ 3: เงาชุด .gold-btn จาก mockup แทน claymorphism เดิม
+     (เงาทองฟุ้งข้างล่าง + ไฮไลต์ขาวขอบบน + เงาเข้มขอบล่างด้านใน) hover แค่ scale ไม่เปลี่ยนเงา */
   .clay-btn {
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-    box-shadow: 4px 4px 9px rgba(0,0,0,0.45), -3px -3px 7px rgba(255,224,168,0.25), inset 1px 1px 2px rgba(255,255,255,0.35);
+    transition: transform 0.15s cubic-bezier(.34,1.56,.64,1);
+    box-shadow: 0 10px 22px -9px rgba(239,159,39,0.6), inset 0 1px 0 rgba(255,255,255,0.55), inset 0 -3px 5px rgba(140,74,3,0.35);
   }
-  .clay-btn:hover { transform: scale(1.06); box-shadow: 6px 6px 14px rgba(0,0,0,0.5), -4px -4px 10px rgba(255,224,168,0.3), inset 1px 1px 2px rgba(255,255,255,0.4); }
-  .clay-btn:active { transform: scale(0.92); box-shadow: 2px 2px 5px rgba(0,0,0,0.5), -1px -1px 3px rgba(255,224,168,0.2), inset 2px 2px 4px rgba(0,0,0,0.3); }
+  .clay-btn:hover { transform: scale(1.06); }
+  .clay-btn:active { transform: scale(0.92); }
   .press-btn { transition: transform 0.12s ease; }
   .press-btn:active { transform: scale(0.94); }
   .nav-btn { transition: transform 0.15s ease, background-color 0.15s ease; }
   .nav-btn:hover:not(.nav-btn-active) { transform: translateY(-2px); background-color: rgba(139,123,247,0.12); }
-  .glass-row { transition: transform 0.15s ease, background-color 0.15s ease; cursor: pointer; }
+  .glass-row { transition: transform 0.15s ease, background-color 0.15s ease, opacity 0.2s ease; cursor: pointer; }
   .glass-row:hover { transform: translateY(-1px); background-color: ${COLORS.cardBgHover}; }
   .glass-row:active { transform: scale(0.98); }
+  /* ✅ 2026-07-11 Reskin Phase 2 ข้อ 7: แถวตาราง dtable ตาม mockup — hover 0.05 ไม่ลอยขึ้น
+     (!important เพื่อชนะ zebra ที่เป็น inline style บนแถว) */
+  .trow { transition: background-color 0.15s ease; cursor: pointer; }
+  .trow:hover { background-color: rgba(255,255,255,0.05) !important; }
+  .trow:active { transform: scale(0.995); }
   .icon-btn { transition: transform 0.15s ease, background-color 0.15s ease; }
   .icon-btn:hover { background-color: rgba(139,123,247,0.14); }
   .icon-btn:active { transform: scale(0.9); }
@@ -104,6 +102,28 @@ export const GLOBAL_CSS = `
   .pill-btn:active { transform: scale(0.92); }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.25); border-radius: 8px; }
+
+  /* ✅ 2026-07-11: skeleton loading — copy ตรงจาก mockup .skeleton/@shimmer (UX baseline ใน
+     Redesign Prompt v2/v3: ห้ามจอว่าง/spinner เปล่าตอนโหลด) */
+  .skeleton {
+    background: linear-gradient(90deg, rgba(255,255,255,0.04) 25%, rgba(255,255,255,0.08) 37%, rgba(255,255,255,0.04) 63%);
+    background-size: 400% 100%;
+    animation: shimmer 1.4s ease infinite;
+    border-radius: 12px;
+  }
+  @keyframes shimmer {
+    0% { background-position: 100% 0; }
+    100% { background-position: 0 0; }
+  }
+
+  /* ✅ 2026-07-11 Reskin Phase 2 ข้อ 9: จุดทอง "New" ที่ footer การ์ดข่าว — pulse 2 ครั้งตอน
+     mount แล้วหยุดนิ่ง (mockup .newdot.pulseonce — ห้ามกะพริบต่อเนื่อง ตามที่ confirm 07-07) */
+  @keyframes pulseonce {
+    0% { box-shadow: 0 0 0 0 rgba(239,159,39,0.55); }
+    70% { box-shadow: 0 0 0 7px rgba(239,159,39,0); }
+    100% { box-shadow: 0 0 0 0 rgba(239,159,39,0); }
+  }
+  .newdot-pulse { animation: pulseonce 1.1s ease-out 2; }
 
   @keyframes pulseBadge {
     0% { transform: scale(1); }

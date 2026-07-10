@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 // ✅ 2026-07-08: ย้ายค่าคงที่ (COLORS/SP/MOCK_NEWS/COMPANY_NAMES/GLOBAL_CSS/API_URL) ไป constants.js
 // แยกแล้ว (ลดขนาดไฟล์นี้ — ไม่กระทบ logic ใดๆ ค่าเดิมทุกตัว แค่ import แทนการประกาศตรงนี้)
-import { API_URL, COLORS, SP, MAX_TICKERS, MOCK_NEWS, COMPANY_NAMES, GLOBAL_CSS, authFetch, AUTH_TOKEN_KEY } from './constants';
+import { API_URL, COLORS, SP, MAX_TICKERS, COMPANY_NAMES, GLOBAL_CSS, authFetch, AUTH_TOKEN_KEY, avatarColor } from './constants';
 
 // ✅ REBUILD 2026-07-05 (รอบ 2): เขียนใหม่ทั้งไฟล์ตาม 3_CowContext/UI_Spec.md ที่ MBBook confirm
 // ทีละจุดผ่านรูปจริง (ไม่ใช่แค่สรุปจากความจำแล้ว) — รอบแรกที่ทำไปพลาดหลายจุด (ไม่มีกราฟ, THB
@@ -31,6 +31,10 @@ export default function DashboardV4() {
   const [loginState, setLoginState] = useState({ busy: false, error: null });
   const [activeTab, setActiveTab] = useState('portfolio');
   const [stocks, setStocks] = useState([]);
+  // ✅ 2026-07-11: แยก "ยังโหลดไม่เสร็จ" ออกจาก "โหลดแล้วแต่ว่าง" — stocks เริ่มเป็น [] เสมอ
+  // ทำให้เดิมแยก 2 เคสนี้ไม่ได้ (skeleton ต้องรู้) ตั้ง true ทั้งตอนสำเร็จและ error เพื่อไม่ให้
+  // skeleton ค้างถาวรถ้า API ล่ม (ไปโชว์ empty state แทน)
+  const [stocksLoaded, setStocksLoaded] = useState(false);
   const [newTicker, setNewTicker] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [tradeTicker, setTradeTicker] = useState('');
@@ -76,10 +80,9 @@ export default function DashboardV4() {
   const [newsPage, setNewsPage] = useState(1);
   const NEWS_PAGE_SIZE = 10;
 
-  // ✅ เพิ่ม 2026-07-05 (รอบ 10): MBBook ขอลองจำลองข่าวใหม่เข้ามาเพื่อทดสอบป้าย "New" + ปุ่ม
-  // "อ่านทั้งหมด" — เก็บใน state แยกจาก MOCK_NEWS (ค่าคงที่ ไม่แก้โดยตรง) แล้วรวมกันตอนแสดงผล
-  // ลบทิ้งได้เลยทั้งก้อนตอนต่อ backend ข่าวจริง (#51) พร้อมกับ MOCK_NEWS
-  const [extraNews, setExtraNews] = useState([]);
+  // ✅ 2026-07-11: ข่าวจริงจาก GET /news (backend #51 เสร็จแล้ว — news_cache ที่นัตตี้ prefetch
+  // รายชั่วโมง) แทน MOCK_NEWS/extraNews เดิมทั้งหมด
+  const [newsData, setNewsData] = useState(null); // { count, articles } | null = ยังไม่โหลด
 
   // ✅ เพิ่ม 2026-07-05 (รอบ 8): ติดตามว่าข่าวไหนยังไม่ถูกเปิดอ่าน (popup) — โชว์ป้าย "New" สีทอง
   // เก็บลง localStorage ด้วย (ไม่ใช่แค่ React state) เพื่อให้จำได้ข้ามการ reload หน้าเว็บ ไม่งั้นทุกครั้ง
@@ -97,10 +100,19 @@ export default function DashboardV4() {
       return next;
     });
   };
-  // ✅ เพิ่ม 2026-07-05 (รอบ 10): ข่าวจริงทั้งหมดที่ต้องแสดง = MOCK_NEWS (คงที่) + extraNews (ที่
-  // จำลองเพิ่มเข้ามาระหว่างทดสอบ) — ใช้ฟังก์ชันนี้แทนการอ้าง MOCK_NEWS ตรงๆ ทุกจุดที่เกี่ยวกับการนับ/
-  // แสดงผล เพื่อให้ข่าวจำลองใหม่ถูกนับรวมด้วยเสมอ
-  const getAllNews = () => [...MOCK_NEWS, ...extraNews];
+  // ✅ 2026-07-11: แปลงข่าวจริงจาก GET /news เป็น shape ที่ UI ใช้ — sentiment/impact เป็น null
+  // เสมอเพราะ yfinance/Finnhub ไม่มีข้อมูลนี้ (UI ซ่อนป้ายให้เอง ไม่แต่งค่าเอง ตามกติกา Handoff ข้อ 6)
+  // id เป็น md5 string คงที่จาก backend → ระบบ mark อ่านแล้ว (localStorage) ทำงานข้าม reload ได้เหมือนเดิม
+  const getAllNews = () => (newsData?.articles || []).map(a => {
+    const ts = (a.published_at || 0) * 1000; // backend ส่ง unix seconds
+    const d = ts ? new Date(ts) : null;
+    return {
+      id: a.id, tickers: a.tickers || [], headline: a.headline,
+      sentiment: null, impact: null, source: a.source || '', body: a.summary || '',
+      timestamp: ts,
+      date: d ? `${d.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })} · ${d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}` : '',
+    };
+  });
 
   // ✅ เพิ่ม 2026-07-05 (รอบ 9): ปุ่ม "อ่านทั้งหมด" — MBBook ขอไว้เผื่อระบบข่าวจริง (#51) ต่อเสร็จ
   // แล้วมีข่าวเป็นร้อย จะได้ไม่ต้องกดเข้า popup ทีละอันเพื่อ mark อ่าน
@@ -114,27 +126,8 @@ export default function DashboardV4() {
     showToast('ทำเครื่องหมายว่าอ่านแล้วทั้งหมด');
   };
 
-  // ✅ เพิ่ม 2026-07-05 (รอบ 10): ปุ่มทดสอบ — จำลองข่าวใหม่เข้ามาตอนนี้ (timestamp = ปัจจุบัน) เพื่อให้
-  // MBBook เช็คได้ว่า (1) ข่าวใหม่ขึ้นบนสุดจริงไหม (2) มีป้าย "New" สีทองไหม (3) กด "อ่านทั้งหมด" แล้ว
-  // ป้ายหายไปด้วยไหม — เป็นเครื่องมือทดสอบชั่วคราว ลบทิ้งได้พร้อม MOCK_NEWS ตอนต่อ backend จริง (#51)
-  const addTestNews = () => {
-    const now = new Date();
-    const testId = -Date.now(); // ใช้เลขติดลบกันชนกับ id ของ MOCK_NEWS (1-24) แน่นอน
-    const newArticle = {
-      id: testId,
-      tickers: ['NVDA'],
-      headline: `[ทดสอบ] ข่าวจำลองเข้ามาใหม่ตอน ${now.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`,
-      sentiment: 'Neutral',
-      impact: 'ต่ำ',
-      source: 'Test',
-      body: 'ข่าวนี้สร้างขึ้นเพื่อทดสอบระบบเรียงลำดับตามเวลาและป้าย "New" เท่านั้น ไม่ใช่ข่าวจริง จะหายไปเองถ้ารีเฟรชหน้าเว็บ (ไม่ได้บันทึกลง backend)',
-      timestamp: now.getTime(),
-      date: `${now.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })} · ${now.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}`,
-    };
-    setExtraNews(prev => [...prev, newArticle]);
-    setNewsPage(1);
-    showToast('เพิ่มข่าวทดสอบแล้ว — ดูบนสุดของหน้า News');
-  };
+  // ✅ 2026-07-11: ลบ addTestNews/extraNews (เครื่องมือทดสอบชั่วคราว) ทิ้งแล้วพร้อม MOCK_NEWS
+  // — ข่าวจริงมาจาก fetchNews() ด้านล่าง ทดสอบข่าวใหม่ได้จากการรอ prefetch รอบถัดไปจริงๆ
 
   // Toast
   const [toast, setToast] = useState(null); // { text, phase: 'in'|'out' }
@@ -211,13 +204,13 @@ export default function DashboardV4() {
     card: {
       backgroundColor: COLORS.cardBg,
       border: `1px solid ${COLORS.cardBorder}`,
-      borderRadius: 18,
+      borderRadius: 24, // ✅ 2026-07-11 Reskin ข้อ 11: การ์ดใหญ่ = --r-card 24
       padding: isMobile ? SP.lg : SP.xl,
     },
     cardTight: {
       backgroundColor: COLORS.cardBg,
       border: `1px solid ${COLORS.cardBorder}`,
-      borderRadius: 16,
+      borderRadius: 24, // ✅ 2026-07-11 Reskin ข้อ 11: การ์ด glass ทุกใบ = 24 ตาม mockup .glass
       padding: SP.lg,
     },
     // ✅ แก้ 2026-07-05 (รอบ 6): MBBook ทักท้วงว่าตัวหนังสือฝั่ง Desktop เล็กไปทุกตัว — เดิม
@@ -232,7 +225,7 @@ export default function DashboardV4() {
       backgroundColor: 'rgba(148,163,184,0.08)',
       color: COLORS.text,
       border: `1px solid ${COLORS.cardBorder}`,
-      borderRadius: 10,
+      borderRadius: 14, // ✅ 2026-07-11 Reskin ข้อ 11: กล่องกลาง = --r-md 14
       fontSize: isMobile ? 16 : 15.5,
       minHeight: isMobile ? 46 : 44,
     },
@@ -240,9 +233,10 @@ export default function DashboardV4() {
     row: (gap) => ({ display: 'flex', alignItems: 'center', gap: gap ?? SP.sm }),
   };
 
+  // ✅ 2026-07-09 Reskin Phase 2 ข้อ 3: gradient 135deg ตรง .gold-btn ของ mockup (เดิม 145deg)
   const clayGoldStyle = (extra = {}) => ({
-    background: `linear-gradient(145deg, ${COLORS.goldLight}, ${COLORS.goldDark})`,
-    color: '#3A2405',
+    background: COLORS.goldGradient,
+    color: '#3a2405',
     border: 'none',
     borderRadius: 14,
     fontWeight: 700,
@@ -255,7 +249,7 @@ export default function DashboardV4() {
       display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: SP.xs,
       padding: isMobile ? '13px 18px' : '10px 16px',
       minHeight: isMobile ? 46 : 'auto',
-      borderRadius: 12,
+      borderRadius: 14, // ✅ 2026-07-11 Reskin ข้อ 11: ปุ่ม = --r-md 14 (mockup gold/ghost-btn)
       fontSize: isMobile ? 15 : 14,
       fontWeight: 600,
       cursor: 'pointer',
@@ -287,11 +281,13 @@ export default function DashboardV4() {
     fetchCostSummary();
     fetchReports();
     fetchRoiSummary();
+    fetchNews(); // ✅ 2026-07-11: ข่าวจริงจาก news_cache
     // ✅ auto-refresh ตามที่แนะนำและ MBBook รับได้: poll ทุก 5 นาทีตอนแอปเปิดอยู่ (ไม่ทุกวินาที
     // เพื่อประหยัด request) — mobile ใช้ pull-to-refresh เพิ่มเติม (ดูฟังก์ชัน handlePullRefresh)
     const poll = setInterval(() => {
       fetchStocks();
       fetchPortfolio();
+      fetchNews(); // ✅ 2026-07-11: ข่าวใหม่จาก prefetch รายชั่วโมงจะโผล่เองโดยไม่ต้อง reload
     }, 5 * 60 * 1000);
     return () => clearInterval(poll);
   }, []);
@@ -304,6 +300,7 @@ export default function DashboardV4() {
     } catch (error) {
       console.error('Error fetching stocks:', error);
     }
+    setStocksLoaded(true); // ✅ 2026-07-11: จบ skeleton ทั้งเคสสำเร็จ/ล้ม
   };
 
   const fetchPortfolio = async () => {
@@ -335,6 +332,21 @@ export default function DashboardV4() {
       if (!data.error) setPortfolioHistory(data);
     } catch (error) {
       console.error('Error fetching portfolio history:', error);
+    }
+  };
+
+  // ✅ 2026-07-11: ดึงข่าวจริง (GET /news — dedup แล้วจาก backend, เรียงใหม่→เก่า)
+  // เคสล้ม/response แปลก → set error flag (ครั้งแรกเท่านั้น ไม่ทับข่าวที่เคยโหลดได้) เพื่อให้
+  // skeleton จบและโชว์ข้อความ error จริงแทนที่จะ shimmer ค้างถาวร
+  const fetchNews = async () => {
+    try {
+      const response = await authFetch(`${API_URL}/news`);
+      const data = await response.json();
+      if (data.articles) setNewsData(data);
+      else setNewsData(prev => prev ?? { count: 0, articles: [], error: true });
+    } catch (error) {
+      console.error('Error fetching news:', error);
+      setNewsData(prev => prev ?? { count: 0, articles: [], error: true });
     }
   };
 
@@ -499,19 +511,28 @@ export default function DashboardV4() {
     if (m >= 1e3) return `$${(m / 1e3).toFixed(1)}B`;
     return `$${m.toFixed(0)}M`;
   };
-  const signalColor = (sig) => sig === 'BUY' ? COLORS.green : sig === 'SELL' ? COLORS.red : COLORS.muted;
-  const signalBgColor = (sig) => sig === 'BUY' ? COLORS.greenSoft : sig === 'SELL' ? COLORS.redSoft : 'rgba(148,163,184,0.14)';
+  // ✅ 2026-07-09 Reskin Phase 2 ข้อ 4: HOLD เปลี่ยนจากเทาเป็นม่วง (.badge-hold ของ mockup)
+  const signalColor = (sig) => sig === 'BUY' ? COLORS.green : sig === 'SELL' ? COLORS.red : COLORS.purple;
+  const signalBgColor = (sig) => sig === 'BUY' ? COLORS.greenSoft : sig === 'SELL' ? COLORS.redSoft : COLORS.purpleSoft;
   const signalLabel = (sig) => sig === 'BUY' ? 'BUY' : sig === 'SELL' ? 'SELL' : 'HOLD';
+  // ✅ 2026-07-09 Reskin Phase 2 ข้อ 4: สเปค .badge เดียวจาก mockup ใช้ทุกจุด (เดิมแต่ละจุด
+  // hardcode ขนาด/มุมโค้งต่างกันเล็กน้อย) — จุดที่ใช้ spread เพิ่ม margin/key ได้ตามบริบท
+  const signalBadgeStyle = (sig) => ({
+    fontSize: 10.5, fontWeight: 700, padding: '3px 9px', borderRadius: 999, letterSpacing: 0.2,
+    backgroundColor: signalBgColor(sig), color: signalColor(sig),
+  });
 
   // ✅ ตาม UI_Spec.md ข้อ 4: THB เป็นตัวหลัก (ใหญ่/เด่น) USD เป็นตัวรอง (เล็ก/เทา) โชว์คู่กันเสมอ
   // ไม่ใช่ปุ่ม toggle สลับสกุลแบบรอบแรกที่ทำผิดไป
-  const MoneyDual = ({ thb, usd, mainSize = 18, mainColor, mainWeight = 800 }) => (
+  // ✅ 2026-07-11 Reskin Phase 2 ข้อ 6: ตาม mockup .kpi-thb (22/700) / .kpi-usd (12, faint) —
+  // น้ำหนักหลัก 800→700 และบรรทัด USD คงที่ 12/faint ทุกขนาด (เดิม scale ตาม mainSize + muted)
+  const MoneyDual = ({ thb, usd, mainSize = 18, mainColor, mainWeight = 700 }) => (
     <div>
-      <p style={{ margin: 0, fontSize: mainSize, fontWeight: mainWeight, color: mainColor || COLORS.text }}>
+      <p className="num" style={{ margin: 0, fontSize: mainSize, fontWeight: mainWeight, color: mainColor || COLORS.text }}>
         {hideAmounts ? `฿${MASK}` : (thb != null ? fmtTHB(thb) : `${fmtUSD(usd)} (รออัตราแลกเปลี่ยน)`)}
       </p>
       {thb != null && (
-        <p style={{ margin: '2px 0 0 0', fontSize: Math.max(12.5, mainSize - 7), color: COLORS.muted }}>
+        <p className="num" style={{ margin: '2px 0 0 0', fontSize: 12, color: COLORS.faint }}>
           {hideAmounts ? `≈ $${MASK}` : `≈ ${fmtUSD(usd)}`}
         </p>
       )}
@@ -717,21 +738,21 @@ export default function DashboardV4() {
   // (ถามยืนยันก่อนแล้วเพราะขัดกับ comment เดิมที่เคยตั้งใจแยก Desktop/Mobile ไว้)
 
   // ===== Sliding pill selector (period toggle ของ Portfolio Mobile/Desktop + Cost chart ใน System) =====
+  // ✅ 2026-07-11 Reskin Phase 2 ข้อ 8: ตาม mockup .pillbar — container กระจก+ขอบ pill 999,
+  // ปุ่ม active = gradient ม่วง + เงาม่วง (0 4px 14px -4px), minWidth 88 fontSize 12 padding 7px 15px
   const SlidingPill = ({ options, value, onChange }) => (
-    <div style={{ display: 'inline-flex', backgroundColor: 'rgba(148,163,184,0.08)', borderRadius: 12, padding: 4, gap: 2 }}>
+    <div style={{ display: 'inline-flex', backgroundColor: COLORS.cardBg, border: `1px solid ${COLORS.cardBorder}`, borderRadius: 999, padding: 4, gap: 2 }}>
       {options.map(opt => {
         const active = opt.value === value;
         return (
           <button key={opt.value} className="pill-btn" onClick={() => onChange(opt.value)} style={{
-            padding: isMobile ? '9px 14px' : '8px 16px', borderRadius: 10, border: 'none',
-            fontSize: 13, fontWeight: 700, cursor: 'pointer',
-            backgroundColor: active ? COLORS.purple : 'transparent',
-            color: active ? '#fff' : COLORS.muted,
-            transition: 'background-color 0.2s ease',
-            // ✅ 2026-07-08: min-width + text-align center ตาม mockup fix — กันคำแต่ละคำ (Monthly/
-            // Yearly/Cumulative) ชิดซ้ายในคอลัมน์ตัวเองตอนความยาวคำไม่เท่ากัน (มีแค่ 3 จุดใช้คอมโพเนนต์นี้
-            // ทั้งหมดเป็น period pill พอดี ไม่กระทบ pagination ของ News ซึ่งใช้ NewsPagination แยกต่างหาก)
-            minWidth: 84, textAlign: 'center',
+            padding: '7px 15px', borderRadius: 999, border: 'none',
+            fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+            background: active ? COLORS.purpleGradient : 'transparent',
+            color: active ? '#fff' : COLORS.faint,
+            boxShadow: active ? '0 4px 14px -4px rgba(139,123,247,0.6)' : 'none',
+            transition: 'color 0.2s ease',
+            minWidth: 88, textAlign: 'center',
           }}>
             {opt.label}
           </button>
@@ -740,12 +761,50 @@ export default function DashboardV4() {
     </div>
   );
 
+  // ===== ✅ 2026-07-11: Skeleton loading (UX baseline ใน Redesign Prompt v2/v3 — ตกหล่นจาก
+  // Phase 2 Plan, MBBook ทวงถาม) — helper ล้วนๆ ไม่มี hook เรียกเป็น function ตรงๆ ตามกติกา =====
+  const Skeleton = ({ h = 14, w = '100%', r = 12, style = {} }) => (
+    <div className="skeleton" style={{ height: h, width: w, borderRadius: r, flexShrink: 0, ...style }} />
+  );
+  // แถวรายการ (การ์ดหุ้น/ข่าว): วงกลม avatar + 2 บรรทัด + ตัวเลขขวา
+  const SkeletonRowCard = () => (
+    <div style={{ ...styles.cardTight, display: 'flex', alignItems: 'center', gap: SP.sm }}>
+      {Skeleton({ h: 34, w: 34, r: '50%' })}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {Skeleton({ h: 13, w: '40%' })}
+        {Skeleton({ h: 11, w: '65%' })}
+      </div>
+      {Skeleton({ h: 13, w: 70 })}
+    </div>
+  );
+  const SkeletonList = ({ n = 5 }) => (
+    <div style={styles.stack(SP.sm)}>
+      {Array.from({ length: n }, (_, i) => <div key={i}>{SkeletonRowCard()}</div>)}
+    </div>
+  );
+  // ทั้งแท็บ Portfolio: กราฟ + KPI 3 ใบ + รายการหุ้น
+  const PortfolioSkeleton = () => (
+    <div style={styles.stack(SP.lg)}>
+      {Skeleton({ h: 22, w: 190 })}
+      <div style={styles.cardTight}>{Skeleton({ h: isMobile ? 150 : 200 })}</div>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: SP.md }}>
+        {[0, 1, 2].map(i => (
+          <div key={i} style={{ ...styles.cardTight, padding: '16px 18px' }}>
+            {Skeleton({ h: 11, w: '35%', style: { marginBottom: 10 } })}
+            {Skeleton({ h: 22, w: '60%' })}
+          </div>
+        ))}
+      </div>
+      {SkeletonList({ n: 4 })}
+    </div>
+  );
+
   // ✅ แก้ 2026-07-05 (รอบ 5, Finding 2): generalize เป็น prop-based เพื่อใช้ซ้ำกับกราฟต้นทุนใน
   // System tab ได้ (เดิม hardcode ผูกกับ state ของ Portfolio เท่านั้น)
   const DateRangeDropdownGeneric = ({ value, onChange, isOpen, onToggle, cStart, cEnd, onCStart, onCEnd }) => (
     <div style={{ position: 'relative' }}>
       <button className="press-btn" onClick={onToggle} style={{
-        ...styles.row(SP.xs), padding: '8px 12px', borderRadius: 10,
+        ...styles.row(SP.xs), padding: '8px 12px', borderRadius: 14,
         backgroundColor: 'rgba(148,163,184,0.08)', border: `1px solid ${COLORS.cardBorder}`,
         color: COLORS.text, fontSize: 13, fontWeight: 600, cursor: 'pointer',
       }}>
@@ -754,7 +813,7 @@ export default function DashboardV4() {
       {isOpen && (
         <div style={{
           position: 'absolute', top: '110%', right: 0, zIndex: 60, minWidth: 200,
-          backgroundColor: '#111431', border: `1px solid ${COLORS.cardBorder}`, borderRadius: 12,
+          backgroundColor: '#111431', border: `1px solid ${COLORS.cardBorder}`, borderRadius: 14,
           padding: SP.sm, boxShadow: '0 12px 30px rgba(0,0,0,0.4)',
         }}>
           {['today', '7d', '30d', 'lastMonth'].map(key => (
@@ -798,7 +857,7 @@ export default function DashboardV4() {
     return (
       <div style={{
         display: 'flex', alignItems: 'flex-start', gap: SP.sm,
-        padding: '10px 12px', borderRadius: 10, marginTop: SP.sm,
+        padding: '10px 12px', borderRadius: 9, marginTop: SP.sm,
         backgroundColor: ok ? COLORS.greenSoft : COLORS.redSoft,
         color: ok ? COLORS.green : COLORS.red, fontSize: 13,
       }}>
@@ -816,7 +875,7 @@ export default function DashboardV4() {
         position: 'fixed', bottom: isMobile ? 76 : 24, left: '50%',
         backgroundColor: '#1A1F3D', border: `1px solid ${COLORS.cardBorder}`,
         color: COLORS.text, fontSize: 13, fontWeight: 600,
-        padding: '12px 18px', borderRadius: 12, zIndex: 300,
+        padding: '12px 18px', borderRadius: 999, zIndex: 300, // ✅ mockup #toast = pill
         boxShadow: '0 10px 30px rgba(0,0,0,0.4)', maxWidth: '86vw',
         display: 'flex', alignItems: 'center', gap: SP.sm,
       }}>
@@ -836,7 +895,7 @@ export default function DashboardV4() {
         </p>
         <label style={{
           ...styles.row(SP.sm), justifyContent: 'center',
-          padding: '14px', border: `1.5px dashed ${COLORS.cardBorder}`, borderRadius: 10,
+          padding: '14px', border: `1.5px dashed ${COLORS.cardBorder}`, borderRadius: 14,
           cursor: 'pointer', color: COLORS.muted, fontSize: 13, marginBottom: SP.md,
         }}>
           <Upload size={16} />
@@ -845,7 +904,7 @@ export default function DashboardV4() {
         </label>
         {tradeImagePreview && (
           <img src={tradeImagePreview} alt="trade slip preview"
-            style={{ maxWidth: '100%', maxHeight: 200, borderRadius: 10, marginBottom: SP.md, display: 'block', border: `1px solid ${COLORS.cardBorder}` }} />
+            style={{ maxWidth: '100%', maxHeight: 200, borderRadius: 14, marginBottom: SP.md, display: 'block', border: `1px solid ${COLORS.cardBorder}` }} />
         )}
         <button className="press-btn" onClick={handleParseTradeImage} disabled={tradeParsing || !tradeImageFile}
           style={btn('outline', { width: '100%', opacity: (tradeParsing || !tradeImageFile) ? 0.5 : 1, cursor: (tradeParsing || !tradeImageFile) ? 'default' : 'pointer' })}>
@@ -872,7 +931,7 @@ export default function DashboardV4() {
                 return (
                   <button key={a} className="press-btn" onClick={() => setTradeAction(a)} style={{
                     flex: 1, padding: isMobile ? 14 : 10, minHeight: isMobile ? 46 : 'auto',
-                    borderRadius: 10, fontWeight: 700, fontSize: 14, cursor: 'pointer',
+                    borderRadius: 14, fontWeight: 700, fontSize: 14, cursor: 'pointer',
                     border: `1px solid ${c}`, backgroundColor: active ? c : 'transparent', color: active ? '#0B1130' : c,
                   }}>
                     {a === 'BUY' ? 'ซื้อ' : 'ขาย'}
@@ -912,12 +971,18 @@ export default function DashboardV4() {
     </div>
   );
 
+  // ✅ 2026-07-11 Reskin Phase 2 ข้อ 10: ปุ่มยืนยันลบตาม mockup .danger-btn (พื้นแดงจาง + ขอบแดง
+  // ตัวแดง ไม่ใช่ปุ่มแดงทึบเดิม) / ยกเลิก = ghost
   const ConfirmDeleteContent = ({ ticker }) => (
     <div style={styles.stack(SP.lg)}>
       <p style={{ color: COLORS.text, fontSize: 14, margin: 0 }}>ต้องการลบ <b>{ticker}</b> ออกจากรายการติดตามใช่ไหมครับ?</p>
       <div style={styles.row(SP.sm)}>
         <button className="press-btn" onClick={closePopup} style={btn('ghost', { flex: 1 })}>ยกเลิก</button>
-        <button className="press-btn" onClick={() => handleRemoveStock(ticker)} style={btn('danger', { flex: 1 })}>
+        <button className="press-btn" onClick={() => handleRemoveStock(ticker)} style={{
+          flex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+          padding: 12, borderRadius: 14, cursor: 'pointer', fontWeight: 700, fontSize: 13,
+          backgroundColor: 'rgba(255,101,112,0.12)', color: COLORS.red, border: '1px solid rgba(255,101,112,0.3)',
+        }}>
           <Trash2 size={15} /> ลบเลย
         </button>
       </div>
@@ -941,10 +1006,7 @@ export default function DashboardV4() {
             {ticker}{(stock?.company_name || COMPANY_NAMES[ticker]) ? ` - ${stock?.company_name || COMPANY_NAMES[ticker]}` : ''}
           </h3>
           {sig && (
-            <span key={sig} className="signal-pulse" style={{
-              marginTop: 6, fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 8,
-              backgroundColor: signalBgColor(sig), color: signalColor(sig),
-            }}>
+            <span key={sig} className="signal-pulse" style={{ marginTop: 6, ...signalBadgeStyle(sig) }}>
               {signalLabel(sig)}
             </span>
           )}
@@ -976,8 +1038,9 @@ export default function DashboardV4() {
         {stock?.confidence != null && (
           <div>
             <p style={styles.label}>Confidence signal</p>
-            <div style={{ width: '100%', height: 8, backgroundColor: 'rgba(148,163,184,0.15)', borderRadius: 6, overflow: 'hidden' }}>
-              <div style={{ width: `${Math.round(stock.confidence * 100)}%`, height: '100%', backgroundColor: COLORS.purple, borderRadius: 6, transition: 'width 0.4s ease' }} />
+            {/* ✅ 2026-07-11 Reskin ข้อ 11: track pill + fill gradient ตาม mockup .conf-track/.conf-fill */}
+            <div style={{ width: '100%', height: 8, backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 999, overflow: 'hidden' }}>
+              <div style={{ width: `${Math.round(stock.confidence * 100)}%`, height: '100%', background: `linear-gradient(90deg, ${COLORS.purple2}, ${COLORS.purple}, ${COLORS.blue})`, borderRadius: 999, transition: 'width 0.4s ease' }} />
             </div>
           </div>
         )}
@@ -1004,7 +1067,7 @@ export default function DashboardV4() {
               <p style={{ ...styles.label, marginBottom: 6 }}>แนวรับ (ไม้ 1-3)</p>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: SP.sm }}>
                 {[['ไม้ 1', stock.s1], ['ไม้ 2', stock.s2], ['ไม้ 3', stock.s3]].map(([label, val]) => (
-                  <div key={label} style={{ padding: SP.sm, backgroundColor: 'rgba(148,163,184,0.08)', borderRadius: 10, textAlign: 'center' }}>
+                  <div key={label} style={{ padding: SP.sm, backgroundColor: 'rgba(148,163,184,0.08)', borderRadius: 9, textAlign: 'center' }}>
                     <p style={{ ...styles.label, marginBottom: 2, fontSize: 10 }}>{label}</p>
                     <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: COLORS.text }}>{val ? `$${Number(val).toFixed(2)}` : '—'}</p>
                   </div>
@@ -1014,7 +1077,7 @@ export default function DashboardV4() {
           </div>
         )}
 
-        <div style={{ padding: SP.md, backgroundColor: 'rgba(148,163,184,0.08)', borderRadius: 10 }}>
+        <div style={{ padding: SP.md, backgroundColor: 'rgba(148,163,184,0.08)', borderRadius: 9 }}>
           <p style={{ ...styles.label, marginBottom: 4 }}>วันประกาศงบ (เวลาไทย)</p>
           <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: COLORS.text }}>
             {stock?.earnings_date_thai && stock.earnings_date_thai !== '-' ? stock.earnings_date_thai : '- ยังไม่ประกาศกำหนดการ'}
@@ -1036,8 +1099,13 @@ export default function DashboardV4() {
             ยังไม่ได้ถือ (แค่ติดตาม/สนใจ) เท่านั้น */}
         {!holding && (
           <div style={{ borderTop: `1px solid ${COLORS.cardBorder}`, paddingTop: SP.md }}>
+            {/* ✅ 2026-07-11 Reskin Phase 2 ข้อ 10: สไตล์ .danger-btn ตาม mockup */}
             <button className="press-btn" onClick={() => openConfirmDeleteFromDetail(ticker)}
-              style={btn('danger', { width: '100%', backgroundColor: 'transparent', border: `1px solid ${COLORS.red}`, color: COLORS.red })}>
+              style={{
+                width: '100%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                padding: 12, borderRadius: 14, cursor: 'pointer', fontWeight: 700, fontSize: 13,
+                backgroundColor: 'rgba(255,101,112,0.12)', color: COLORS.red, border: '1px solid rgba(255,101,112,0.3)',
+              }}>
               <Trash2 size={15} /> ลบหุ้นนี้ออกจากรายการติดตาม
             </button>
           </div>
@@ -1056,21 +1124,27 @@ export default function DashboardV4() {
     const badgeFs = isMobile ? 12.5 : 17;
     return (
       <div style={styles.stack(SP.md)}>
+        {/* ✅ 2026-07-11: sentiment/impact โชว์เฉพาะมีข้อมูลจริง (ข่าวจริงจาก /news ไม่มี field นี้) */}
         <div style={{ ...styles.row(SP.xs), flexWrap: 'wrap' }}>
           {article.tickers.map(t => (
             <span key={t} style={{ fontSize: badgeFs, fontWeight: 700, padding: '3px 10px', borderRadius: 7, backgroundColor: COLORS.purpleSoft, color: COLORS.purple }}>{t}</span>
           ))}
-          <span style={{ marginLeft: 'auto', fontSize: badgeFs, fontWeight: 700, padding: '3px 10px', borderRadius: 7, backgroundColor: `${NEWS_SENTIMENT_COLOR[article.sentiment]}22`, color: NEWS_SENTIMENT_COLOR[article.sentiment] }}>
-            {article.sentiment}
-          </span>
+          {article.sentiment && (
+            <span style={{ marginLeft: 'auto', fontSize: badgeFs, fontWeight: 700, padding: '3px 10px', borderRadius: 999, backgroundColor: `${NEWS_SENTIMENT_COLOR[article.sentiment]}22`, color: NEWS_SENTIMENT_COLOR[article.sentiment] }}>
+              {article.sentiment}
+            </span>
+          )}
         </div>
         <h3 style={{ margin: 0, fontSize: isMobile ? 18 : 24, fontWeight: 700, color: COLORS.text, lineHeight: 1.5 }}>{article.headline}</h3>
-        <div style={styles.row(SP.xs)}>
-          <span style={{ fontSize: badgeFs, fontWeight: 700, padding: '3px 10px', borderRadius: 7, backgroundColor: `${NEWS_SENTIMENT_COLOR[article.sentiment]}22`, color: NEWS_SENTIMENT_COLOR[article.sentiment] }}>{article.sentiment}</span>
-          <span style={{ fontSize: badgeFs, fontWeight: 700, padding: '3px 10px', borderRadius: 7, backgroundColor: 'rgba(245,196,107,0.16)', color: COLORS.gold }}>Impact: {article.impact}</span>
-        </div>
-        <p style={{ margin: 0, fontSize: isMobile ? 14.5 : 17, lineHeight: 1.8, color: COLORS.text }}>{article.body}</p>
-        <p style={{ margin: 0, fontSize: isMobile ? 13 : 15, color: COLORS.faint }}>{article.date} · {article.source}</p>
+        {article.impact && (
+          <div style={styles.row(SP.xs)}>
+            <span style={{ fontSize: badgeFs, fontWeight: 700, padding: '3px 10px', borderRadius: 999, backgroundColor: 'rgba(245,196,107,0.16)', color: COLORS.gold }}>Impact: {article.impact}</span>
+          </div>
+        )}
+        <p style={{ margin: 0, fontSize: isMobile ? 14.5 : 17, lineHeight: 1.8, color: COLORS.text }}>
+          {article.body || 'ข่าวนี้ไม่มีเนื้อหาสรุปจากแหล่งข่าว — อ่านฉบับเต็มได้จากแหล่งข่าวโดยตรง'}
+        </p>
+        <p style={{ margin: 0, fontSize: isMobile ? 13 : 15, color: COLORS.faint }}>{article.date}{article.source ? ` · ${article.source}` : ''}</p>
       </div>
     );
   };
@@ -1101,16 +1175,18 @@ export default function DashboardV4() {
       : {
           position: 'fixed', ...finalGeom,
           transform: isMobile ? (phase === 'closing' ? 'scale(0.92)' : 'scale(1)') : `translate(-50%,-50%) ${phase === 'closing' ? 'scale(0.92)' : 'scale(1)'}`,
-          opacity: phase === 'closing' ? 0 : 1, borderRadius: 20, overflow: 'auto',
+          opacity: phase === 'closing' ? 0 : 1, borderRadius: 24, overflow: 'auto',
           transition: 'top 0.32s cubic-bezier(.34,1.56,.64,1), left 0.32s cubic-bezier(.34,1.56,.64,1), width 0.32s cubic-bezier(.34,1.56,.64,1), height 0.32s cubic-bezier(.34,1.56,.64,1), transform 0.32s cubic-bezier(.34,1.56,.64,1), opacity 0.26s ease',
         };
 
     const title = popupTitle();
 
+    // ✅ 2026-07-11 Reskin Phase 2 ข้อ 10: กระจก strong ตาม mockup .glass-modal (gradient เข้ม +
+    // ขอบ 0.14 + blur 26 + เงาลึก inset ไฮไลต์บน) และ backdrop เข้มขึ้น + blur ตาม #overlay
     return (
       <div>
-        <div className="modal-backdrop" onClick={closePopup} style={{ position: 'fixed', inset: 0, zIndex: 200, backgroundColor: 'rgba(5,7,20,0.6)', opacity: phase === 'closing' ? 0 : 1 }} />
-        <div style={{ ...panelStyle, zIndex: 201, backgroundColor: '#111431', border: `1px solid ${COLORS.cardBorder}`, boxShadow: '0 20px 60px rgba(0,0,0,0.5)', padding: SP.xl }}>
+        <div className="modal-backdrop" onClick={closePopup} style={{ position: 'fixed', inset: 0, zIndex: 200, backgroundColor: 'rgba(3,4,9,0.76)', backdropFilter: 'blur(7px)', WebkitBackdropFilter: 'blur(7px)', opacity: phase === 'closing' ? 0 : 1 }} />
+        <div style={{ ...panelStyle, zIndex: 201, background: 'linear-gradient(180deg, rgba(23,27,42,0.97), rgba(12,15,24,0.98))', border: '1px solid rgba(255,255,255,0.14)', backdropFilter: 'blur(26px)', WebkitBackdropFilter: 'blur(26px)', boxShadow: '0 32px 70px -22px rgba(0,0,0,0.65), inset 0 1px 0 rgba(255,255,255,0.05)', padding: SP.xl }}>
           {title && (
             <div style={{ ...styles.row(SP.sm), justifyContent: 'space-between', marginBottom: SP.lg }}>
               <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: COLORS.text }}>{title}</h3>
@@ -1149,9 +1225,10 @@ export default function DashboardV4() {
       <div className="glass-row" onClick={(e) => openPopup('stockDetail', { ticker: h.ticker }, e.currentTarget)}
         style={{ ...styles.cardTight, ...styles.row(SP.md), justifyContent: 'space-between' }}>
         <div style={{ ...styles.row(SP.sm), minWidth: 0 }}>
+          {/* ✅ 2026-07-11 Reskin Phase 2 ข้อ 5: avatar วงกลม 34px สีประจำ ticker (mockup .avatar) */}
           <div style={{
-            width: 40, height: 40, borderRadius: 12, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-            backgroundColor: COLORS.purpleSoft, color: COLORS.purple, fontWeight: 800, fontSize: 13,
+            width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: avatarColor(h.ticker), color: '#fff', fontWeight: 800, fontSize: 11.5,
           }}>
             {h.ticker.slice(0, 2)}
           </div>
@@ -1159,7 +1236,7 @@ export default function DashboardV4() {
             <div style={styles.row(SP.xs)}>
               <p style={{ fontSize: 17, fontWeight: 700, margin: 0, color: COLORS.text }}>{h.ticker}</p>
               {stockInfo?.signal && (
-                <span key={stockInfo.signal} className="signal-pulse" style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 6, backgroundColor: signalBgColor(stockInfo.signal), color: signalColor(stockInfo.signal) }}>
+                <span key={stockInfo.signal} className="signal-pulse" style={signalBadgeStyle(stockInfo.signal)}>
                   {signalLabel(stockInfo.signal)}
                 </span>
               )}
@@ -1186,13 +1263,14 @@ export default function DashboardV4() {
     <div className="glass-row" onClick={(e) => openPopup('stockDetail', { ticker: stock.ticker }, e.currentTarget)}
       style={{ ...styles.cardTight, ...styles.row(SP.md), justifyContent: 'space-between' }}>
       <div style={{ ...styles.row(SP.sm), minWidth: 0 }}>
-        <div style={{ width: 40, height: 40, borderRadius: 12, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.purpleSoft, color: COLORS.purple, fontWeight: 800, fontSize: 13 }}>
+        {/* ✅ 2026-07-11 Reskin Phase 2 ข้อ 5: avatar วงกลม 34px สีประจำ ticker */}
+        <div style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: avatarColor(stock.ticker), color: '#fff', fontWeight: 800, fontSize: 11.5 }}>
           {stock.ticker.slice(0, 2)}
         </div>
         <div style={{ minWidth: 0 }}>
           <div style={styles.row(SP.xs)}>
             <p style={{ fontSize: 17, fontWeight: 700, margin: 0, color: COLORS.text }}>{stock.ticker}</p>
-            <span key={stock.signal} className="signal-pulse" style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 6, backgroundColor: signalBgColor(stock.signal), color: signalColor(stock.signal) }}>
+            <span key={stock.signal} className="signal-pulse" style={signalBadgeStyle(stock.signal)}>
               {signalLabel(stock.signal)}
             </span>
           </div>
@@ -1276,23 +1354,25 @@ export default function DashboardV4() {
     // การ์ดฝั่ง React ใหญ่กว่ามาก (label 13.5px, badge padding 4px 12px font 13px, gap 12px) ทำให้
     // คอลัมน์ KPI สูงกว่าที่ควร (การ์ดกราฟ fill:true เลยถูกลากให้สูงตามไปด้วย) ย่อเฉพาะโหมด sidebar
     // ให้ใกล้เคียง mockup ไม่กระทบ Mobile (sidebar=false ยังใช้ label/Badge ขนาดเดิม)
+    // ✅ 2026-07-11 Reskin Phase 2 ข้อ 6: change pill สเปคเดียวทุกโหมดตาม mockup .kpi-change
+    // (11.5/700, padding 3px 9px, pill 999) + label ตาม .kpi-label (11.5/600 faint) ทุกโหมด
     const Badge = ({ text, color }) => (
-      <span style={{ fontSize: sidebar ? 11.5 : 13, fontWeight: 700, padding: sidebar ? '3px 9px' : '4px 12px', borderRadius: 20, backgroundColor: `${color}22`, color }}>{text}</span>
+      <span style={{ fontSize: 11.5, fontWeight: 700, padding: '3px 9px', borderRadius: 999, backgroundColor: `${color}22`, color }}>{text}</span>
     );
 
     const containerStyle = sidebar
       ? { display: 'flex', flexDirection: 'column', gap: 10 }
       : { display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: SP.md };
     const cardStyle = sidebar
-      ? { ...styles.cardTight, padding: '14px 16px', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }
-      : styles.cardTight;
-    const labelStyle = sidebar ? { ...styles.label, fontSize: 11.5, marginBottom: 6 } : styles.label;
+      ? { ...styles.cardTight, padding: '16px 18px', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }
+      : { ...styles.cardTight, padding: '16px 18px' };
+    const labelStyle = { ...styles.label, fontSize: 11.5, fontWeight: 600, color: COLORS.faint, marginBottom: 8 };
 
     return (
       <div style={containerStyle}>
         <div style={cardStyle}>
           <p style={labelStyle}>มูลค่ารวม</p>
-          {MoneyDual({ thb: portfolioData?.total_value_thb, usd: portfolioData?.total_value, mainSize: sidebar ? 22 : (desktop ? 26 : 22), mainColor: COLORS.gold })}
+          {MoneyDual({ thb: portfolioData?.total_value_thb, usd: portfolioData?.total_value, mainSize: 22, mainColor: COLORS.gold })}
           {desktop ? (
             <div style={{ ...styles.row(SP.xs), marginTop: sidebar ? 6 : SP.sm, flexWrap: 'wrap' }}>
               {cumPct != null && Badge({ text: `${cumPct >= 0 ? '+' : ''}${cumPct.toFixed(1)}% สะสม`, color: COLORS.green })}
@@ -1309,11 +1389,11 @@ export default function DashboardV4() {
         </div>
         <div style={cardStyle}>
           <p style={labelStyle}>ต้นทุน</p>
-          {MoneyDual({ thb: portfolioData?.total_cost_thb, usd: portfolioData?.total_cost, mainSize: desktop ? 21 : 18 })}
+          {MoneyDual({ thb: portfolioData?.total_cost_thb, usd: portfolioData?.total_cost, mainSize: 22 })}
         </div>
         <div style={cardStyle}>
           <p style={labelStyle}>{desktop ? 'กำไรสุทธิ' : 'กำไร'}</p>
-          {MoneyDual({ thb: portfolioData?.total_gain_thb, usd: totalGain, mainSize: desktop ? 21 : 18, mainColor: totalGain >= 0 ? COLORS.green : COLORS.red })}
+          {MoneyDual({ thb: portfolioData?.total_gain_thb, usd: totalGain, mainSize: 22, mainColor: totalGain >= 0 ? COLORS.green : COLORS.red })}
           {desktop && (
             <div style={{ ...styles.row(SP.xs), marginTop: sidebar ? 6 : SP.sm, flexWrap: 'wrap' }}>
               {roi != null && Badge({ text: `ROI ${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%`, color: COLORS.purple })}
@@ -1350,6 +1430,7 @@ export default function DashboardV4() {
   );
 
   const MobilePortfolio = () => {
+    if (!portfolioData) return PortfolioSkeleton(); // ✅ 2026-07-11: skeleton แทนจอว่างตอนโหลดแรก
     const holdings = portfolioData?.holdings ?? [];
     return (
       <div style={styles.stack(SP.lg)}>
@@ -1358,7 +1439,7 @@ export default function DashboardV4() {
           <p style={{ margin: '4px 0 0 0', fontSize: 12, color: COLORS.muted }}>{stocks.length} หุ้น · THB/USD · อัปเดตล่าสุดชั่วโมงที่แล้ว</p>
         </div>
         <div style={{ ...styles.row(SP.sm), justifyContent: 'space-between' }}>
-          <span style={{ fontSize: 12, fontWeight: 700, padding: '4px 12px', borderRadius: 20, backgroundColor: (portfolioData?.total_gain ?? 0) >= 0 ? COLORS.greenSoft : COLORS.redSoft, color: (portfolioData?.total_gain ?? 0) >= 0 ? COLORS.green : COLORS.red }}>
+          <span style={{ fontSize: 12, fontWeight: 700, padding: '4px 12px', borderRadius: 999, backgroundColor: (portfolioData?.total_gain ?? 0) >= 0 ? COLORS.greenSoft : COLORS.redSoft, color: (portfolioData?.total_gain ?? 0) >= 0 ? COLORS.green : COLORS.red }}>
             {(portfolioData?.total_gain ?? 0) >= 0 ? 'พอร์ตบวกวันนี้' : 'พอร์ตติดลบวันนี้'}
           </span>
           <span style={{ fontSize: 12, color: COLORS.muted }}>ณ {new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
@@ -1386,52 +1467,55 @@ export default function DashboardV4() {
 
   // ✅ แก้ 2026-07-05 (รอบ 5, Finding 1): กลับไปใช้ตารางตาม mockup 100% ตามที่ MBBook ยืนยัน
   // (ก่อนหน้านี้เคยเปลี่ยนเป็นการ์ดไปแล้วรอบก่อน แต่ mockup ล่าสุดยืนยันให้ใช้ตารางจริง)
+  // ✅ 2026-07-11 Reskin Phase 2 ข้อ 7: ตารางตาม mockup .dtable — wrapper padding 6, header strip
+  // พื้น 0.035 มุมโค้ง 14 (ทั้งแถบ), font หัว 11/700, zebra แถวคี่ 0.015, hover 0.05 (.trow ใน
+  // GLOBAL_CSS), แถวสูง 44px td padding 11px 14px, ฟอนต์เนื้อตาราง 13
   const HOLDINGS_TABLE_COLS = '2.2fr 1fr 1fr 1.2fr 1.2fr 1.2fr';
   const HoldingsTable = ({ holdings }) => {
     const rate = portfolioData?.usd_thb_rate;
     return (
-      <div style={{ ...styles.card, padding: 0, overflow: 'hidden' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: HOLDINGS_TABLE_COLS, gap: SP.sm, padding: `${SP.md}px ${SP.lg}px`, borderBottom: `1px solid ${COLORS.cardBorder}` }}>
+      <div style={{ ...styles.card, padding: 6, overflow: 'hidden' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: HOLDINGS_TABLE_COLS, gap: SP.sm, padding: '12px 14px', background: 'rgba(255,255,255,0.035)', borderRadius: 14 }}>
           {['สินทรัพย์', 'จำนวนหุ้น', 'ต้นทุน/หุ้น', 'ต้นทุนทั้งหมด', 'ราคาปัจจุบัน', 'เปลี่ยนแปลง'].map((h, i) => (
-            <span key={h} style={{ fontSize: 13, fontWeight: 600, color: COLORS.faint, textAlign: i === 0 ? 'left' : 'right' }}>{h}</span>
+            <span key={h} style={{ fontSize: 11, fontWeight: 700, color: COLORS.faint, letterSpacing: 0.3, textAlign: i === 0 ? 'left' : 'right' }}>{h}</span>
           ))}
         </div>
-        {holdings.map(h => {
+        {holdings.map((h, idx) => {
           const isGain = h.gain >= 0;
           const stockInfo = stocks.find(s => s.ticker === h.ticker);
           const priceThb = rate != null ? h.current_price * rate : null;
           const gainThb = rate != null ? h.gain * rate : null;
           return (
-            <div key={h.ticker} className="glass-row" onClick={(e) => openPopup('stockDetail', { ticker: h.ticker }, e.currentTarget)}
-              style={{ display: 'grid', gridTemplateColumns: HOLDINGS_TABLE_COLS, gap: SP.sm, alignItems: 'center', padding: `${SP.md}px ${SP.lg}px`, borderBottom: `1px solid ${COLORS.cardBorder}` }}>
+            <div key={h.ticker} className="trow" onClick={(e) => openPopup('stockDetail', { ticker: h.ticker }, e.currentTarget)}
+              style={{ display: 'grid', gridTemplateColumns: HOLDINGS_TABLE_COLS, gap: SP.sm, alignItems: 'center', padding: '11px 14px', minHeight: 44, borderBottom: '1px solid rgba(255,255,255,0.05)', background: idx % 2 === 0 ? 'rgba(255,255,255,0.015)' : 'transparent' }}>
               <div style={styles.row(SP.sm)}>
-                <div style={{ width: 38, height: 38, borderRadius: 10, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.purpleSoft, color: COLORS.purple, fontWeight: 800, fontSize: 13 }}>
+                <div style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: avatarColor(h.ticker), color: '#fff', fontWeight: 800, fontSize: 11.5 }}>
                   {h.ticker.slice(0, 2)}
                 </div>
                 <div style={{ minWidth: 0 }}>
                   <div style={styles.row(SP.xs)}>
-                    <span style={{ fontSize: 16, fontWeight: 700, color: COLORS.text }}>{h.ticker}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: COLORS.text }}>{h.ticker}</span>
                     {stockInfo?.signal && (
-                      <span key={stockInfo.signal} className="signal-pulse" style={{ fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 6, backgroundColor: signalBgColor(stockInfo.signal), color: signalColor(stockInfo.signal) }}>
+                      <span key={stockInfo.signal} className="signal-pulse" style={signalBadgeStyle(stockInfo.signal)}>
                         {signalLabel(stockInfo.signal)}
                       </span>
                     )}
                   </div>
                   {portfolioData?.total_value ? (
-                    <span style={{ fontSize: 13, color: COLORS.muted }}>{((h.current_value / portfolioData.total_value) * 100).toFixed(1)}%</span>
+                    <span style={{ fontSize: 11, color: COLORS.faint }}>{((h.current_value / portfolioData.total_value) * 100).toFixed(1)}%</span>
                   ) : null}
                 </div>
               </div>
-              <span style={{ fontSize: 15, color: COLORS.text, textAlign: 'right' }}>{h.shares.toFixed(2)}</span>
-              <span style={{ fontSize: 15, color: COLORS.text, textAlign: 'right' }}>{hideAmounts ? `$${MASK}` : fmtUSD(h.avg_cost)}</span>
-              <span style={{ fontSize: 15, color: COLORS.text, textAlign: 'right' }}>{hideAmounts ? `$${MASK}` : fmtUSD(h.shares * h.avg_cost)}</span>
+              <span className="num" style={{ fontSize: 13, color: COLORS.text, textAlign: 'right' }}>{h.shares.toFixed(2)}</span>
+              <span className="num" style={{ fontSize: 13, color: COLORS.text, textAlign: 'right' }}>{hideAmounts ? `$${MASK}` : fmtUSD(h.avg_cost)}</span>
+              <span className="num" style={{ fontSize: 13, color: COLORS.text, textAlign: 'right' }}>{hideAmounts ? `$${MASK}` : fmtUSD(h.shares * h.avg_cost)}</span>
               <div style={{ textAlign: 'right' }}>
-                <p style={{ margin: 0, fontSize: 16, fontWeight: 700, color: COLORS.text }}>{hideAmounts ? `฿${MASK}` : (priceThb != null ? fmtTHB(priceThb) : fmtUSD(h.current_price))}</p>
-                <p style={{ margin: 0, fontSize: 13, color: COLORS.muted }}>{hideAmounts ? `$${MASK}` : fmtUSD(h.current_price)}</p>
+                <p className="num" style={{ margin: 0, fontSize: 13.5, fontWeight: 700, color: COLORS.text }}>{hideAmounts ? `฿${MASK}` : (priceThb != null ? fmtTHB(priceThb) : fmtUSD(h.current_price))}</p>
+                <p className="num" style={{ margin: 0, fontSize: 11, color: COLORS.faint }}>{hideAmounts ? `$${MASK}` : fmtUSD(h.current_price)}</p>
               </div>
               <div style={{ textAlign: 'right' }}>
-                <p style={{ margin: 0, fontSize: 15, fontWeight: 700, color: isGain ? COLORS.green : COLORS.red }}>{isGain ? '↗ +' : '↘ '}{h.gain_pct.toFixed(1)}%</p>
-                {gainThb != null && <p style={{ margin: 0, fontSize: 13, color: isGain ? COLORS.green : COLORS.red }}>{hideAmounts ? `(฿${MASK})` : `(${isGain ? '+' : ''}${fmtTHB(gainThb)})`}</p>}
+                <p className="num" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: isGain ? COLORS.green : COLORS.red }}>{isGain ? '↗ +' : '↘ '}{h.gain_pct.toFixed(1)}%</p>
+                {gainThb != null && <p className="num" style={{ margin: 0, fontSize: 11, color: isGain ? COLORS.green : COLORS.red }}>{hideAmounts ? `(฿${MASK})` : `(${isGain ? '+' : ''}${fmtTHB(gainThb)})`}</p>}
               </div>
             </div>
           );
@@ -1441,6 +1525,7 @@ export default function DashboardV4() {
   };
 
   const DesktopPortfolio = () => {
+    if (!portfolioData) return PortfolioSkeleton(); // ✅ 2026-07-11: skeleton แทนจอว่างตอนโหลดแรก
     const holdings = portfolioData?.holdings ?? [];
     return (
       <div style={styles.stack(SP.xl)}>
@@ -1450,7 +1535,7 @@ export default function DashboardV4() {
             <p style={{ margin: '4px 0 0 0', fontSize: 14, color: COLORS.muted }}>{stocks.length} หุ้น · THB/USD · อัปเดตล่าสุดชั่วโมงที่แล้ว</p>
           </div>
           <div style={{ textAlign: 'right' }}>
-            <span style={{ fontSize: 13, fontWeight: 700, padding: '5px 13px', borderRadius: 20, backgroundColor: (portfolioData?.total_gain ?? 0) >= 0 ? COLORS.greenSoft : COLORS.redSoft, color: (portfolioData?.total_gain ?? 0) >= 0 ? COLORS.green : COLORS.red }}>
+            <span style={{ fontSize: 13, fontWeight: 700, padding: '5px 13px', borderRadius: 999, backgroundColor: (portfolioData?.total_gain ?? 0) >= 0 ? COLORS.greenSoft : COLORS.redSoft, color: (portfolioData?.total_gain ?? 0) >= 0 ? COLORS.green : COLORS.red }}>
               {(portfolioData?.total_gain ?? 0) >= 0 ? 'พอร์ตบวกวันนี้' : 'พอร์ตติดลบวันนี้'}
             </span>
             <p style={{ margin: '6px 0 0 0', fontSize: 13, color: COLORS.muted }}>ณ {new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })}</p>
@@ -1513,10 +1598,12 @@ export default function DashboardV4() {
         <Search size={16} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: COLORS.faint }} />
         <input type="text" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="ค้นหาหุ้น..." style={{ ...styles.input, paddingLeft: 38 }} />
       </div>
-      <div style={styles.stack(SP.sm)}>
-        {filteredStocks.map(stock => <div key={stock.ticker}>{TickerCard({ stock })}</div>)}
-        {filteredStocks.length === 0 && <p style={{ color: COLORS.faint, fontSize: 13, textAlign: 'center', padding: SP.lg }}>ไม่พบหุ้นที่ค้นหา</p>}
-      </div>
+      {!stocksLoaded ? SkeletonList({ n: 6 }) : (
+        <div style={styles.stack(SP.sm)}>
+          {filteredStocks.map(stock => <div key={stock.ticker}>{TickerCard({ stock })}</div>)}
+          {filteredStocks.length === 0 && <p style={{ color: COLORS.faint, fontSize: 13, textAlign: 'center', padding: SP.lg }}>ไม่พบหุ้นที่ค้นหา</p>}
+        </div>
+      )}
     </div>
   );
 
@@ -1524,36 +1611,37 @@ export default function DashboardV4() {
   const TICKERS_TABLE_COLS = '2.4fr 1fr 1.2fr 1fr';
   // ✅ แก้ 2026-07-09: ลบปุ่มถังขยะซ้ำซ้อนออกเช่นเดียวกับ TickerCard ด้านบน — ลบได้ทางเดียวคือผ่าน
   // popup stockDetail เท่านั้น
+  // ✅ 2026-07-11 Reskin Phase 2 ข้อ 7: สเปคตารางเดียวกับ HoldingsTable (mockup .dtable)
   const TickersTable = () => (
-    <div style={{ ...styles.card, padding: 0, overflow: 'hidden' }}>
-      <div style={{ display: 'grid', gridTemplateColumns: TICKERS_TABLE_COLS, gap: SP.sm, padding: `${SP.md}px ${SP.lg}px`, borderBottom: `1px solid ${COLORS.cardBorder}` }}>
+    <div style={{ ...styles.card, padding: 6, overflow: 'hidden' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: TICKERS_TABLE_COLS, gap: SP.sm, padding: '12px 14px', background: 'rgba(255,255,255,0.035)', borderRadius: 14 }}>
         {['หุ้น', 'Confidence', 'ราคาปัจจุบัน', 'เปลี่ยนแปลง'].map((h, i) => (
-          <span key={h} style={{ fontSize: 13, fontWeight: 600, color: COLORS.faint, textAlign: i === 0 ? 'left' : 'right' }}>{h}</span>
+          <span key={h} style={{ fontSize: 11, fontWeight: 700, color: COLORS.faint, letterSpacing: 0.3, textAlign: i === 0 ? 'left' : 'right' }}>{h}</span>
         ))}
       </div>
-      {filteredStocks.map(stock => (
-        <div key={stock.ticker} className="glass-row" onClick={(e) => openPopup('stockDetail', { ticker: stock.ticker }, e.currentTarget)}
-          style={{ display: 'grid', gridTemplateColumns: TICKERS_TABLE_COLS, gap: SP.sm, alignItems: 'center', padding: `${SP.md}px ${SP.lg}px`, borderBottom: `1px solid ${COLORS.cardBorder}` }}>
+      {filteredStocks.map((stock, idx) => (
+        <div key={stock.ticker} className="trow" onClick={(e) => openPopup('stockDetail', { ticker: stock.ticker }, e.currentTarget)}
+          style={{ display: 'grid', gridTemplateColumns: TICKERS_TABLE_COLS, gap: SP.sm, alignItems: 'center', padding: '11px 14px', minHeight: 44, borderBottom: '1px solid rgba(255,255,255,0.05)', background: idx % 2 === 0 ? 'rgba(255,255,255,0.015)' : 'transparent' }}>
           <div style={styles.row(SP.sm)}>
-            <div style={{ width: 38, height: 38, borderRadius: 10, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.purpleSoft, color: COLORS.purple, fontWeight: 800, fontSize: 13 }}>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: avatarColor(stock.ticker), color: '#fff', fontWeight: 800, fontSize: 11.5 }}>
               {stock.ticker.slice(0, 2)}
             </div>
             <div style={{ minWidth: 0 }}>
               <div style={styles.row(SP.xs)}>
-                <span style={{ fontSize: 16, fontWeight: 700, color: COLORS.text }}>{stock.ticker}</span>
-                <span key={stock.signal} className="signal-pulse" style={{ fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 6, backgroundColor: signalBgColor(stock.signal), color: signalColor(stock.signal) }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: COLORS.text }}>{stock.ticker}</span>
+                <span key={stock.signal} className="signal-pulse" style={signalBadgeStyle(stock.signal)}>
                   {signalLabel(stock.signal)}
                 </span>
               </div>
-              {(stock.company_name || COMPANY_NAMES[stock.ticker]) && <span style={{ fontSize: 13, color: COLORS.faint }}>{stock.company_name || COMPANY_NAMES[stock.ticker]}</span>}
+              {(stock.company_name || COMPANY_NAMES[stock.ticker]) && <span style={{ fontSize: 11, color: COLORS.faint }}>{stock.company_name || COMPANY_NAMES[stock.ticker]}</span>}
             </div>
           </div>
-          <span style={{ fontSize: 16, fontWeight: 700, color: COLORS.purple, textAlign: 'right' }}>
+          <span className="num" style={{ fontSize: 13, fontWeight: 700, color: COLORS.purple, textAlign: 'right' }}>
             {stock.confidence != null ? `${(stock.confidence * 100).toFixed(0)}%` : '—'}
           </span>
-          <span style={{ fontSize: 16, fontWeight: 700, color: COLORS.text, textAlign: 'right' }}>{fmtUSD(stock.price)}</span>
+          <span className="num" style={{ fontSize: 13.5, fontWeight: 700, color: COLORS.text, textAlign: 'right' }}>{fmtUSD(stock.price)}</span>
           {/* ✅ เพิ่ม 2026-07-09: เติม column "เปลี่ยนแปลง" (เดิมว่างเปล่า) — ดู comment เดียวกันใน TickerCard */}
-          <span style={{ fontSize: 16, fontWeight: 700, textAlign: 'right', color: stock.change_pct == null ? COLORS.faint : stock.change_pct >= 0 ? COLORS.green : COLORS.red }}>
+          <span className="num" style={{ fontSize: 13, fontWeight: 700, textAlign: 'right', color: stock.change_pct == null ? COLORS.faint : stock.change_pct >= 0 ? COLORS.green : COLORS.red }}>
             {stock.change_pct != null ? `${stock.change_pct >= 0 ? '▲' : '▼'} ${Math.abs(stock.change_pct).toFixed(1)}%` : '—'}
           </span>
         </div>
@@ -1569,7 +1657,7 @@ export default function DashboardV4() {
         <Search size={16} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: COLORS.faint }} />
         <input type="text" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="ค้นหาหุ้น..." style={{ ...styles.input, paddingLeft: 38 }} />
       </div>
-      {TickersTable()}
+      {stocksLoaded ? TickersTable() : SkeletonList({ n: 6 })}
     </div>
   );
 
@@ -1588,17 +1676,13 @@ export default function DashboardV4() {
       <div style={{ ...styles.row(SP.sm), justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <div>
           <h2 style={{ margin: 0, fontSize: isMobile ? 19 : 27, fontWeight: 800, color: COLORS.text }}>ข่าวหุ้น</h2>
+          {/* ✅ 2026-07-11: subtitle ตามจริง — ข่าวจาก news_cache (yfinance+Finnhub) เก็บย้อนหลัง
+              ~24 ชม./ticker ไม่ใช่ 7 วันแบบข้อความเดิม (ตอนนั้นเป็น mock) */}
           <p style={{ margin: '4px 0 0 0', fontSize: isMobile ? 12 : 15, color: COLORS.muted }}>
-            สรุปข่าวย้อนหลัง 7 วัน · วิเคราะห์โดยนัตตี้{desktop ? ` · ${allNews.length} ข่าว` : ''}
+            ข่าวจริงจากนัตตี้ · อัปเดตรายชั่วโมง{desktop && newsData ? ` · ${allNews.length} ข่าว` : ''}{unreadCount > 0 ? ` · ยังไม่อ่าน ${unreadCount}` : ''}
           </p>
         </div>
         <div style={{ ...styles.row(SP.xs), flexWrap: 'wrap' }}>
-          {/* ✅ เพิ่ม 2026-07-05 (รอบ 10): ปุ่มทดสอบชั่วคราว — จำลองข่าวใหม่เข้ามาเพื่อเช็คป้าย New +
-              ปุ่มอ่านทั้งหมด ลบทิ้งได้พร้อม MOCK_NEWS ตอนต่อ backend ข่าวจริง (#51) */}
-          <button className="press-btn" onClick={addTestNews}
-            style={btn('outline', { fontSize: isMobile ? 12 : 13, padding: isMobile ? '8px 12px' : '9px 14px', minHeight: 'auto' })}>
-            <Plus size={isMobile ? 14 : 15} /> ข่าวทดสอบ
-          </button>
           {unreadCount > 0 && (
             <button className="press-btn" onClick={markAllNewsRead}
               style={btn('ghost', { fontSize: isMobile ? 12 : 13, padding: isMobile ? '8px 12px' : '9px 14px', minHeight: 'auto' })}>
@@ -1612,6 +1696,7 @@ export default function DashboardV4() {
 
   const NewsPagination = () => {
     const totalNews = getAllNews().length;
+    if (totalNews === 0) return null; // ✅ 2026-07-11: ไม่มีข่าว → ไม่ต้องโชว์ "1–0 จาก 0 ข่าว"
     const totalPages = Math.max(Math.ceil(totalNews / NEWS_PAGE_SIZE), 1);
     const startIdx = (newsPage - 1) * NEWS_PAGE_SIZE + 1;
     const endIdx = Math.min(newsPage * NEWS_PAGE_SIZE, totalNews);
@@ -1646,25 +1731,41 @@ export default function DashboardV4() {
   // mockup 100% (ก่อนหน้านี้ Impact แยกเป็นแถวของตัวเอง) + เพิ่ม snippet เนื้อหาสั้นๆ ใต้ headline
   // ✅ แก้ 2026-07-05 (รอบ 8): เพิ่มป้าย "New" สีทองสำหรับข่าวที่ยังไม่เคยถูกคลิกเปิด popup — คลิกครั้ง
   // แรกจะ mark ว่าอ่านแล้วทันที (markNewsRead) ป้ายจะหายไปตั้งแต่ re-render ถัดไป
+  // ✅ 2026-07-11 Reskin Phase 2 ข้อ 9: unread treatment ตาม mockup .news-card (confirm 07-07) —
+  // unread = ขอบซ้ายทอง 3px + headline หนา + จุดทอง "New" ที่ footer (pulse 2 ครั้งตอน mount แล้ว
+  // หยุด — .newdot-pulse ใน GLOBAL_CSS), อ่านแล้ว = จางทั้งการ์ด (opacity .62) + headline น้ำหนักปกติ
+  // ขนาดฟอนต์ตาม mockup ตรงๆ (headline 14 / snippet 12 / footer 11 / tag 10) ทั้งสอง view
+  // sentiment/impact โชว์เฉพาะเมื่อมีข้อมูลจริงเท่านั้น (ข่าวจริงจาก yfinance/Finnhub ไม่มี field นี้)
   const NewsCard = ({ article }) => {
-    const snippet = article.body.length > 90 ? article.body.slice(0, 90).trim() + '...' : article.body;
+    const snippet = article.body.length > 120 ? article.body.slice(0, 120).trim() + '...' : article.body;
     const isNew = !readNewsIds.has(article.id);
     return (
-      <div className="glass-row" onClick={(e) => { markNewsRead(article.id); openPopup('newsDetail', { article }, e.currentTarget); }} style={styles.cardTight}>
-        <div style={{ ...styles.row(SP.xs), marginBottom: SP.sm, flexWrap: 'wrap' }}>
-          {isNew && (
-            <span style={{ fontSize: isMobile ? 10 : 15, fontWeight: 800, padding: '3px 10px', borderRadius: 6, backgroundColor: 'rgba(245,196,107,0.16)', color: COLORS.gold }}>New</span>
-          )}
+      <div className="glass-row" onClick={(e) => { markNewsRead(article.id); openPopup('newsDetail', { article }, e.currentTarget); }}
+        style={{
+          ...styles.cardTight, padding: '15px 16px',
+          borderLeft: isNew ? `3px solid ${COLORS.goldDark}` : `1px solid ${COLORS.cardBorder}`,
+          opacity: isNew ? 1 : 0.62,
+        }}>
+        <div style={{ ...styles.row(6), marginBottom: 8, flexWrap: 'wrap' }}>
           {article.tickers.map(t => (
-            <span key={t} style={{ fontSize: isMobile ? 10 : 15, fontWeight: 700, padding: '3px 10px', borderRadius: 6, backgroundColor: COLORS.purpleSoft, color: COLORS.purple }}>{t}</span>
+            <span key={t} style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, backgroundColor: 'rgba(255,255,255,0.07)', color: COLORS.muted }}>{t}</span>
           ))}
-          <span style={{ marginLeft: 'auto', fontSize: isMobile ? 10 : 15, fontWeight: 700, padding: '3px 10px', borderRadius: 6, backgroundColor: `${NEWS_SENTIMENT_COLOR[article.sentiment]}22`, color: NEWS_SENTIMENT_COLOR[article.sentiment] }}>{article.sentiment}</span>
+          {article.sentiment && (
+            <span style={{ marginLeft: 'auto', fontSize: 10.5, fontWeight: 700, padding: '2px 9px', borderRadius: 999, backgroundColor: `${NEWS_SENTIMENT_COLOR[article.sentiment]}22`, color: NEWS_SENTIMENT_COLOR[article.sentiment] }}>{article.sentiment}</span>
+          )}
         </div>
-        <p style={{ margin: '0 0 4px 0', fontSize: isMobile ? 14 : 19, fontWeight: 700, color: COLORS.text, lineHeight: 1.5 }}>{article.headline}</p>
-        <p style={{ margin: '0 0 8px 0', fontSize: isMobile ? 12 : 16, color: COLORS.muted, lineHeight: 1.6 }}>{snippet}</p>
+        <p style={{ margin: '0 0 5px 0', fontSize: 14, fontWeight: isNew ? 700 : 500, color: COLORS.text, lineHeight: 1.45 }}>{article.headline}</p>
+        {snippet && <p style={{ margin: '0 0 10px 0', fontSize: 12, color: COLORS.muted, lineHeight: 1.55 }}>{snippet}</p>}
         <div style={{ ...styles.row(SP.sm), justifyContent: 'space-between' }}>
-          <span style={{ fontSize: isMobile ? 11 : 15, color: COLORS.faint }}>{article.date} · {article.source}</span>
-          <span style={{ fontSize: isMobile ? 11 : 15, fontWeight: 700, color: COLORS.gold }}>Impact: {article.impact}</span>
+          <span style={{ fontSize: 11, color: COLORS.faint }}>{article.date}{article.source ? ` · ${article.source}` : ''}</span>
+          {isNew ? (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 800, color: COLORS.goldDark }}>
+              <span className="newdot-pulse" style={{ width: 6, height: 6, borderRadius: '50%', background: COLORS.goldGradient }} />
+              New
+            </span>
+          ) : (
+            article.impact && <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.gold }}>Impact: {article.impact}</span>
+          )}
         </div>
       </div>
     );
@@ -1678,6 +1779,18 @@ export default function DashboardV4() {
     const sorted = getAllNews().sort((a, b) => b.timestamp - a.timestamp);
     const start = (newsPage - 1) * NEWS_PAGE_SIZE;
     const pageItems = sorted.slice(start, start + NEWS_PAGE_SIZE);
+    // ✅ 2026-07-11: 3 เคสตาม UX baseline — โหลดอยู่ = skeleton (fetchNews set error flag เสมอ
+    // ตอนล้ม เลยไม่ shimmer ค้างถาวร) / โหลดล้ม = ข้อความ error / โหลดได้แต่ cache ว่าง = ข้อความสถานะ
+    if (newsData === null) return SkeletonList({ n: 4 });
+    if (sorted.length === 0) {
+      return (
+        <div style={{ ...styles.card, textAlign: 'center', color: COLORS.muted, fontSize: 13, lineHeight: 1.8 }}>
+          {newsData.error
+            ? 'โหลดข่าวไม่สำเร็จ — เช็คว่า backend deploy รอบที่มี endpoint /news แล้วหรือยัง (จะลองใหม่เองทุก 5 นาที)'
+            : 'ยังไม่มีข่าวใน cache ตอนนี้ — นัตตี้จะเติมให้อัตโนมัติใน prefetch รอบถัดไป (ทุกชั่วโมง นาที :05)'}
+        </div>
+      );
+    }
     return (
       <div style={styles.stack(SP.sm)}>
         {pageItems.map(a => <div key={a.id}>{NewsCard({ article: a })}</div>)}
@@ -1711,8 +1824,8 @@ export default function DashboardV4() {
     const barColor = meets ? COLORS.green : COLORS.red;
     const targetPos = Math.min(Math.max(target, 0), 100);
     return (
-      <div style={{ position: 'relative', width: '100%', height: 8, backgroundColor: 'rgba(148,163,184,0.15)', borderRadius: 6, marginTop: SP.sm }}>
-        <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', backgroundColor: barColor, borderRadius: 6, transition: 'width 0.4s ease' }} />
+      <div style={{ position: 'relative', width: '100%', height: 10, backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 999, marginTop: SP.sm }}>
+        <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', backgroundColor: barColor, borderRadius: 999, transition: 'width 0.4s ease' }} />
         <div style={{ position: 'absolute', top: -2, left: `${targetPos}%`, width: 2, height: 12, backgroundColor: COLORS.gold, borderRadius: 1 }} />
       </div>
     );
@@ -1738,6 +1851,12 @@ export default function DashboardV4() {
               {delta >= 0 ? `ผ่านเป้า +${delta}%` : `ต่ำกว่าเป้า ${Math.abs(delta)}%`}
             </p>
           </>
+        ) : !roiSummary ? (
+          // ✅ 2026-07-11: ตอนโหลดแรก — skeleton แทนข้อความ "ยังไม่มีสัญญาณ" ที่ยังไม่รู้ว่าจริงไหม
+          <div style={{ marginTop: 8 }}>
+            {Skeleton({ h: 26, w: '45%', style: { marginBottom: 10 } })}
+            {Skeleton({ h: 10 })}
+          </div>
         ) : (
           <p style={{ fontSize: 14, margin: '8px 0 0 0', color: COLORS.faint }}>ยังไม่มีสัญญาณครบอายุพอให้คำนวณ</p>
         )}
@@ -1796,7 +1915,9 @@ export default function DashboardV4() {
             {costPeriodMode !== 'cumulative' && CostDateRangeDropdown()}
           </div>
         </div>
-        {points.length === 0 ? (
+        {!historyData ? (
+          Skeleton({ h: 160 }) // ✅ 2026-07-11: ตอนโหลดแรกยังไม่รู้ว่ามีข้อมูลไหม — skeleton ไม่ใช่ข้อความ "ไม่มีข้อมูล"
+        ) : points.length === 0 ? (
           <p style={{ color: COLORS.faint, fontSize: 14, textAlign: 'center', padding: SP.lg, margin: 0 }}>ยังไม่มีข้อมูลต้นทุนในช่วงที่เลือก</p>
         ) : costPeriodMode === 'cumulative' ? (
           CostCumulativeLineChart({ points })
@@ -1830,9 +1951,16 @@ export default function DashboardV4() {
     <div style={styles.card}>
       <div style={{ ...styles.row(SP.sm), justifyContent: 'space-between', marginBottom: SP.md }}>
         <p style={styles.sectionTitle}>รายงานจากนิก</p>
-        {nikSuggestions?.pending_count > 0 && <span style={{ backgroundColor: 'rgba(245,196,107,0.16)', color: COLORS.gold, fontSize: 13, padding: '3px 11px', borderRadius: 12 }}>{nikSuggestions.pending_count} pending</span>}
+        {nikSuggestions?.pending_count > 0 && <span style={{ backgroundColor: 'rgba(245,196,107,0.16)', color: COLORS.gold, fontSize: 13, padding: '3px 11px', borderRadius: 999 }}>{nikSuggestions.pending_count} pending</span>}
       </div>
-      {!nikSuggestions && <p style={{ color: COLORS.faint, fontSize: 14 }}>กำลังโหลด...</p>}
+      {/* ✅ 2026-07-11: skeleton แทนข้อความ "กำลังโหลด..." */}
+      {!nikSuggestions && (
+        <div style={styles.stack(SP.sm)}>
+          {Skeleton({ h: 14, w: '85%' })}
+          {Skeleton({ h: 14, w: '70%' })}
+          {Skeleton({ h: 14, w: '78%' })}
+        </div>
+      )}
       {nikSuggestions?.suggestions?.length === 0 && <p style={{ color: COLORS.faint, fontSize: 14 }}>ยังไม่มี suggestion จากนิก</p>}
 
       {desktop && nikSuggestions?.suggestions?.length > 0 && (
@@ -1858,7 +1986,7 @@ export default function DashboardV4() {
           );
         }
         return (
-          <div key={s.id} style={{ padding: SP.md, backgroundColor: 'rgba(148,163,184,0.08)', borderRadius: 10, marginBottom: SP.sm }}>
+          <div key={s.id} style={{ padding: SP.md, backgroundColor: 'rgba(148,163,184,0.08)', borderRadius: 9, marginBottom: SP.sm }}>
             <div style={{ ...styles.row(SP.sm), justifyContent: 'space-between', alignItems: 'flex-start' }}>
               <p style={{ fontSize: 13, fontWeight: 600, margin: 0, flex: 1, color: COLORS.text }}>{s.summary}</p>
               <span style={{ color: sColor, fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap' }}>{sLabel}</span>
@@ -1926,38 +2054,70 @@ export default function DashboardV4() {
     return MobilePortfolio();
   };
 
-  const BottomNav = () => (
-    <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 100, display: 'flex', backgroundColor: 'rgba(11,17,48,0.92)', borderTop: `1px solid ${COLORS.cardBorder}`, paddingBottom: 'env(safe-area-inset-bottom, 0px)', backdropFilter: 'blur(10px)' }}>
-      {tabs.map((tab) => {
-        const Icon = tab.icon;
-        const active = activeTab === tab.id;
-        return (
-          <button key={tab.id} className="press-btn" onClick={() => setActiveTab(tab.id)} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 3, minHeight: 58, padding: '6px 2px', backgroundColor: 'transparent', border: 'none', color: active ? COLORS.purple : COLORS.muted, cursor: 'pointer' }}>
-            <Icon size={20} strokeWidth={active ? 2.4 : 2} />
-            <span style={{ fontSize: 10, fontWeight: active ? 700 : 500 }}>{tab.label}</span>
-          </button>
-        );
-      })}
-    </div>
+  // ✅ 2026-07-09 Reskin Phase 2 ข้อ 1-2 + ข้อ 9 (unread badge บน nav): navdot ทองแสดงจำนวนข่าว
+  // ที่ยังไม่อ่านบนแท็บ News (Desktop มุมขวาบนนอกปุ่ม, Mobile ขวาบนของไอคอน ตาม mockup .navdot)
+  const NavDot = ({ count, desktop }) => (
+    <span style={{
+      position: 'absolute', top: desktop ? -4 : 2, right: desktop ? -2 : '22%',
+      background: COLORS.goldGradient, color: '#3a2405',
+      fontSize: desktop ? 9.5 : 9, fontWeight: 800,
+      minWidth: desktop ? 16 : 14, height: desktop ? 16 : 14, borderRadius: 8,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px',
+    }}>
+      {count}
+    </span>
   );
 
-  const TopNav = () => (
-    <div style={{ ...styles.row(SP.xs), marginBottom: SP.xl, flexWrap: 'wrap' }}>
-      {tabs.map((tab) => {
-        const Icon = tab.icon;
-        const active = activeTab === tab.id;
-        return (
-          <button key={tab.id} className={`nav-btn${active ? ' nav-btn-active' : ''}`} onClick={() => setActiveTab(tab.id)} style={{
-            ...styles.row(SP.xs), padding: '10px 18px', borderRadius: 12, fontWeight: 600, fontSize: 15,
-            backgroundColor: active ? COLORS.purple : 'transparent', color: active ? '#fff' : COLORS.muted,
-            border: `1px solid ${active ? COLORS.purple : COLORS.cardBorder}`, cursor: 'pointer', whiteSpace: 'nowrap',
-          }}>
-            <Icon size={17} /> {tab.label}
-          </button>
-        );
-      })}
-    </div>
-  );
+  // ✅ 2026-07-09 Reskin Phase 2 ข้อ 2: .mobile-bottomnav ตาม mockup — พื้น rgba(13,17,28,0.92)
+  // + blur(14px), item active สีม่วง (inactive = faint ตาม --text-3), navdot ทอง fontSize 9
+  const BottomNav = () => {
+    const unread = getAllNews().filter(a => !readNewsIds.has(a.id)).length;
+    return (
+      <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 100, display: 'flex', backgroundColor: 'rgba(13,17,28,0.92)', borderTop: `1px solid ${COLORS.cardBorder}`, padding: '9px 6px 12px', paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 12px)', backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)' }}>
+        {tabs.map((tab) => {
+          const Icon = tab.icon;
+          const active = activeTab === tab.id;
+          return (
+            <button key={tab.id} className="press-btn" onClick={() => setActiveTab(tab.id)} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 3, padding: '6px 2px', borderRadius: 14, backgroundColor: 'transparent', border: 'none', color: active ? COLORS.purple : COLORS.faint, cursor: 'pointer', position: 'relative' }}>
+              <Icon size={20} strokeWidth={active ? 2.4 : 2} />
+              <span style={{ fontSize: 10.5, fontWeight: 600 }}>{tab.label}</span>
+              {tab.id === 'news' && unread > 0 && NavDot({ count: unread, desktop: false })}
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // ✅ 2026-07-09 Reskin Phase 2 ข้อ 1: pill bar ตาม mockup .desktop-nav — container กระจก
+  // radius 999 padding 5, ปุ่ม active = gradient ม่วง + เงาม่วง, hover ลอยขึ้น (.nav-btn ใน
+  // GLOBAL_CSS มีอยู่แล้ว), navdot ทองมุมขวาบนบนแท็บ News
+  const TopNav = () => {
+    const unread = getAllNews().filter(a => !readNewsIds.has(a.id)).length;
+    return (
+      <div style={{ display: 'flex', marginBottom: SP.xl }}>
+        <div style={{ display: 'flex', backgroundColor: COLORS.cardBg, border: `1px solid ${COLORS.cardBorder}`, borderRadius: 999, padding: 5, gap: 2 }}>
+          {tabs.map((tab) => {
+            const Icon = tab.icon;
+            const active = activeTab === tab.id;
+            return (
+              <button key={tab.id} className={`nav-btn${active ? ' nav-btn-active' : ''}`} onClick={() => setActiveTab(tab.id)} style={{
+                display: 'flex', alignItems: 'center', gap: 7, padding: '9px 18px', borderRadius: 999,
+                fontSize: 13.5, fontWeight: 600, whiteSpace: 'nowrap', cursor: 'pointer',
+                position: 'relative', border: 'none',
+                background: active ? COLORS.purpleGradient : 'transparent',
+                color: active ? '#fff' : COLORS.muted,
+                boxShadow: active ? '0 6px 16px -6px rgba(139,123,247,0.55)' : 'none',
+              }}>
+                <Icon size={16} /> {tab.label}
+                {tab.id === 'news' && unread > 0 && NavDot({ count: unread, desktop: true })}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
 
   // ===== ✅ เพิ่ม 2026-07-09: หน้า Login (ระบบ password) =====
   // helper ธรรมดา เรียกเป็น LoginView() ตามกติกา (ห้าม <LoginView/>) — ไม่มี hook ข้างใน
@@ -2010,7 +2170,7 @@ export default function DashboardV4() {
           <div style={{ color: COLORS.red, fontSize: 12.5, marginBottom: SP.sm }}>{loginState.error}</div>
         )}
         <button className="press-btn" onClick={submitLogin} disabled={loginState.busy}
-          style={{ width: '100%', padding: '12px 0', borderRadius: 12, border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 15, color: '#1a1305', background: COLORS.goldGradient || 'linear-gradient(180deg,#F7CE85,#EF9F27)', opacity: loginState.busy ? 0.6 : 1 }}>
+          style={{ width: '100%', padding: '12px 0', borderRadius: 14, border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 15, color: '#3a2405', background: COLORS.goldGradient, opacity: loginState.busy ? 0.6 : 1 }}>
           {loginState.busy ? 'กำลังตรวจสอบ...' : 'เข้าสู่ระบบ'}
         </button>
       </div>

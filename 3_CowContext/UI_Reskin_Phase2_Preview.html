@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UI Reskin Phase 2 — Preview เทียบทีละข้อ</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Noto+Sans+Thai:wght@400;600;700;800&display=swap');
+  :root{
+    --bg:#0a0e17; --glass:rgba(255,255,255,0.045); --glass-strong:rgba(255,255,255,0.075);
+    --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.18);
+    --text:#f2f4fa; --text-2:rgba(242,244,250,0.62); --text-3:rgba(242,244,250,0.38);
+    --purple:#8b7bf7; --purple-2:#6a5cf0; --blue:#4fc3ff;
+    --gold-1:#f7ce85; --gold-2:#ef9f27; --green:#33d692; --red:#ff6570;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;padding:28px 18px 90px;color:var(--text);min-height:100vh;
+    font-family:'Inter','Noto Sans Thai',sans-serif;-webkit-font-smoothing:antialiased;
+    background:radial-gradient(ellipse 900px 500px at 10% -10%, rgba(139,123,247,0.14), transparent 60%),
+               radial-gradient(ellipse 700px 500px at 100% 0%, rgba(79,195,255,0.08), transparent 55%),var(--bg);}
+  .wrap{max-width:1100px;margin:0 auto;}
+  h1{font-size:22px;margin:0 0 6px;}
+  .sub{color:var(--text-2);font-size:13.5px;margin-bottom:30px;line-height:1.7;}
+  .item{background:var(--glass);border:1px solid var(--border);border-radius:24px;padding:20px 22px;margin-bottom:22px;backdrop-filter:blur(18px);}
+  .item h2{font-size:15.5px;margin:0 0 4px;display:flex;align-items:center;gap:10px;}
+  .item h2 .no{background:linear-gradient(135deg,var(--purple),var(--purple-2));color:#fff;font-size:12px;font-weight:800;width:24px;height:24px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;}
+  .item .desc{color:var(--text-3);font-size:12px;margin-bottom:16px;line-height:1.6;}
+  .duo{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  @media(max-width:760px){.duo{grid-template-columns:1fr;}}
+  .pane{border:1px dashed var(--border-strong);border-radius:14px;padding:16px;position:relative;min-height:90px;display:flex;flex-direction:column;gap:12px;justify-content:center;}
+  .pane .tag{position:absolute;top:-9px;left:14px;font-size:10px;font-weight:800;padding:2px 9px;border-radius:999px;letter-spacing:.4px;}
+  .pane.now .tag{background:#2a3040;color:var(--text-2);}
+  .pane.next .tag{background:linear-gradient(135deg,var(--gold-1),var(--gold-2));color:#3a2405;}
+  .pane.next{border-color:rgba(239,159,39,0.55);}
+  .rowc{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+
+  /* ===== ของเดิม (ตอนนี้ — หลัง Phase 1 สีตรงแล้ว แต่ทรง/เงา/ขนาดยังเป็นแบบเก่า) ===== */
+  .old-nav{display:flex;gap:8px;}
+  .old-navbtn{padding:10px 18px;border-radius:12px;font-weight:600;font-size:15px;border:1px solid var(--border);color:var(--text-2);background:none;}
+  .old-navbtn.active{background:var(--purple);color:#fff;border-color:var(--purple);}
+  .old-gold{background:linear-gradient(180deg,#f7ce85,#ef9f27);color:#1a1305;font-weight:700;font-size:13px;padding:10px 18px;border-radius:12px;border:none;
+    box-shadow:4px 4px 9px rgba(0,0,0,0.45), -3px -3px 7px rgba(255,224,168,0.25), inset 1px 1px 2px rgba(255,255,255,0.35);}
+  .old-badge{font-size:12px;font-weight:700;padding:4px 12px;border-radius:999px;display:inline-block;}
+  .old-avatar{width:40px;height:40px;border-radius:50%;background:var(--purple);display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;color:#fff;}
+  .old-kpi{background:var(--glass);border:1px solid var(--border);border-radius:16px;padding:16px;width:200px;}
+  .old-kpi .l{font-size:13.5px;color:var(--text-3);font-weight:600;margin-bottom:8px;}
+  .old-kpi .v{font-size:24px;font-weight:800;}
+  .old-kpi .u{font-size:13px;color:var(--text-3);}
+  table.oldt{width:100%;border-collapse:collapse;font-size:13px;}
+  table.oldt th{text-align:left;color:var(--text-3);font-size:12px;padding:10px 12px;border-bottom:1px solid var(--border);}
+  table.oldt td{padding:14px 12px;border-bottom:1px solid var(--border);}
+  .old-pillbar{display:inline-flex;background:var(--glass);border:1px solid var(--border);border-radius:999px;padding:4px;}
+  .old-pillbar button{padding:7px 15px;font-size:12px;font-weight:600;border-radius:999px;color:var(--text-3);border:none;background:none;min-width:84px;}
+  .old-pillbar button.active{background:var(--purple);color:#fff;}
+  .old-news{background:var(--glass);border:1px solid var(--border);border-radius:16px;padding:14px;}
+  .old-news .h{font-weight:700;font-size:13.5px;margin:6px 0;}
+  .old-news .f{color:var(--text-3);font-size:11px;}
+
+  /* ===== เป้าหมาย Phase 2 (สเปคจาก UI_Preview_v1) ===== */
+  .new-nav{display:inline-flex;background:var(--glass);border:1px solid var(--border);border-radius:999px;padding:5px;gap:2px;}
+  .new-navbtn{display:flex;align-items:center;gap:7px;padding:9px 18px;border-radius:999px;font-size:13.5px;font-weight:600;color:var(--text-2);border:none;background:none;position:relative;transition:all .2s ease;}
+  .new-navbtn:hover{transform:translateY(-2px);color:var(--text);}
+  .new-navbtn.active{background:linear-gradient(135deg,var(--purple),var(--purple-2));color:#fff;box-shadow:0 6px 16px -6px rgba(139,123,247,0.55);}
+  .navdot{position:absolute;top:-4px;right:-2px;background:linear-gradient(135deg,var(--gold-1),var(--gold-2));color:#3a2405;font-size:9.5px;font-weight:800;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;padding:0 3px;}
+  .new-gold{background:linear-gradient(135deg,var(--gold-1),var(--gold-2));color:#3a2405;font-weight:700;font-size:13px;padding:10px 18px;border-radius:14px;border:none;display:inline-flex;align-items:center;gap:6px;
+    box-shadow:0 10px 22px -9px rgba(239,159,39,0.6), inset 0 1px 0 rgba(255,255,255,0.55), inset 0 -3px 5px rgba(140,74,3,0.35);transition:transform .15s cubic-bezier(.34,1.56,.64,1);}
+  .new-gold:hover{transform:scale(1.06);}
+  .new-badge{font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;display:inline-block;letter-spacing:.2px;}
+  .b-buy{background:rgba(51,214,146,0.16);color:var(--green);}
+  .b-sell{background:rgba(255,101,112,0.16);color:var(--red);}
+  .b-hold{background:rgba(139,123,247,0.18);color:var(--purple);}
+  .new-avatar{width:34px;height:34px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:800;color:#fff;}
+  .new-kpi{background:var(--glass);border:1px solid var(--border);border-radius:24px;padding:16px 18px;width:200px;}
+  .new-kpi .l{font-size:11.5px;color:var(--text-3);font-weight:600;margin-bottom:8px;}
+  .new-kpi .v{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;}
+  .new-kpi .u{font-size:12px;color:var(--text-3);margin-top:2px;}
+  .new-kpi .c{margin-top:8px;font-size:11.5px;font-weight:700;padding:3px 9px;border-radius:999px;display:inline-block;background:rgba(51,214,146,0.16);color:var(--green);}
+  table.newt{width:100%;border-collapse:collapse;font-size:13px;}
+  table.newt th{text-align:left;font-size:11px;font-weight:700;color:var(--text-3);padding:12px 14px;background:rgba(255,255,255,0.035);}
+  table.newt th:first-child{border-radius:14px 0 0 14px;} table.newt th:last-child{border-radius:0 14px 14px 0;}
+  table.newt tr.z:nth-child(odd){background:rgba(255,255,255,0.015);}
+  table.newt tr.z:hover{background:rgba(255,255,255,0.05);}
+  table.newt td{padding:11px 14px;height:44px;border-bottom:1px solid rgba(255,255,255,0.05);vertical-align:middle;}
+  .new-pillbar{position:relative;display:inline-flex;background:var(--glass);border:1px solid var(--border);border-radius:999px;padding:4px;}
+  .new-pillbar button{padding:7px 15px;font-size:12px;font-weight:600;border-radius:999px;color:var(--text-3);border:none;background:none;min-width:88px;}
+  .new-pillbar button.active{background:linear-gradient(135deg,var(--purple),var(--purple-2));color:#fff;box-shadow:0 4px 14px -4px rgba(139,123,247,0.6);}
+  .news-unread{background:var(--glass-strong);border:1px solid var(--border);border-left:3px solid var(--gold-2);border-radius:16px;padding:14px;}
+  .news-read{background:var(--glass);border:1px solid var(--border);border-radius:16px;padding:14px;opacity:.62;}
+  .news-h{font-weight:800;font-size:13.5px;margin:6px 0;}
+  .news-read .news-h{font-weight:500;}
+  .news-f{color:var(--text-3);font-size:11px;display:flex;align-items:center;gap:6px;}
+  .gdot{width:7px;height:7px;border-radius:50%;background:linear-gradient(135deg,var(--gold-1),var(--gold-2));display:inline-block;animation:pulse1 .9s ease 1;}
+  @keyframes pulse1{0%{transform:scale(1)}40%{transform:scale(1.6)}100%{transform:scale(1)}}
+  .modal-demo{background:var(--glass-strong);border:1px solid var(--border-strong);border-radius:24px;padding:18px;backdrop-filter:blur(18px);max-width:270px;}
+  .modal-demo h4{margin:0 0 6px;font-size:14.5px;}
+  .modal-demo p{margin:0 0 14px;font-size:12px;color:var(--text-2);line-height:1.6;}
+  .btn-red{background:rgba(255,101,112,0.16);color:var(--red);font-weight:700;font-size:12.5px;padding:9px 16px;border-radius:14px;border:1px solid rgba(255,101,112,0.3);}
+  .btn-ghost{background:var(--glass);border:1px solid var(--border);padding:9px 16px;border-radius:14px;font-size:12.5px;font-weight:600;color:var(--text-2);}
+  .old-modal{background:var(--glass-strong);border:1px solid var(--border);border-radius:16px;padding:18px;max-width:270px;}
+  .radius-demo{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;}
+  .rbox{background:var(--glass);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text-3);}
+  .note{background:rgba(139,123,247,0.08);border:1px solid rgba(139,123,247,0.25);border-radius:14px;padding:14px 16px;font-size:12.5px;color:var(--text-2);line-height:1.7;margin-top:26px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>UI Reskin — Phase 2 Preview</h1>
+  <div class="sub">เทียบข้างกันทีละข้อ: <b style="color:var(--text-2)">ซ้าย = ตอนนี้</b> (หลัง Phase 1 — โทนสีตรงแล้ว แต่ทรง/เงา/ขนาดยังแบบเดิม) · <b style="color:var(--gold-1)">ขวา = เป้าหมาย Phase 2</b> (สเปคจาก UI_Preview_v1) — ดูจบแล้วบอกได้เลยว่าข้อไหนเอา/ไม่เอา/ปรับ</div>
+
+  <div class="item"><h2><span class="no">1</span>Desktop Nav → Pill Bar</h2>
+    <div class="desc">เดิมเป็นปุ่มแยกชิ้นมีกรอบ · ใหม่รวมเป็นแคปซูลกระจกเดียว, active ไล่เฉดม่วง + เงา, badge ทองแจ้งข่าวใหม่</div>
+    <div class="duo">
+      <div class="pane now"><span class="tag">ตอนนี้</span><div class="old-nav"><button class="old-navbtn active">Portfolio</button><button class="old-navbtn">Tickers</button><button class="old-navbtn">News</button><button class="old-navbtn">System</button></div></div>
+      <div class="pane next"><span class="tag">PHASE 2</span><div class="new-nav"><button class="new-navbtn active">Portfolio</button><button class="new-navbtn">Tickers</button><button class="new-navbtn">News<span class="navdot">3</span></button><button class="new-navbtn">System</button></div></div>
+    </div>
+  </div>
+
+  <div class="item"><h2><span class="no">2</span>Mobile Bottom Nav</h2>
+    <div class="desc">พื้นหลังเบลอเข้ม (แบบแอปจริง), แท็บ active สีม่วง, จุดทองนับข่าวยังไม่อ่าน — โครงเหมือนเดิม เปลี่ยนผิว</div>
+    <div class="duo">
+      <div class="pane now"><span class="tag">ตอนนี้</span><div style="display:flex;border-top:1px solid var(--border);padding-top:10px;"><div style="flex:1;text-align:center;color:var(--purple);font-size:10.5px;font-weight:600;">💼<br>Portfolio</div><div style="flex:1;text-align:center;color:var(--text-3);font-size:10.5px;">📈<br>Tickers</div><div style="flex:1;text-align:center;color:var(--text-3);font-size:10.5px;">📰<br>News</div><div style="flex:1;text-align:center;color:var(--text-3);font-size:10.5px;">⚙️<br>System</div></div></div>
+      <div class="pane next"><span class="tag">PHASE 2</span><div style="display:flex;border-top:1px solid var(--border);background:rgba(13,17,28,0.92);backdrop-filter:blur(14px);padding:9px 6px 6px;border-radius:0 0 14px 14px;"><div style="flex:1;text-align:center;color:var(--purple);font-size:10.5px;font-weight:600;">💼<br>Portfolio</div><div style="flex:1;text-align:center;color:var(--text-3);font-size:10.5px;">📈<br>Tickers</div><div style="flex:1;text-align:center;color:var(--text-3);font-size:10.5px;position:relative;">📰<br>News<span style="position:absolute;top:-2px;right:22%;background:linear-gradient(135deg,var(--gold-1),var(--gold-2));color:#3a2405;font-size:9px;font-weight:800;min-width:14px;height:14px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;">3</span></div><div style="flex:1;text-align:center;color:var(--text-3);font-size:10.5px;">⚙️<br>System</div></div></div>
+    </div>
+  </div>
+
+  <div class="item"><h2><span class="no">3</span>ปุ่มทอง (+ Trade / +)</h2>
+    <div class="desc">เดิมเงา clay หนาแบบนูนสองด้าน · ใหม่เงาลอยใต้ปุ่ม + ไฮไลต์ขอบบน (ตาม mockup — ดูเบากว่า แพงกว่า) hover ขยาย 1.06</div>
+    <div class="duo">
+      <div class="pane now"><span class="tag">ตอนนี้</span><div class="rowc"><button class="old-gold">+ Trade</button><button class="old-gold" style="padding:10px 14px;">+</button></div></div>
+      <div class="pane next"><span class="tag">PHASE 2</span><div class="rowc"><button class="new-gold">+ Trade</button><button class="new-gold" style="padding:10px 14px;">+</button></div></div>
+    </div>
+  </div>
+
+  <div class="item"><h2><span class="no">4</span>Badge สัญญาณ BUY / SELL / HOLD</h2>
+    <div class="desc">เล็กลง (10.5px, padding 3×9) ตัวหนา 700 — แน่นขึ้น ไม่กินพื้นที่แถว</div>
+    <div class="duo">
+      <div class="pane now"><span class="tag">ตอนนี้</span><div class="rowc"><span class="old-badge b-buy">BUY</span><span class="old-badge b-sell">SELL</span><span class="old-badge b-hold">HOLD</span></div></div>
+      <div class="pane next"><span class="tag">PHASE 2</span><div class="rowc"><span class="new-badge b-buy">BUY</span><span class="new-badge b-sell">SELL</span><span class="new-badge b-hold">HOLD</span></div></div>
+    </div>
+  </div>
+
+  <div class="item"><h2><span class="no">5</span>Avatar หุ้น</h2>
+    <div class="desc">34px + สีประจำตัว ticker (ไม่ใช่ม่วงหมดทุกตัว) ตัวย่อหนา 800</div>
+    <div class="duo">
+      <div class="pane now"><span class="tag">ตอนนี้</span><div class="rowc"><span class="old-avatar">GO</span><span class="old-avatar">NV</span><span class="old-avatar">TS</span></div></div>
+      <div class="pane next"><span class="tag">PHASE 2</span><div class="rowc"><span class="new-avatar" style="background:#4285F4;">GO</span><span class="new-avatar" style="background:#76B900;color:#0b2000;">NV</span><span class="new-avatar" style="background:#d33;">TS</span></div></div>
+    </div>
+  </div>
+
+  <div class="item"><h2><span class="no">6</span>การ์ด KPI (มูลค่ารวม / ต้นทุน / กำไร)</h2>
+    <div class="desc">label เล็กลง 11.5, THB 22/700 ตัวเลข tabular, USD 12 ใต้, badge % เปลี่ยนแปลง — มุมโค้ง 24</div>
+    <div class="duo">
+      <div class="pane now"><span class="tag">ตอนนี้</span><div class="old-kpi"><div class="l">มูลค่ารวม</div><div class="v">฿65,874</div><div class="u">≈ $1,973.46</div></div></div>
+      <div class="pane next"><span class="tag">PHASE 2</span><div class="new-kpi"><div class="l">มูลค่ารวม</div><div class="v num">฿65,874.09</div><div class="u">≈ $1,973.46</div><span class="c">▲ +11.62%</span></div></div>
+    </div>
+  </div>
+
+  <div class="item"><h2><span class="no">7</span>ตารางข้อมูล (Tickers + Holdings)</h2>
+    <div class="desc">หัวตารางมีพื้นจางมุมโค้ง, แถวสลับสี (zebra), hover สว่างขึ้น, แถวสูงคงที่ 44px, ตัวเลขชิดขวา</div>
+    <div class="duo">
+      <div class="pane now"><span class="tag">ตอนนี้</span><table class="oldt"><tr><th>หุ้น</th><th>ราคา</th><th>เปลี่ยนแปลง</th></tr><tr><td><b>GOOGL</b></td><td>$361.34</td><td style="color:var(--red)">▼ -1.55%</td></tr><tr><td><b>NVDA</b></td><td>$202.89</td><td style="color:var(--green)">▲ +3.03%</td></tr></table></div>
+      <div class="pane next"><span class="tag">PHASE 2</span><table class="newt"><tr><th>หุ้น</th><th class="num" style="text-align:right">ราคา</th><th class="num" style="text-align:right">เปลี่ยนแปลง</th></tr><tr class="z"><td><span style="display:flex;align-items:center;gap:10px;"><span class="new-avatar" style="background:#4285F4;width:30px;height:30px;font-size:10px;">GO</span><span><b style="font-size:13px;">GOOGL</b><br><span style="font-size:11px;color:var(--text-3)">Alphabet Inc.</span></span></span></td><td class="num" style="text-align:right">$361.34</td><td class="num" style="text-align:right;color:var(--red)">▼ -1.55%</td></tr><tr class="z"><td><span style="display:flex;align-items:center;gap:10px;"><span class="new-avatar" style="background:#76B900;color:#0b2000;width:30px;height:30px;font-size:10px;">NV</span><span><b style="font-size:13px;">NVDA</b><br><span style="font-size:11px;color:var(--text-3)">NVIDIA Corporation</span></span></span></td><td class="num" style="text-align:right">$202.89</td><td class="num" style="text-align:right;color:var(--green)">▲ +3.03%</td></tr></table></div>
+    </div>
+  </div>
+
+  <div class="item"><h2><span class="no">8</span>Sliding Pill (ตัวเลือกช่วงเวลา)</h2>
+    <div class="desc">แถบ active ไล่เฉดม่วง + เงาเรืองใต้ (เดิมสีทึบ) — การเลื่อนลื่นเหมือนเดิม</div>
+    <div class="duo">
+      <div class="pane now"><span class="tag">ตอนนี้</span><div class="old-pillbar"><button class="active">Monthly</button><button>Yearly</button><button>Cumulative</button></div></div>
+      <div class="pane next"><span class="tag">PHASE 2</span><div class="new-pillbar"><button class="active">Monthly</button><button>Yearly</button><button>Cumulative</button></div></div>
+    </div>
+  </div>
+
+  <div class="item"><h2><span class="no">9</span>ข่าว — Unread / Read</h2>
+    <div class="desc">ยังไม่อ่าน = ขอบซ้ายทอง 3px + หัวข้อหนา + จุดทอง "New" ที่ footer (pulse ครั้งเดียว) · อ่านแล้ว = การ์ดจาง หัวข้อบาง</div>
+    <div class="duo">
+      <div class="pane now"><span class="tag">ตอนนี้</span><div class="old-news"><span class="new-badge b-buy">Positive</span><div class="h">Western Digital รายงานผลประกอบการดีกว่าคาด</div><div class="f">4 ก.ค. 2569 · CNBC</div></div></div>
+      <div class="pane next"><span class="tag">PHASE 2</span>
+        <div class="news-unread"><span class="new-badge b-buy">Positive</span><div class="news-h">Western Digital รายงานผลประกอบการดีกว่าคาด</div><div class="news-f"><span class="gdot"></span><b style="color:var(--gold-1)">New</b> · 4 ก.ค. 2569 · CNBC</div></div>
+        <div class="news-read"><span class="new-badge b-hold">Neutral</span><div class="news-h">Nebius ขยายกำลังการผลิต GPU cloud</div><div class="news-f">3 ก.ค. 2569 · Yahoo Finance</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="item"><h2><span class="no">10</span>Popup / ยืนยันลบ</h2>
+    <div class="desc">กระจกชั้นเข้ม + เบลอ, มุม 24, ปุ่มลบโทนแดงซอฟต์มีกรอบ + ปุ่มยกเลิก ghost</div>
+    <div class="duo">
+      <div class="pane now"><span class="tag">ตอนนี้</span><div class="old-modal"><h4 style="margin:0 0 6px;font-size:14.5px;">ลบ GOOGL?</h4><p style="margin:0 0 14px;font-size:12px;color:var(--text-2);">หุ้นจะถูกถอดจากการติดตาม</p><div class="rowc"><button class="btn-red" style="border-radius:10px;">ลบ</button><button class="btn-ghost" style="border-radius:10px;">ยกเลิก</button></div></div></div>
+      <div class="pane next"><span class="tag">PHASE 2</span><div class="modal-demo"><h4>ลบ GOOGL?</h4><p>หุ้นจะถูกถอดจากการติดตาม — ประวัติสัญญาณเดิมยังอยู่</p><div class="rowc"><button class="btn-red">ลบหุ้นนี้</button><button class="btn-ghost">ยกเลิก</button></div></div></div>
+    </div>
+  </div>
+
+  <div class="item"><h2><span class="no">11</span>มุมโค้งมาตรฐานเดียวทั้งแอป</h2>
+    <div class="desc">การ์ดใหญ่ 24 / กล่องกลาง 14 / ชิ้นเล็ก 9 / pill 999 — เลิกใช้ค่าสุ่ม (10, 12, 16, 18 ปนกัน)</div>
+    <div class="duo">
+      <div class="pane now"><span class="tag">ตอนนี้</span><div class="radius-demo"><div class="rbox" style="width:90px;height:60px;border-radius:16px;">16</div><div class="rbox" style="width:70px;height:48px;border-radius:12px;">12</div><div class="rbox" style="width:50px;height:36px;border-radius:10px;">10</div></div></div>
+      <div class="pane next"><span class="tag">PHASE 2</span><div class="radius-demo"><div class="rbox" style="width:90px;height:60px;border-radius:24px;">24</div><div class="rbox" style="width:70px;height:48px;border-radius:14px;">14</div><div class="rbox" style="width:50px;height:36px;border-radius:9px;">9</div></div></div>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>วิธีตอบ:</b> บอกเป็นเลขข้อได้เลย เช่น "เอาหมดทุกข้อ" / "ข้อ 5 ไม่เอา สีต่อ ticker เยอะไป" / "ข้อ 9 จุดทองใหญ่กว่านี้หน่อย" — confirm แล้ว Phase 2 จะ implement ตามที่ตกลงเป๊ะๆ ทีละข้อ (แนะนำทำในแชทใหม่ อ่าน <b>UI_Reskin_Phase2_Plan.md</b> + ไฟล์นี้)
+  </div>
+</div>
+</body>
+</html>

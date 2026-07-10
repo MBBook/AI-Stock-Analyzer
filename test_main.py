@@ -72,6 +72,14 @@ def _override_get_db():
 
 app_module.app.dependency_overrides[app_module.get_db] = _override_get_db
 
+# ✅ 2026-07-11: baseline ของ test ทั้งไฟล์ = auth ปิดเสมอ — main.py รัน load_dotenv() ตอน import
+# ทำให้เครื่องที่มี DASHBOARD_PASSWORD ใน .env (เครื่อง MBBook ตั้งไว้จริงตั้งแต่ 07-09) auth เปิด
+# โดยไม่ตั้งใจ → endpoint ที่ยิงแบบไม่มี token (เช่น TestNikSuggestionsEndpoint) โดน 401 ทั้งชุด
+# (เจอจริง: pytest บนเครื่อง MBBook fail 5 ตัว แต่ใน sandbox ที่ไม่มี .env ผ่านหมด)
+# คลาสที่ทดสอบ auth โดยเฉพาะ (TestDashboardAuth/TestLoginRateLimit) ตั้ง env เองผ่าน
+# patch.dict อยู่แล้ว ไม่กระทบ
+os.environ.pop("DASHBOARD_PASSWORD", None)
+
 
 # ============================================================
 # 1. GET /health
@@ -660,4 +668,68 @@ class TestLoginRateLimit(unittest.TestCase):
                 rec["lock_until"] = _dt.utcnow() - _td(seconds=1)
             resp = self.client.post("/auth/login", json={"password": self.PW})
             self.assertEqual(resp.status_code, 200)
+
+
+# ============================================================
+# 8. GET /news (✅ เพิ่ม 2026-07-11 — ปิดงานค้าง #51: ข่าวจริงจาก news_cache)
+# ============================================================
+class TestNewsEndpoint(unittest.TestCase):
+    """หน้า News เดิมโชว์ MOCK_NEWS 4 ข่าววนซ้ำ — endpoint นี้คือท่อส่งข่าวจริงชุดแรก
+    ต้องกัน 3 เคสหลัก: cache ว่าง / dedup ข่าวเดียวกันข้าม ticker / news_json เสียห้ามล้มทั้ง endpoint"""
+
+    def setUp(self):
+        self.client = TestClient(app_module.app)
+
+    def _override_db_rows(self, rows):
+        db = MagicMock()
+        # /news เรียก db.query 2 ครั้ง: (1) subquery หา fetched_at ล่าสุดต่อ ticker (chain MagicMock
+        # เฉยๆ ไม่ต้อง setup) (2) db.query(NewsCache).join(...).all() → คืน rows ที่ seed ไว้
+        db.query.return_value.join.return_value.all.return_value = rows
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+    def test_news_empty_cache_returns_empty_list(self):
+        """cache ว่าง → 200 + articles [] (ไม่ error)"""
+        self._override_db_rows([])
+        resp = self.client.get("/news")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["count"], 0)
+        self.assertEqual(resp.json()["articles"], [])
+
+    def test_news_dedup_across_tickers_and_sort(self):
+        """ข่าวเดียวกันโผล่ 2 ticker → รวมเป็นข่าวเดียว (tickers 2 ตัว) + เรียงใหม่→เก่า"""
+        import json as _json
+        shared = {"title": "NVIDIA and partner announce quantum computing deal",
+                  "summary": "s1", "source": "Reuters", "published_at": 2000, "from_source": "finnhub"}
+        solo = {"title": "Micron faces NAND pricing pressure",
+                "summary": "s2", "source": "Bloomberg", "published_at": 3000, "from_source": "yfinance"}
+        rows = [
+            MagicMock(ticker="NVDA", news_json=_json.dumps([shared])),
+            MagicMock(ticker="IONQ", news_json=_json.dumps([shared])),
+            MagicMock(ticker="MU",   news_json=_json.dumps([solo])),
+        ]
+        self._override_db_rows(rows)
+        resp = self.client.get("/news")
+        data = resp.json()
+        self.assertEqual(data["count"], 2)  # 3 รายการดิบ → dedup เหลือ 2
+        # เรียงตาม published_at ใหม่→เก่า: MU (3000) ก่อน NVDA/IONQ (2000)
+        self.assertEqual(data["articles"][0]["tickers"], ["MU"])
+        self.assertEqual(sorted(data["articles"][1]["tickers"]), ["IONQ", "NVDA"])
+        # id ต้อง deterministic (md5 จาก title) — ยิงซ้ำได้ id เดิม (ระบบ mark อ่านแล้วฝั่ง frontend พึ่งสิ่งนี้)
+        resp2 = self.client.get("/news")
+        self.assertEqual(data["articles"][0]["id"], resp2.json()["articles"][0]["id"])
+
+    def test_news_broken_json_row_skipped_not_500(self):
+        """news_json เสีย 1 แถว → ข้ามแถวนั้น ข่าวจาก ticker อื่นยังมาครบ (ห้าม 500)"""
+        import json as _json
+        good = {"title": "WDC beats earnings estimates", "summary": "", "source": "CNBC",
+                "published_at": 1000, "from_source": "yfinance"}
+        rows = [
+            MagicMock(ticker="NVDA", news_json="{broken json!!"),
+            MagicMock(ticker="WDC",  news_json=_json.dumps([good])),
+        ]
+        self._override_db_rows(rows)
+        resp = self.client.get("/news")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["count"], 1)
+        self.assertEqual(resp.json()["articles"][0]["headline"], "WDC beats earnings estimates")
 

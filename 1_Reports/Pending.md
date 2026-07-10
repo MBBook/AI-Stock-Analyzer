@@ -1,5 +1,41 @@
 # Pending — AI Stock Analyzer V4
 
+## ✅ 2026-07-11 (Fable) — UI Reskin Phase 2 ครบ 11 ข้อ + ต่อข่าวจริง (ปิด #51)
+
+**ทำเสร็จ (ยังไม่ commit — รอ MBBook verify ที่เครื่องจริงก่อน):**
+1. **UI Reskin Phase 2 ครบทั้ง 11 ข้อ** ตาม `3_CowContext/UI_Reskin_Phase2_Plan.md`:
+   nav pill bar Desktop + bottom nav Mobile + navdot ทอง (unread) · ปุ่มทองสเปค .gold-btn ·
+   badge BUY/SELL/HOLD สเปคเดียว (HOLD เทา→ม่วง) · avatar วงกลม 34px สีต่อ ticker (palette จาก
+   mockup) · KPI cards 22/700 + change pill 999 · ตาราง dtable (header strip โค้ง 14, zebra,
+   row 44px, hover 0.05 ผ่าน class .trow) · SlidingPill gradient ม่วง · news unread treatment
+   (ขอบซ้ายทอง + จุดทอง pulse 2 ครั้ง + การ์ดอ่านแล้วจาง) · modal กระจก strong radius 24 +
+   danger-btn · กวาด radius ทั้งไฟล์ (24/14/9/999)
+2. **🔥 ต่อข่าวจริงเข้า News tab (MBBook ทักว่าข่าว 4 ข่าววนซ้ำทุกวัน)** — root cause: หน้า News
+   โชว์ MOCK_NEWS มาตลอด ไม่เคยต่อ backend (ข่าวจริงของนัตตี้อยู่ใน news_cache ครบ ไม่ได้เสียของ) →
+   เพิ่ม `GET /news` ใน main.py (dedup ข้าม ticker + id md5 คงที่) + ลบ MOCK_NEWS/ปุ่มข่าวทดสอบ/
+   extraNews ออกจาก frontend ทั้งหมด + fetchNews ใน initial load และ poll 5 นาที + tests 3 ตัว
+   (`TestNewsEndpoint` ใน test_main.py → รวมเป็น 175)
+   ⚠️ ข้อจำกัดปัจจุบัน: news_cache เก็บย้อนหลัง ~25 ชม./ticker (cleanup ใน prefetch) — ถ้าอยากได้
+   ข่าวย้อน 7 วันจริงต้องขยาย retention (คุยกันก่อน ยังไม่แก้) · sentiment/impact ไม่มีในข่าวจริง
+   (yfinance/Finnhub ไม่ให้มา) UI ซ่อนป้ายให้แล้ว ไม่แต่งข้อมูลเอง
+3. **Skeleton loading ทุกแท็บ** (MBBook ทวงถาม — อยู่ใน UX baseline ของ Redesign Prompt v2/v3
+   แต่ตกหล่นจาก Phase 2 Plan): shimmer CSS จาก mockup + skeleton cards ตอนโหลดแรก —
+   Portfolio (กราฟ+KPI+รายการ), Tickers (เพิ่ม state `stocksLoaded` แยกเคสโหลดอยู่/โหลดแล้วว่าง),
+   News (แทนข้อความ "กำลังโหลด..." + error state ถ้า /news ล้ม ไม่ shimmer ค้าง), System
+   (กราฟต้นทุน + Win Rate + นิก)
+4. sandbox mount stale รอบที่ 4 (bash เห็น App.jsx สั้นกว่าจริง 2038 vs 2085 บรรทัด) — ตรวจทุกอย่าง
+   ผ่าน Read/Grep ฝั่ง Windows แทน esbuild ใน sandbox ตามกฎ Handoff ข้อ 5 → MBBook ต้อง verify เอง
+
+**MBBook ต้องทำ (ตามลำดับ):**
+1. `cd D:\AI_Project\Dashboard_Share` → `.\.venv\Scripts\python.exe -m pytest test_main.py test_agents.py -v > 1_Reports\Output.md 2>&1` (ต้อง 175 passed)
+   ⚠️ ต้องใช้ python ใน `.venv` เท่านั้น — `python` เฉยๆ ชี้ไป Python 3.14 ของเครื่องที่ไม่มี pytest
+   (เจอจริง 2026-07-11: Output.md ขึ้น "No module named pytest")
+2. `cd frontend` → `npm start` → เทียบ mockup (`3_CowContext/UI_Preview_v1.html`) ทีละแท็บ/view
+3. ผ่านแล้ว: `git add -A` → commit → `git push` → Render auto-deploy → เปิดแอปดูหน้า News
+   ว่าข่าวจริงขึ้น (ถ้า cache ว่างรอ prefetch รอบถัดไป นาที :05)
+
+---
+
 > ## 🎯 สถานะส่งไม้ต่อ (2026-07-09 ~10:45 — จบแชทยาว Fable)
 > **เสร็จวันนี้:** deploy PEG+company profile (`510d595`) · ระบบ password + PIN 6 หลัก + lockout (`2de63a4`/`efb3da9`, 172 tests) ·
 > seed พอร์ตจริง 24 tickers · Vercel setup (`vercel.json` + แก้ unused vars หลัง build fail) · UI Reskin **Phase 1** tokens (`845faee`)
