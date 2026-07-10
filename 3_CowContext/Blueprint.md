@@ -57,6 +57,7 @@
 | GET | `/workflow/reports?limit=7` | ✅ เพิ่ม 2026-07-03 (รอบ 2) — รายงานตลาดย้อนหลังหลายคืน (กันเคส MBBook ไม่ว่างเข้ามาดูหลายวัน) — ใช้ตัวนี้แทน `/workflow/latest-report` ในหน้าเว็บ |
 | GET | `/nik/suggestions` | ดู NikSuggestion 10 รายการล่าสุด |
 | GET | `/roi/summary` | ✅ เพิ่ม 2026-07-04 — win rate @14d/@30d (เกณฑ์ 75%) + portfolio_return สะสมไม่มีเส้นตาย (เป้า 13%) |
+| POST | `/auth/login` | ✅ เพิ่ม 2026-07-09 — แลก PIN → token (sha256) สำหรับ header `X-Auth-Token` · **ทุก endpoint ข้อมูลโดน middleware บังคับ token** ยกเว้น PUBLIC_ROUTES (/, /health, /auth/login, /prefetch, /workflow, /workflow/resume, /docs — ที่ cron ใช้) · เปิดใช้เมื่อตั้ง env `DASHBOARD_PASSWORD` (ไม่ตั้ง = auth ปิด) · lockout ผิด 5 ครั้ง/IP → ล็อก 5 นาที (429) |
 | GET | `/roi/portfolio-history?start_date=&end_date=` | ✅ เพิ่ม 2026-07-04, แก้ 2026-07-05 เพิ่ม query param `start_date`/`end_date` (YYYY-MM-DD, optional) filter ช่วงเวลา — ไม่ส่งมา = คืนทั้งหมดเหมือนเดิม |
 
 ---
@@ -151,6 +152,9 @@ GITHUB_REPO             # default: MBBook/ai-stock-analyzer
 
 # Render
 RENDER_EXTERNAL_URL     # ใช้โดย keepalive ping
+
+# Dashboard auth (เพิ่ม 2026-07-09)
+DASHBOARD_PASSWORD      # PIN 6 หลัก (ตัวเลขล้วน — หน้า login รับแค่ตัวเลข) ตั้งทั้ง Render + .env local
 ```
 
 ---
@@ -188,12 +192,12 @@ webapp → GET /nik/suggestions → MBBook เห็น pending list
 
 ---
 
-## 10. Test Coverage (158 tests — ✅ อัพเดต 2026-07-09)
+## 10. Test Coverage (172 tests — ✅ อัพเดต 2026-07-09 รอบ 2)
 
 | ไฟล์ | จำนวน | ครอบคลุม |
 |------|-------|---------|
 | `test_agents.py` | 132 | _safe_float, นัตตี้ 3-tier, MarketAux, หนุ่ม, มด, นน, Workflow, โคลสัน, DB update, MarketCap, ATH/ATL, มด format, Cross-currency, แฮรี่, เอ, นิก, checkpoint, ROI/portfolio history, **PEG Alpha Vantage (9 tests — rotation/cap/carry-forward/rate-limit)** |
-| `test_main.py` | 26 | GET /health, POST /workflow, POST /workflow/resume, LINE notification resilience, background exception, GET /nik/suggestions |
+| `test_main.py` | 40 | GET /health, POST /workflow, POST /workflow/resume, LINE notification resilience, background exception, GET /nik/suggestions, **Dashboard auth (10), login rate-limit/lockout (4)** |
 
 **รันทดสอบ:**
 ```powershell
@@ -308,4 +312,4 @@ Dashboard_Share/
 — ไม่ทับเหมือน `stocks`) + endpoint `GET /roi/summary` คำนวณให้อัตโนมัติ (`agents.py::calculate_roi`)
 สัญญาณที่ยังไม่ครบอายุ (< 14/30 วัน) จะไม่ถูกนับ ต้องรอเวลาให้ข้อมูลสะสมก่อนตัวเลขจะมีความหมาย
 
-**ปัจจุบัน:** 30 tickers · live บน Render · 133 tests pass (ก่อนเพิ่ม ROI tests รอบนี้) · cron-job.org active · cost จริง $0.52/run (เป้า $0.43)
+**ปัจจุบัน (2026-07-09):** 24 tickers (ถือจริง 13 + watchlist 11 — seed ชุดจริงจาก Dime แล้ว) · live บน Render + auth PIN · 172 tests pass · cron-job.org active · cost จริง ~$0.47/run

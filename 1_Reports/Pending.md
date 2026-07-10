@@ -1,5 +1,12 @@
 # Pending — AI Stock Analyzer V4
 
+> ## 🎯 สถานะส่งไม้ต่อ (2026-07-09 ~10:45 — จบแชทยาว Fable)
+> **เสร็จวันนี้:** deploy PEG+company profile (`510d595`) · ระบบ password + PIN 6 หลัก + lockout (`2de63a4`/`efb3da9`, 172 tests) ·
+> seed พอร์ตจริง 24 tickers · Vercel setup (`vercel.json` + แก้ unused vars หลัง build fail) · UI Reskin **Phase 1** tokens (`845faee`)
+> **แชทใหม่ทำต่อ:** (1) **UI Phase 2** → `3_CowContext/UI_Reskin_Phase2_Plan.md` + `UI_Reskin_Phase2_Preview.html` (รอ MBBook confirm รายข้อ)
+> (2) **Backend** → รายการค้างด้านล่าง: verify PEG/company_name (หลัง prefetch 09:05) · เคส run 08 ก.ค. ไม่ลง history · costSummary/reportList
+> **MBBook ค้าง:** `git push` รอบล่าสุด (Reskin Phase 1 + docs) + ดูผล Vercel build
+
 > ✅ 2026-07-08: เคลียร์ไฟล์นี้ให้เล็กลงแล้ว — ประวัติงานเก่า (ก่อน 2026-07-08 ทั้งหมด) ย้ายไป
 > `1_Reports/Pending_Archive.md` แยกแล้ว (เก็บไว้อ้างอิงถ้าต้องสืบสาเหตุปัญหาเก่า ไม่ต้องอ่านตอนเริ่มงาน
 > ปกติ) ไฟล์นี้เหลือแค่ session ล่าสุด + รายการที่ยังค้างจริงเท่านั้น
@@ -131,7 +138,7 @@
      อ่านไปแสดงที่ไหนเลย (เศษจากรอบรื้อ UI 07-08 — เดิม System tab เคยใช้) → ตัดสินใจ: เอากลับมาโชว์
      หรือลบ fetch ทิ้ง (ลด request ฟรีๆ 2 ตัว/โหลด) — ตอนนี้ silence warning ไว้ด้วย `const [, setX]`
 
-00. **ล้าง + ใส่ tickers/portfolio ชุดจริง (2026-07-09 ~00:50 — รอ MBBook รันสคริปต์)** —
+00. ✅ **เสร็จแล้ว (MBBook รันเช้า 09 ก.ค.)** ล้าง + seed ชุดจริง: **stocks=24, portfolio=13** (ดู output.md) —
     MBBook ส่งสลิป Dime ครบแล้ว: **หุ้นถือจริง 13 ตัว** (GOOGL/NVDA/ASML/TSM/AMZN/BRK.B/WDC/
     NOW/VRT/NBIS/SNDK/CCJ/OKLO — ต้นทุนรวม ~$1,768, มูลค่า $1,973.46, +11.62%) + **watchlist
     11 ตัว** (RKLB/ASTS/MRVL/ARM/MU/IONQ/PLTR/ONDS/OKTA/P/LWLG) = **24 tickers**
