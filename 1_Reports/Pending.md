@@ -121,6 +121,11 @@
 
 ## 🔴 รายการที่ยังค้างจริง (ไม่ใช่ประวัติ — ต้องติดตามต่อ)
 
+0000. **UI ไม่ตรง UI_Preview_v1 (MBBook ทัก 2026-07-09 ~09:50)** — สาเหตุ: งาน 07-08 พอร์ตแค่
+      layout แต่ design system (สี/กระจก/ฟอนต์/ปุ่มทอง) ไม่เคยถูกพอร์ต → **Phase 1 เสร็จแล้ว**
+      (commit `845faee` — tokens ทั้งชุดใน constants.js ตรง mockup) · **Phase 2 (รายละเอียด
+      component 11 ข้อ) → ทำตาม `3_CowContext/UI_Reskin_Phase2_Plan.md` ในแชทใหม่**
+
 000. **costSummary/reportList: fetch แล้วไม่ได้แสดงผล** (เจอ 2026-07-09 ตอน Vercel build fail จาก
      no-unused-vars) — `App.jsx` ยิง `/costs/summary` + `/workflow/reports` ทุกครั้งที่โหลด แต่ค่าไม่ถูก
      อ่านไปแสดงที่ไหนเลย (เศษจากรอบรื้อ UI 07-08 — เดิม System tab เคยใช้) → ตัดสินใจ: เอากลับมาโชว์
