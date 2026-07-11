@@ -3,6 +3,7 @@ import {
   Briefcase, TrendingUp, Settings, Newspaper,
   Plus, Trash2, Upload, Search, Check, Camera, Info, X,
   ChevronDown, ChevronLeft, ChevronRight, Filter, ArrowUpDown, Eye, EyeOff,
+  Copy, Download,
 } from 'lucide-react';
 // ✅ 2026-07-08: ย้ายค่าคงที่ (COLORS/SP/MOCK_NEWS/COMPANY_NAMES/GLOBAL_CSS/API_URL) ไป constants.js
 // แยกแล้ว (ลดขนาดไฟล์นี้ — ไม่กระทบ logic ใดๆ ค่าเดิมทุกตัว แค่ import แทนการประกาศตรงนี้)
@@ -425,6 +426,51 @@ export default function DashboardV4() {
       showToast(`ลบ ${ticker} ออกจากรายการแล้ว`);
     } catch (error) {
       console.error('Error removing stock:', error);
+    }
+  };
+
+  // ✅ 2026-07-11 (รอบ 5): MBBook ตรวจ suggestion ของนิกแล้วตัดสินใจไม่ apply — ต้องมีทางปิด pending
+  // โดยไม่ต้องฝืนตั้ง complete/failed (ความหมายผิด) เรียก POST /nik/suggestions/{id}/reject แล้ว
+  // refetch list + ปิด popup เหมือน pattern handleRemoveStock ด้านบน
+  const handleRejectNik = async (id) => {
+    try {
+      const response = await authFetch(`${API_URL}/nik/suggestions/${id}/reject`, { method: 'POST' });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        showToast(err.detail || 'ปฏิเสธไม่สำเร็จ');
+        return;
+      }
+      fetchNikSuggestions();
+      closePopup();
+      showToast('ปฏิเสธ suggestion นี้แล้ว');
+    } catch (error) {
+      console.error('Error rejecting nik suggestion:', error);
+      showToast('ปฏิเสธไม่สำเร็จ');
+    }
+  };
+
+  // ✅ 2026-07-11 (รอบ 6): MBBook เสนอ — ให้เช็คเองได้ว่า suggestion ที่ pending ถูกแก้ไปแล้วหรือยัง
+  // แทนที่จะรอ manual ตลอดไป เรียก POST /nik/suggestions/{id}/check-status (ฝั่ง backend เทียบ FIND
+  // block กับโค้ดจริงบน GitHub ตรงๆ ไม่เรียก Claude เลย ไม่มีต้นทุนเพิ่ม) — ถ้าแก้แล้วจริงจะกลายเป็น
+  // complete อัตโนมัติ (ปิด popup) ถ้ายังไม่แก้จะขึ้น toast บอกจำนวนจุดที่ยังไม่เปลี่ยน (popup ค้างไว้)
+  const handleCheckNikStatus = async (id) => {
+    try {
+      const response = await authFetch(`${API_URL}/nik/suggestions/${id}/check-status`, { method: 'POST' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        showToast(data.detail || 'ตรวจสอบสถานะไม่สำเร็จ');
+        return;
+      }
+      fetchNikSuggestions();
+      if (data.status === 'complete') {
+        showToast('ตรวจแล้ว — โค้ดถูกแก้ไปแล้วจริง เปลี่ยนเป็น "เสร็จแล้ว" ✓');
+        closePopup();
+      } else {
+        showToast(`ตรวจแล้ว — ยังไม่ถูกแก้ (เจอ ${data.still_pending_blocks}/${data.checked_blocks} จุดเดิม) ยังเป็น pending`);
+      }
+    } catch (error) {
+      console.error('Error checking nik suggestion status:', error);
+      showToast('ตรวจสอบสถานะไม่สำเร็จ');
     }
   };
 
@@ -1959,11 +2005,64 @@ export default function DashboardV4() {
   // ✅ 2026-07-11 (รอบ 3): MBBook ขอให้รายงานนิกเป็นไทยทั้งหมด + คลิกดูรายละเอียดได้ — status label
   // เดิมเป็นอังกฤษ (Complete/Failed/Pending) แก้เป็น map ภาษาไทยแยกจาก key จริงใน DB (ไม่แตะ status
   // enum เดิม กันพัง sColor lookup ที่ยังอิงค่าอังกฤษอยู่)
-  const NIK_STATUS_LABEL_TH = { complete: 'เสร็จแล้ว', failed: 'ล้มเหลว', pending: 'รอดำเนินการ' };
+  const NIK_STATUS_LABEL_TH = { complete: 'เสร็จแล้ว', failed: 'ล้มเหลว', pending: 'รอดำเนินการ', rejected: 'ปฏิเสธแล้ว' };
+
+  // ✅ 2026-07-11 (รอบ 4): MBBook ขอทางสำรองให้ดึงรายงานนิกออกมาให้ Cow อ่านได้เอง (ถ้า Cow ดึงผ่าน
+  // /nik/export ไม่ได้ด้วยเหตุผลอะไรก็ตาม) — export เป็น .md ครบทุกฟิลด์ (summary/reasoning/diff/status)
+  // ไม่ต้อง useState เก็บ "copied" state (ผิดกฎ Handoff ข้อ 2 ถ้าทำแบบมีเงื่อนไข) ใช้ DOM manipulation
+  // ตรงๆ ที่ปุ่มแทน (สลับ innerText ชั่วคราวแล้ว setTimeout คืนค่าเดิม — ไม่ผ่าน React state)
+  const nikSuggestionToMarkdown = (s) => {
+    const dateStr = new Date(s.created_at).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' });
+    const sLabel = NIK_STATUS_LABEL_TH[s.status] || s.status;
+    const lines = [
+      `# รายงานนิก — ${dateStr}`,
+      '',
+      `**สถานะ:** ${sLabel}`,
+      `**ID:** ${s.id}`,
+      '',
+      '## สรุป',
+      s.summary || '-',
+      '',
+      '## เหตุผล',
+      s.reasoning || 'ไม่มีรายละเอียดเพิ่มเติม (ข้อเสนอนี้สร้างก่อนอัพเดตระบบที่เพิ่มคำอธิบายเหตุผล)',
+    ];
+    if (s.status === 'failed' && s.error_message) {
+      lines.push('', '## สาเหตุที่ apply ไม่สำเร็จ', s.error_message);
+    }
+    lines.push('', '## Diff ที่นิกเสนอ', '```', s.diff_text || '-', '```');
+    return lines.join('\n');
+  };
+
+  const downloadNikMarkdown = (s) => {
+    const blob = new Blob([nikSuggestionToMarkdown(s)], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `nik-suggestion-${s.id}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const copyNikMarkdown = (s, btnEl) => {
+    navigator.clipboard.writeText(nikSuggestionToMarkdown(s)).then(() => {
+      if (!btnEl) return;
+      const original = btnEl.innerText;
+      btnEl.innerText = 'คัดลอกแล้ว ✓';
+      setTimeout(() => { btnEl.innerText = original; }, 1500);
+    });
+  };
+
+  const nikExportBtnStyle = {
+    display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, fontWeight: 600,
+    color: COLORS.text, background: 'rgba(148,163,184,0.08)', border: `1px solid ${COLORS.cardBorder}`,
+    borderRadius: 999, padding: '6px 13px', cursor: 'pointer',
+  };
 
   const NikDetailContent = ({ suggestion: s }) => {
     if (!s) return null;
-    const sColor = s.status === 'complete' ? COLORS.green : s.status === 'failed' ? COLORS.red : COLORS.gold;
+    const sColor = s.status === 'complete' ? COLORS.green : s.status === 'failed' ? COLORS.red : s.status === 'rejected' ? COLORS.faint : COLORS.gold;
     const sLabel = NIK_STATUS_LABEL_TH[s.status] || s.status;
     const dateStr = new Date(s.created_at).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' });
     return (
@@ -1971,6 +2070,32 @@ export default function DashboardV4() {
         <div style={{ ...styles.row(SP.xs), flexWrap: 'wrap', justifyContent: 'space-between' }}>
           <span style={{ fontSize: 13, color: COLORS.faint }}>{dateStr}</span>
           <span style={{ fontSize: 13, fontWeight: 700, padding: '3px 10px', borderRadius: 999, backgroundColor: `${sColor}22`, color: sColor }}>{sLabel}</span>
+        </div>
+        {/* ✅ 2026-07-11: ปุ่ม copy/download — ทางสำรองส่งรายงานนิกให้ Cow อ่านนอกเว็บได้ */}
+        <div style={{ ...styles.row(SP.sm), flexWrap: 'wrap' }}>
+          <button className="press-btn" style={nikExportBtnStyle} onClick={(e) => copyNikMarkdown(s, e.currentTarget)}>
+            <Copy size={14} /> คัดลอกเป็น Markdown
+          </button>
+          <button className="press-btn" style={nikExportBtnStyle} onClick={() => downloadNikMarkdown(s)}>
+            <Download size={14} /> ดาวน์โหลด .md
+          </button>
+          {/* ✅ 2026-07-11 (รอบ 5): ปุ่มปฏิเสธ — ตรวจแล้วไม่ apply ต้องปิด pending ได้เอง ไม่ต้อง
+              ฝืนตั้ง complete/failed (ความหมายผิด) — window.confirm แทน popup ยืนยันแยก (กัน state
+              เพิ่มใน helper function ผิดกฎ Handoff ข้อ 2) โชว์เฉพาะตอนยัง pending เท่านั้น */}
+          {/* ✅ 2026-07-11 (รอบ 6): ปุ่มตรวจสอบสถานะ — เทียบ FIND block ของ diff กับโค้ดจริงบน GitHub
+              ตรงๆ (ไม่เรียก Claude เลย ไม่มีต้นทุนเพิ่ม) แก้แล้ว → complete อัตโนมัติ ยังไม่แก้ → toast บอก */}
+          {s.status === 'pending' && (
+            <button className="press-btn" style={{ ...nikExportBtnStyle, backgroundColor: 'rgba(139,123,247,0.14)', color: COLORS.purple, border: '1px solid rgba(139,123,247,0.35)' }}
+              onClick={() => handleCheckNikStatus(s.id)}>
+              <Search size={14} /> ตรวจสอบสถานะ
+            </button>
+          )}
+          {s.status === 'pending' && (
+            <button className="press-btn" style={{ ...nikExportBtnStyle, backgroundColor: 'rgba(255,101,112,0.12)', color: COLORS.red, border: '1px solid rgba(255,101,112,0.3)' }}
+              onClick={() => { if (window.confirm('ยืนยันปฏิเสธ suggestion นี้ใช่ไหมครับ (จะไม่ apply)')) handleRejectNik(s.id); }}>
+              <X size={14} /> ปฏิเสธ
+            </button>
+          )}
         </div>
         <p style={{ margin: 0, fontSize: isMobile ? 15 : 17, fontWeight: 700, color: COLORS.text, lineHeight: 1.6 }}>{s.summary}</p>
         <div>
@@ -2018,7 +2143,7 @@ export default function DashboardV4() {
       )}
 
       {nikSuggestions?.suggestions?.map(s => {
-        const sColor = s.status === 'complete' ? COLORS.green : s.status === 'failed' ? COLORS.red : COLORS.gold;
+        const sColor = s.status === 'complete' ? COLORS.green : s.status === 'failed' ? COLORS.red : s.status === 'rejected' ? COLORS.faint : COLORS.gold;
         const sLabel = NIK_STATUS_LABEL_TH[s.status] || s.status;
         const dateStr = new Date(s.created_at).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'short', timeStyle: 'short' });
         // ✅ 2026-07-11: คลิกแถว/การ์ดเพื่อเปิด popup ดูรายละเอียด (summary, reasoning, diff เต็ม)

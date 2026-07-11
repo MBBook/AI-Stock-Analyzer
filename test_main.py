@@ -547,6 +547,287 @@ class TestNikSuggestionsEndpoint(unittest.TestCase):
         self.client.get("/nik/suggestions")
         db.query.return_value.order_by.return_value.limit.assert_called_with(10)
 
+
+class TestNikExportEndpoint(unittest.TestCase):
+    """GET /nik/export — เพิ่ม 2026-07-11: เหมือน /nik/suggestions แต่ auth ด้วย COW_EXPORT_TOKEN
+    (query param) แยกจาก DASHBOARD_PASSWORD — ให้ Cow ดึงรายงานนิกมาอ่านเองได้โดยไม่ต้องถือ
+    รหัสผ่าน dashboard ตามที่ MBBook ออกแบบระบบไว้แต่แรก"""
+
+    TOKEN = "test-cow-export-token-xyz"
+
+    def setUp(self):
+        self.client = TestClient(app_module.app)
+        import importlib
+        self._orig_models = sys.modules.get("models")
+        sys.modules.pop("models", None)
+        try:
+            sys.modules["models"] = importlib.import_module("models")
+        except Exception:
+            if self._orig_models:
+                sys.modules["models"] = self._orig_models
+
+    def tearDown(self):
+        if self._orig_models is not None:
+            sys.modules["models"] = self._orig_models
+
+    def _make_suggestion(self, id, status="pending"):
+        from datetime import datetime as dt
+        s = MagicMock()
+        s.id            = id
+        s.created_at    = dt(2026, 7, 10, 22, 0, 0)
+        s.summary       = "แก้ timeout"
+        s.reasoning     = "เจอ error ซ้ำ 5 ครั้ง"
+        s.diff_text     = "<<<DIFF>>>"
+        s.status        = status
+        s.error_message = None
+        s.applied_at    = None
+        return s
+
+    def test_no_token_env_set_returns_403(self):
+        """ไม่ตั้ง COW_EXPORT_TOKEN ใน env → endpoint ปิดสนิท ไม่ fallback เป็นเปิด"""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("COW_EXPORT_TOKEN", None)
+            resp = self.client.get("/nik/export?token=anything")
+            self.assertEqual(resp.status_code, 403)
+
+    def test_missing_token_param_returns_401(self):
+        with patch.dict(os.environ, {"COW_EXPORT_TOKEN": self.TOKEN}):
+            resp = self.client.get("/nik/export")
+            self.assertEqual(resp.status_code, 401)
+
+    def test_wrong_token_returns_401(self):
+        with patch.dict(os.environ, {"COW_EXPORT_TOKEN": self.TOKEN}):
+            resp = self.client.get("/nik/export?token=wrong-guess")
+            self.assertEqual(resp.status_code, 401)
+
+    def test_correct_token_returns_200_with_suggestions(self):
+        db = MagicMock()
+        db.query.return_value.order_by.return_value.limit.return_value.all.return_value = [
+            self._make_suggestion(1, status="pending")
+        ]
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+        with patch.dict(os.environ, {"COW_EXPORT_TOKEN": self.TOKEN}):
+            resp = self.client.get(f"/nik/export?token={self.TOKEN}")
+            self.assertEqual(resp.status_code, 200)
+            data = resp.json()
+            self.assertEqual(data["count"], 1)
+            self.assertEqual(data["suggestions"][0]["reasoning"], "เจอ error ซ้ำ 5 ครั้ง")
+
+    def test_limit_capped_at_20(self):
+        """limit=999 ต้องถูก cap เหลือ 20 กันดึงทั้งตาราง"""
+        db = MagicMock()
+        limit_mock = MagicMock()
+        limit_mock.all.return_value = []
+        db.query.return_value.order_by.return_value.limit.return_value = limit_mock
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+        with patch.dict(os.environ, {"COW_EXPORT_TOKEN": self.TOKEN}):
+            self.client.get(f"/nik/export?token={self.TOKEN}&limit=999")
+            db.query.return_value.order_by.return_value.limit.assert_called_with(20)
+
+    def test_bypasses_dashboard_auth_when_both_set(self):
+        """/nik/export อยู่ใน PUBLIC_ROUTES — ต่อให้ตั้ง DASHBOARD_PASSWORD ไว้ด้วยก็ต้องไม่โดน
+        dashboard auth middleware บล็อก (ผ่านด่าน COW_EXPORT_TOKEN อย่างเดียวพอ)"""
+        db = MagicMock()
+        db.query.return_value.order_by.return_value.limit.return_value.all.return_value = []
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+        with patch.dict(os.environ, {"COW_EXPORT_TOKEN": self.TOKEN, "DASHBOARD_PASSWORD": "some-pw"}):
+            resp = self.client.get(f"/nik/export?token={self.TOKEN}")
+            self.assertEqual(resp.status_code, 200)
+
+
+class TestNikRejectEndpoint(unittest.TestCase):
+    """POST /nik/suggestions/{id}/reject — เพิ่ม 2026-07-11 (รอบ 5): MBBook ตรวจ suggestion แล้ว
+    ตัดสินใจไม่ apply ต้องมีทางปิด pending โดยไม่ฝืนตั้ง complete/failed (ความหมายผิด)"""
+
+    def setUp(self):
+        self.client = TestClient(app_module.app)
+        import importlib
+        self._orig_models = sys.modules.get("models")
+        sys.modules.pop("models", None)
+        try:
+            sys.modules["models"] = importlib.import_module("models")
+        except Exception:
+            if self._orig_models:
+                sys.modules["models"] = self._orig_models
+
+    def tearDown(self):
+        if self._orig_models is not None:
+            sys.modules["models"] = self._orig_models
+
+    def _make_suggestion(self, id, status="pending"):
+        s = MagicMock()
+        s.id     = id
+        s.status = status
+        s.summary = "แก้ timeout"
+        return s
+
+    def test_reject_pending_returns_200_and_sets_rejected(self):
+        item = self._make_suggestion(1, status="pending")
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = item
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        resp = self.client.post("/nik/suggestions/1/reject")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "rejected")
+        self.assertEqual(item.status, "rejected")
+        db.commit.assert_called_once()
+
+    def test_reject_not_found_returns_404(self):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        resp = self.client.post("/nik/suggestions/999/reject")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_reject_already_complete_returns_400(self):
+        """แก้ suggestion ที่ตัดสินใจไปแล้ว (complete/failed/rejected) ซ้ำไม่ได้"""
+        item = self._make_suggestion(1, status="complete")
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = item
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        resp = self.client.post("/nik/suggestions/1/reject")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(item.status, "complete")  # ไม่ถูกแก้
+
+    def test_reject_already_rejected_returns_400(self):
+        item = self._make_suggestion(1, status="rejected")
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = item
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        resp = self.client.post("/nik/suggestions/1/reject")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_reject_requires_dashboard_auth_when_enabled(self):
+        """ไม่ได้อยู่ใน PUBLIC_ROUTES — ต้องโดน dashboard auth middleware บล็อกถ้าไม่มี token"""
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": "some-pw"}):
+            resp = self.client.post("/nik/suggestions/1/reject")
+            self.assertEqual(resp.status_code, 401)
+
+
+class TestNikCheckStatusEndpoint(unittest.TestCase):
+    """POST /nik/suggestions/{id}/check-status — เพิ่ม 2026-07-11 (รอบ 6): MBBook เสนอปุ่ม
+    "ตรวจสอบสถานะ" กันระบบเป็น manual 100% แต่ต้องไม่เพิ่มต้นทุน — เทียบ FIND block กับโค้ดจริง
+    บน GitHub ตรงๆ ไม่เรียก Claude เลย (deterministic string match, orchestrator ถูก mock
+    ทั้งโมดูลอยู่แล้วใน test_main.py — mock method ตรงๆ ได้เลย ไม่ต้องยุ่งกับ AgentOrchestrator จริง)"""
+
+    def setUp(self):
+        self.client = TestClient(app_module.app)
+        import importlib
+        self._orig_models = sys.modules.get("models")
+        sys.modules.pop("models", None)
+        try:
+            sys.modules["models"] = importlib.import_module("models")
+        except Exception:
+            if self._orig_models:
+                sys.modules["models"] = self._orig_models
+        # reset orchestrator mock methods ที่จะ config เองต่อเทสต์
+        app_module.orchestrator._nik_get_current_agents_py = MagicMock()
+        app_module.orchestrator._nik_parse_diff_blocks = MagicMock()
+
+    def tearDown(self):
+        if self._orig_models is not None:
+            sys.modules["models"] = self._orig_models
+
+    def _make_suggestion(self, id, status="pending", diff_text="<<<DIFF>>>\nFIND:\nx\nREPLACE:\ny\n<<<END_DIFF>>>"):
+        s = MagicMock()
+        s.id = id
+        s.status = status
+        s.diff_text = diff_text
+        s.summary = "แก้ timeout"
+        s.applied_at = None
+        return s
+
+    def test_not_found_returns_404(self):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+        resp = self.client.post("/nik/suggestions/999/check-status")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_not_pending_returns_400(self):
+        item = self._make_suggestion(1, status="complete")
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = item
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+        resp = self.client.post("/nik/suggestions/1/check-status")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_no_github_token_returns_503(self):
+        item = self._make_suggestion(1)
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = item
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GITHUB_TOKEN", None)
+            resp = self.client.post("/nik/suggestions/1/check-status")
+        self.assertEqual(resp.status_code, 503)
+
+    def test_github_fetch_fails_returns_503(self):
+        item = self._make_suggestion(1)
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = item
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+        app_module.orchestrator._nik_get_current_agents_py.return_value = (None, None)
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test"}):
+            resp = self.client.post("/nik/suggestions/1/check-status")
+        self.assertEqual(resp.status_code, 503)
+
+    def test_no_parseable_find_blocks_returns_422(self):
+        item = self._make_suggestion(1, diff_text="ข้อความไม่มี diff block ที่ parse ได้")
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = item
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+        app_module.orchestrator._nik_get_current_agents_py.return_value = ("def foo(): pass", "sha")
+        app_module.orchestrator._nik_parse_diff_blocks.return_value = []
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test"}):
+            resp = self.client.post("/nik/suggestions/1/check-status")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_find_block_gone_marks_complete(self):
+        """FIND block หายไปจากโค้ดปัจจุบัน (ถูกแก้แล้ว) → status=complete, applied_at ถูกตั้ง"""
+        item = self._make_suggestion(1)
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = item
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+        app_module.orchestrator._nik_get_current_agents_py.return_value = ("def foo():\n    return 1\n", "sha")
+        app_module.orchestrator._nik_parse_diff_blocks.return_value = ["    old_broken_line = 1"]
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test"}):
+            resp = self.client.post("/nik/suggestions/1/check-status")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "complete")
+        self.assertEqual(data["still_pending_blocks"], 0)
+        self.assertEqual(item.status, "complete")
+        self.assertIsNotNone(item.applied_at)
+        db.commit.assert_called_once()
+
+    def test_find_block_still_present_stays_pending(self):
+        """FIND block ยังอยู่ในโค้ดปัจจุบัน (ยังไม่ได้แก้) → status ยัง pending ไม่ commit"""
+        item = self._make_suggestion(1)
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = item
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+        app_module.orchestrator._nik_get_current_agents_py.return_value = ("def foo():\n    still_here = 1\n", "sha")
+        app_module.orchestrator._nik_parse_diff_blocks.return_value = ["    still_here = 1"]
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test"}):
+            resp = self.client.post("/nik/suggestions/1/check-status")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "pending")
+        self.assertEqual(data["still_pending_blocks"], 1)
+        self.assertEqual(item.status, "pending")
+        db.commit.assert_not_called()
+
+    def test_requires_dashboard_auth_when_enabled(self):
+        """ไม่ได้อยู่ใน PUBLIC_ROUTES — ต้องโดน dashboard auth middleware บล็อกถ้าไม่มี token"""
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": "some-pw"}):
+            resp = self.client.post("/nik/suggestions/1/check-status")
+            self.assertEqual(resp.status_code, 401)
+
 # ============================================================
 # SECTION: Dashboard Auth (ระบบ password — เพิ่ม 2026-07-09)
 # ============================================================

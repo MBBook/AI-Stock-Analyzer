@@ -1,7 +1,7 @@
 # Blueprint — AI Stock Analyzer V4
 
 > อ่านไฟล์นี้ก่อนเริ่มงานทุกครั้ง
-> อัพเดตล่าสุด: 2026-07-08
+> อัพเดตล่าสุด: 2026-07-11
 
 ---
 
@@ -27,7 +27,7 @@
 | 7 | **เก้า** | Retry coordinator ถ้า QA REJECT (max 3 รอบ) | Haiku |
 | 8 | **เอ** | บันทึก WorkflowLog ลง DB + สรุป 2-3 ประโยค | Haiku |
 | 9 | **โคลสัน** | Parse trade instruction → บันทึก DB *(Event-Driven — ไม่อยู่ใน sequential pipeline)* | Haiku |
-| 10 | **นิก** | ทุกวันศุกร์: วิเคราะห์ log → สร้าง diff suggestion → รอ MBBook อนุมัติ | Sonnet |
+| 10 | **นิก** | ทุกวันศุกร์: วิเคราะห์ log → สร้าง diff suggestion → รอ MBBook อนุมัติ — ✅ แก้ 2026-07-11 บังคับ SUMMARY/REASON เป็นภาษาไทย + เก็บ `reasoning` แยกลง DB (FIND/REPLACE ยังเป็นโค้ดจริง ไม่แปล) | Sonnet |
 
 **Workflow order (sequential):** นัตตี้ → หนุ่ม → มด → checkpoint DB → แฮรี่ → เจน → นน → (เก้า retry) → เอ → นิก (ศุกร์เท่านั้น)
 
@@ -56,9 +56,12 @@
 | GET | `/workflow/history` | ดู WorkflowLog ย้อนหลัง 30 รายการ |
 | GET | `/workflow/latest-report` | ✅ เพิ่ม 2026-07-03 — รายงานตลาดฉบับเต็มล่าสุดที่เจนเขียน (อันเดียว) |
 | GET | `/workflow/reports?limit=7` | ✅ เพิ่ม 2026-07-03 (รอบ 2) — รายงานตลาดย้อนหลังหลายคืน (กันเคส MBBook ไม่ว่างเข้ามาดูหลายวัน) — ใช้ตัวนี้แทน `/workflow/latest-report` ในหน้าเว็บ |
-| GET | `/nik/suggestions` | ดู NikSuggestion 10 รายการล่าสุด |
+| GET | `/nik/suggestions` | ดู NikSuggestion 10 รายการล่าสุด — ✅ แก้ 2026-07-11 เพิ่ม field `reasoning` (เหตุผลภาษาไทยที่นิกเสนอแก้ตรงนี้ — `null` สำหรับ suggestion เก่าก่อนอัพเดต prompt) |
+| GET | `/nik/export?token=&limit=` | ✅ เพิ่ม 2026-07-11 (รอบ 4) — เหมือน `/nik/suggestions` ทุกอย่าง แต่ auth ด้วย `COW_EXPORT_TOKEN` (query param, คนละตัวกับ `DASHBOARD_PASSWORD`) แทน `X-Auth-Token` — ให้ Cow ดึงรายงานนิกมาอ่านเองได้เมื่อ MBBook ถาม โดยไม่ต้องแชร์รหัสผ่าน dashboard · อยู่ใน PUBLIC_ROUTES (เช็ค token เองในตัว endpoint) · ไม่ตั้ง `COW_EXPORT_TOKEN` ใน env = ปิดสนิท (403) · `limit` cap ที่ 20 |
+| POST | `/nik/suggestions/{id}/reject` | ✅ เพิ่ม 2026-07-11 (รอบ 5) — MBBook ตรวจ suggestion แล้วตัดสินใจไม่ apply → กดปฏิเสธจากหน้าเว็บได้เอง เปลี่ยน `status` เป็น `rejected` (ค่าใหม่ นอกเหนือจาก pending/complete/failed) · ปฏิเสธซ้ำ/ปฏิเสธ suggestion ที่ไม่ใช่ pending → 400 · dashboard auth ปกติ (ไม่อยู่ใน PUBLIC_ROUTES) |
+| POST | `/nik/suggestions/{id}/check-status` | ✅ เพิ่ม 2026-07-11 (รอบ 6) — เช็คว่า pending suggestion ถูกแก้ไปแล้วหรือยัง **ไม่เรียก Claude เลย** (deterministic: เทียบ FIND block ของ diff กับ agents.py ปัจจุบันบน GitHub ตรงๆ — ต้นทุนเพิ่ม = 0) หายไปหมด → `status=complete` อัตโนมัติ + `applied_at` ยังเจอ → คง `pending` · ไม่มี GITHUB_TOKEN/ดึงโค้ดไม่ได้ → 503 · diff parse ไม่ได้เลย (ไม่มี FIND block) → 422 · dashboard auth ปกติ |
 | GET | `/roi/summary` | ✅ เพิ่ม 2026-07-04 — win rate @14d/@30d (เกณฑ์ 75%) + portfolio_return สะสมไม่มีเส้นตาย (เป้า 13%) |
-| POST | `/auth/login` | ✅ เพิ่ม 2026-07-09 — แลก PIN → token (sha256) สำหรับ header `X-Auth-Token` · **ทุก endpoint ข้อมูลโดน middleware บังคับ token** ยกเว้น PUBLIC_ROUTES (/, /health, /auth/login, /prefetch, /workflow, /workflow/resume, /docs — ที่ cron ใช้) · เปิดใช้เมื่อตั้ง env `DASHBOARD_PASSWORD` (ไม่ตั้ง = auth ปิด) · lockout ผิด 5 ครั้ง/IP → ล็อก 5 นาที (429) |
+| POST | `/auth/login` | ✅ เพิ่ม 2026-07-09 — แลก PIN → token (sha256) สำหรับ header `X-Auth-Token` · **ทุก endpoint ข้อมูลโดน middleware บังคับ token** ยกเว้น PUBLIC_ROUTES (/, /health, /auth/login, /prefetch, /workflow, /workflow/resume, /docs, /nik/export — ที่ cron ใช้ + /nik/export ใช้ token ตัวเอง) · เปิดใช้เมื่อตั้ง env `DASHBOARD_PASSWORD` (ไม่ตั้ง = auth ปิด) · lockout ผิด 5 ครั้ง/IP → ล็อก 5 นาที (429) |
 | GET | `/roi/portfolio-history?start_date=&end_date=` | ✅ เพิ่ม 2026-07-04, แก้ 2026-07-05 เพิ่ม query param `start_date`/`end_date` (YYYY-MM-DD, optional) filter ช่วงเวลา — ไม่ส่งมา = คืนทั้งหมดเหมือนเดิม |
 
 ---
@@ -181,25 +184,73 @@ DASHBOARD_PASSWORD      # PIN 6 หลัก (ตัวเลขล้วน —
 
 ```
 ทุกศุกร์ (22:00 workflow)
-  นิก อ่าน WorkflowLog 5 วัน
+  นิก อ่าน WorkflowLog 5 วันล่าสุด (✅ แก้บั๊ก filter ว่างเปล่า 2026-07-11 รอบ 6 — เดิมดึงทั้งหมด)
+  + อ่าน suggestion ที่เคย rejected (กันเสนอซ้ำเรื่องที่ MBBook ปฏิเสธไปแล้ว)
   → วิเคราะห์ error pattern
   → สร้าง diff blocks (<<<DIFF>>> format)
   → บันทึกลง nik_suggestions (status=pending)
 
-webapp → GET /nik/suggestions → MBBook เห็น pending list
-  → "Copy สำหรับขอ Cow ดู diff" → คุยกับ Cow ใน Cowork
-  → Cow apply → รัน pytest → ถ้าผ่าน commit+push
-  → status เปลี่ยนเป็น complete (manual)
+webapp → GET /nik/suggestions → MBBook เห็น pending list → เปิด popup ดู reasoning
+  → 3 ทางเลือก:
+    (1) กด "ตรวจสอบสถานะ" — เช็คอัตโนมัติว่าโค้ดถูกแก้ไปแล้วหรือยัง (string match กับ GitHub
+        ไม่มี LLM call) แก้แล้ว → complete เอง / ยังไม่แก้ → ค้าง pending
+    (2) กด "ปฏิเสธ" — ไม่ apply → status=rejected (นิกจะไม่เสนอเรื่องเดิมซ้ำรอบหน้า)
+    (3) คุยกับ Cow ใน Cowork ให้ช่วยแก้ตาม diff (หรือแก้เองถ้า diff ของนิกแย่) → Cow แก้โค้ด
+        → รัน pytest ผ่าน → push → MBBook กด "ตรวจสอบสถานะ" อีกครั้งเพื่อปิดเป็น complete
 ```
+
+⚠️ **หมายเหตุสำคัญ (กันเข้าใจผิดซ้ำ):** ระบบนี้**ไม่ใช่ manual 100%** อย่างที่เคยบันทึกไว้ผิดในรอบ 5 —
+"ตรวจสอบสถานะ" ทำให้ปิด pending → complete ได้แบบกึ่งอัตโนมัติ (MBBook แค่กดปุ่ม ไม่ต้องบอกนิกเอง)
+สาเหตุที่ยังต้อง**กด**ปุ่มเอง (ไม่ auto-check ทุก prefetch) คือตั้งใจคุมไม่ให้ยิง GitHub API เกินจำเป็น
+และให้ MBBook เป็นคนตัดสินใจจังหวะเช็คเอง — Cow เองก็กดปุ่มเหล่านี้ไม่ได้ (ต้องผ่าน dashboard auth
+ที่ Cow ตั้งใจไม่ถือ token) ต้อง MBBook กดจากเว็บเสมอ
+
+**✅ เพิ่ม 2026-07-11 (รอบ 4) — ทางให้ Cow อ่านรายงานนิกได้เองเมื่อ MBBook ถาม** (ตามที่ออกแบบระบบไว้แต่แรก
+แต่ยังไม่มี implementation จนถึงตอนนี้ — Cow เข้า `/nik/suggestions` ไม่ได้เพราะต้อง dashboard auth):
+1. **`GET /nik/export?token=&limit=`** — endpoint แยกต่างหาก auth ด้วย `COW_EXPORT_TOKEN` (query param
+   คนละตัวกับ `DASHBOARD_PASSWORD`) Cow ดึงเองผ่าน web_fetch หรือ Chrome browser ได้ทันทีที่ MBBook ถาม
+   ไม่ต้องรอ MBBook copy-paste — ต้องตั้ง `COW_EXPORT_TOKEN` ใน Render env ด้วย (ดู `.env.example`)
+2. **ปุ่ม "คัดลอกเป็น Markdown" + "ดาวน์โหลด .md"** ใน popup รายละเอียดนิก (`NikDetailContent`) —
+   ทางสำรองถ้า Cow ดึงผ่าน endpoint ไม่ได้ด้วยเหตุผลอะไรก็ตาม (เช่น sandbox network เปลี่ยน allowlist)
+   MBBook กดคัดลอก/โหลดแล้วส่งไฟล์ให้ Cow อ่านแทนได้ — export ครบ summary/reasoning/diff/status —
+   ✅ ทดสอบแล้วจริงกับ suggestion #1 (10 ก.ค.) MBBook ดาวน์โหลด+ส่งไฟล์มาให้ Cow อ่านสำเร็จ
+
+**✅ เพิ่ม 2026-07-11 (รอบ 5) — ปิด pending ได้โดยไม่ต้อง apply**: หลัง Cow อ่าน suggestion #1 แล้วพบว่า
+คุณภาพต่ำ (diff ผิด — เสนอเปลี่ยนชื่อโมเดล Haiku เป็นชื่อที่ไม่มีจริง จะทำให้ API reject จริง, มี diff
+ซ้ำ, มี diff เปล่าที่ FIND=REPLACE ไม่ทำอะไร) MBBook ถามว่าจะปิด pending ยังไงถ้าไม่ apply — เพิ่ม
+status ใหม่ `rejected` + ปุ่ม "ปฏิเสธ" ใน popup (โชว์เฉพาะตอน status=pending, มี `window.confirm` กันกดพลาด)
+เรียก `POST /nik/suggestions/{id}/reject` → MBBook กดจากเว็บได้เองไม่ต้องรบกวน Cow แก้ DB ตรงทุกครั้ง
+
+**✅ เพิ่ม 2026-07-11 (รอบ 6) — แก้ "manual 100% ไม่ตรงกับที่คุยกันไว้แต่แรก"**: MBBook ทักว่าตอนออกแบบ
+คุยกันไว้ว่า Cow แก้/reject แล้วนิกน่าจะรู้เอง ไม่ใช่ manual ทั้งหมด — เสนอปุ่ม "ตรวจสอบสถานะ" (เงื่อนไข:
+**ห้ามเพิ่มต้นทุนระบบ**) แก้ครบ 3 จุด:
+1. **`POST /nik/suggestions/{id}/check-status`** — deterministic string match ล้วนๆ (เทียบ FIND block
+   ของ diff กับ agents.py ปัจจุบันบน GitHub) **ไม่เรียก Claude เลย ต้นทุนเพิ่ม = 0** — parser ใหม่
+   `Orchestrator._nik_parse_diff_blocks()` (static method, แยก FIND block จาก diff_text)
+2. **ปุ่ม "ตรวจสอบสถานะ"** สีม่วงคู่กับปุ่มปฏิเสธในป๊อปอัพ (โชว์เฉพาะ pending) — แก้แล้ว → complete
+   อัตโนมัติ + ปิด popup / ยังไม่แก้ → toast บอกจำนวนจุดที่ยังไม่เปลี่ยน popup ค้างไว้
+3. **แก้บั๊ก filter() ว่างเปล่า** ใน `nik_optimize_code()` Step 1 (ดึง WorkflowLog ทั้งหมดมาตลอด
+   ไม่ใช่แค่ 5 วัน ตามที่ตั้งใจ) + **เพิ่ม step 1b** ดึง summary ของ suggestion ที่เคย `rejected` ยัด
+   เข้า prompt นิก (บอกว่า "เรื่องนี้เสนอไปแล้ว MBBook ไม่เอา ไม่ต้องเสนอซ้ำ") — ไม่เพิ่ม LLM call ใหม่
+   (แค่ query DB เพิ่ม), เพิ่ม RULE ในนิก system prompt ห้ามเสนอ SUMMARY ที่ซ้ำกับ rejected list
+
+**เหตุผลที่ยังต้องกดปุ่มเอง ไม่ auto-check ทุกครั้ง:** คุมไม่ให้ยิง GitHub API เกินจำเป็น + Cow เองก็เรียก
+endpoint พวกนี้ไม่ได้อยู่ดี (dashboard auth, Cow ตั้งใจไม่ถือ token) MBBook ต้องกดจากเว็บเสมอ
 
 ---
 
-## 10. Test Coverage (182 tests — ✅ อัพเดต 2026-07-11)
+## 10. Test Coverage (210 tests — ✅ อัพเดต 2026-07-11 รอบ 6)
 
 | ไฟล์ | จำนวน | ครอบคลุม |
 |------|-------|---------|
-| `test_agents.py` | 137 | _safe_float, นัตตี้ 3-tier, MarketAux, หนุ่ม, มด, นน, Workflow, โคลสัน, DB update, MarketCap, ATH/ATL, มด format, Cross-currency, แฮรี่, เอ, นิก, checkpoint, ROI/portfolio history, PEG Alpha Vantage (9), **แปลข่าวไทย (5 — key determinism/save/skip-translated/bad-LLM/cap)** |
-| `test_main.py` | 45 | GET /health, POST /workflow, POST /workflow/resume, LINE notification resilience, background exception, GET /nik/suggestions, Dashboard auth (10), login rate-limit/lockout (4), **GET /news (5 — empty/dedup/broken-json/translation-join/untranslated-fallback)** |
+| `test_agents.py` | 146 | _safe_float, นัตตี้ 3-tier, MarketAux, หนุ่ม, มด, นน, Workflow, โคลสัน, DB update, MarketCap, ATH/ATL, มด format, Cross-currency, แฮรี่, เอ, นิก, checkpoint, ROI/portfolio history, PEG Alpha Vantage (9), แปลข่าวไทย (5), **นิก 5-day filter + rejected-history-in-prompt (3)**, **`_nik_parse_diff_blocks` (6 — single/multiple/noop/malformed/empty/none)** |
+| `test_main.py` | 64 | GET /health, POST /workflow, POST /workflow/resume, LINE notification resilience, background exception, GET /nik/suggestions, Dashboard auth (10), login rate-limit/lockout (4), GET /news (5), GET /nik/export (6), POST /nik/suggestions/{id}/reject (5), **POST /nik/suggestions/{id}/check-status (8 — not-found-404/not-pending-400/no-github-token-503/github-fetch-fail-503/no-find-blocks-422/find-gone-complete-200/find-present-pending-200/requires-dashboard-auth-401)** |
+
+✅ **แก้แล้ว 2026-07-11 (รอบ 7)**: `test_news_untranslated_falls_back_to_english` เคย fail มา 3 รอบ
+(`KeyError: 'sentiment'`) เพราะ `/news` ไม่ set `a["sentiment"]`/`a["impact"]` ตอนข่าวยังไม่ถูกแปล
+(แค่ set `translated=False`) — MBBook ถามตรงๆ ว่าทำไมไม่แก้ให้ผ่านหมดเลย ไม่มีเหตุผลจะไม่แก้ (เป็นบั๊ก
+1 บรรทัด แยกจากงาน Nik โดยสิ้นเชิง) เพิ่ม `a["sentiment"] = None` / `a["impact"] = None` ทั้งใน
+else-branch (ข่าวไม่มีคำแปล) และ except-branch (translation join พัง) → คาด **210 passed / 210** รอบนี้
 
 **รันทดสอบ:**
 ```powershell

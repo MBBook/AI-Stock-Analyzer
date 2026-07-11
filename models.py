@@ -164,7 +164,7 @@ class NikSuggestion(Base):
     created_at    = Column(DateTime, default=datetime.utcnow)
     summary       = Column(Text,    nullable=False)  # สรุปสั้นว่านิกอยากแก้อะไร
     diff_text     = Column(Text,    nullable=False)  # diff จริงที่นิกสร้าง
-    status        = Column(String,  default="pending")  # pending / complete / failed
+    status        = Column(String,  default="pending")  # pending / complete / failed / rejected (✅ เพิ่ม 2026-07-11)
     error_message = Column(Text,    nullable=True)   # เหตุผลที่ fail (ถ้ามี)
     applied_at    = Column(DateTime, nullable=True)  # เวลาที่ apply สำเร็จ
     # ✅ เพิ่ม 2026-07-11: MBBook ขอให้รายงานนิกอธิบายเหตุผล — เก็บคำอธิบายว่าทำไมถึงแก้ตรงนี้

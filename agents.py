@@ -2061,6 +2061,10 @@ Rules:
             from datetime import timedelta
 
             # ===== Step 1: ดึง WorkflowLog ย้อนหลัง 5 วัน =====
+            # ✅ แก้ 2026-07-11 (รอบ 6): filter() เดิมว่างเปล่า (ไม่มี argument) ทำให้ดึง log
+            # "ทั้งหมด" ตั้งแต่วันแรกที่ระบบรัน ไม่ใช่แค่ 5 วันล่าสุดตามที่ตั้งใจ (`since` คำนวณไว้แต่ไม่เคย
+            # ถูกใช้จริง) — เจอตอน MBBook ถามว่าทำไมนิกอาจเสนอปัญหาเดิมซ้ำ ยิ่งมี log เก่าปนมาก ยิ่งเสี่ยง
+            # เห็น error pattern ที่แก้ไปนานแล้วแล้วเสนอซ้ำ
             db = None
             db_logs = []
             try:
@@ -2068,13 +2072,40 @@ Rules:
                 from models import WorkflowLog
                 since = datetime.now() - timedelta(days=5)
                 db_logs = db.query(WorkflowLog).filter(
+                    WorkflowLog.timestamp >= since
                 ).order_by(WorkflowLog.timestamp.desc()).all()
-                self.log_action("นิก", f"Loaded {len(db_logs)} runs from DB", "INFO")
+                self.log_action("นิก", f"Loaded {len(db_logs)} runs from DB (last 5 days)", "INFO")
             except Exception as e:
                 self.log_action("นิก", f"DB read failed: {str(e)}", "WARNING")
             finally:
                 if db:
                     db.close()
+
+            # ===== Step 1b: ดึง suggestion ที่ MBBook เคยปฏิเสธไปแล้ว =====
+            # ✅ เพิ่ม 2026-07-11 (รอบ 6): กันนิกเสนอเรื่องเดิมซ้ำที่ MBBook ตัดสินใจไม่เอาไปแล้ว —
+            # ส่งแค่ summary (ไม่ส่ง diff_text เต็ม กัน token บาน) ให้ Claude เห็นว่าเรื่องไหนเคยเสนอ+โดนปฏิเสธ
+            # ไม่เพิ่ม LLM call ใหม่ (แค่ query DB เพิ่ม + ยัดเข้า prompt เดิม) ไม่มีต้นทุนเพิ่ม
+            db3 = None
+            rejected_summaries = []
+            try:
+                db3 = SessionLocal()
+                from models import NikSuggestion
+                rejected_summaries = [
+                    r.summary for r in
+                    db3.query(NikSuggestion)
+                    .filter(NikSuggestion.status == "rejected")
+                    .order_by(NikSuggestion.created_at.desc())
+                    .limit(10).all()
+                ]
+            except Exception as e:
+                self.log_action("นิก", f"Read rejected suggestions failed: {str(e)}", "WARNING")
+            finally:
+                if db3:
+                    db3.close()
+            rejected_text = (
+                "\n".join(f"- {s}" for s in rejected_summaries)
+                if rejected_summaries else "ไม่มี"
+            )
 
             history = json.dumps([{
                 "timestamp":    l.timestamp.isoformat(),
@@ -2138,6 +2169,9 @@ RULES:
 - Each FIND block must be unique in the file (include enough context lines)
 - Make MINIMAL changes — do not rewrite functions entirely
 - Do NOT change model names, API keys, or database schema
+- Do NOT propose a fix whose SUMMARY substantially duplicates anything listed under
+  "Previously rejected suggestions" below — MBBook already reviewed and declined those, skip them
+  even if the underlying log pattern still appears
 - Max 3 diff blocks total"""
 
             user_message = f"""=== Workflow History (5 days) ===
@@ -2145,6 +2179,9 @@ RULES:
 
 === Current Session Errors ===
 {session_text}
+
+=== Previously rejected suggestions (MBBook declined these — do not repeat) ===
+{rejected_text}
 
 === Current agents.py (first 8000 chars for context) ===
 {current_code[:8000]}
@@ -2219,6 +2256,26 @@ Identify top issues and output diff blocks."""
         except Exception as e:
             self.log_action("นิก", f"Could not fetch agents.py from GitHub: {str(e)}", "ERROR")
             return None, None
+
+    # ✅ เพิ่ม 2026-07-11 (รอบ 6): MBBook เสนอปุ่ม "ตรวจสอบสถานะ" ให้เช็คว่า suggestion ที่ pending
+    # ถูกแก้ไปแล้วหรือยัง — เงื่อนไขคือห้ามเพิ่มต้นทุนระบบ เลยทำเป็น deterministic string match ล้วนๆ
+    # (ไม่เรียก Claude เลย) เทียบ FIND block กับ agents.py ปัจจุบันบน GitHub ตรงๆ ถ้า FIND block
+    # หายไปหมด (โค้ดตรงนั้นถูกแก้ไปแล้วจริง) ถือว่า apply สำเร็จ — ไม่ได้พิสูจน์ "ถูกต้อง" แค่พิสูจน์ว่า
+    # "โค้ดเปลี่ยนไปจากที่นิกเห็นตอนเสนอ" (heuristic ที่สมเหตุสมผลพอสำหรับใช้งานจริง ไม่ต้องเป๊ะ 100%)
+    @staticmethod
+    def _nik_parse_diff_blocks(diff_text):
+        """แยก diff_text เป็น list ของ FIND block (raw text) จากแต่ละ <<<DIFF>>>...<<<END_DIFF>>>
+        คืน list ว่างถ้า parse ไม่ได้เลย (เช่น diff เก่ารูปแบบเพี้ยน)"""
+        finds = []
+        for chunk in (diff_text or "").split("<<<DIFF>>>")[1:]:
+            body = chunk.split("<<<END_DIFF>>>")[0]
+            if "FIND:" not in body or "REPLACE:" not in body:
+                continue
+            find_part = body.split("FIND:", 1)[1].split("REPLACE:", 1)[0]
+            find_text = find_part.strip("\n")
+            if find_text:
+                finds.append(find_text)
+        return finds
 
     # ==================== MAIN WORKFLOW ====================
     def run_workflow(self, stocks=None, portfolio=None, include_weekend=False):

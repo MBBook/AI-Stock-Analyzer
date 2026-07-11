@@ -1,5 +1,115 @@
 # Pending — AI Stock Analyzer V4
 
+## ✅ 2026-07-11 (รอบ 7 — Cow) — แก้ test fail ตัวสุดท้าย (KeyError sentiment ใน /news)
+
+**ที่มา:** รันเทสต์รอบ 6 แล้วเจอ 2 fail (1 ตัวใหม่จากรอบ 6 เอง — แก้ไปแล้วในเทสต์, 1 ตัวเดิม
+`test_news_untranslated_falls_back_to_english` ที่ carry มาตั้งแต่รอบ 4) MBBook ถามตรงๆ ว่าทำไม
+ไม่แก้ให้ผ่านหมดเลย — ไม่มีเหตุผลจะไม่แก้ (บั๊ก 1 บรรทัด แยกจากงาน Nik) เลยแก้ให้
+
+**ทำเสร็จ (ยังไม่ commit/push — รวมกับก้อนรอบ 4-6 ที่รอ push อยู่):**
+- `main.py::get_news` — else-branch (ข่าวไม่มีคำแปล) เพิ่ม `a["sentiment"] = None` /
+  `a["impact"] = None` (เดิมไม่ set เลย ทำให้ key หายไปจาก response) + except-branch (translation
+  join พัง) เพิ่ม `a.setdefault("sentiment", None)` / `.setdefault("impact", None)` ด้วยเผื่อ robust
+- ไม่เพิ่ม/ลบเทสต์ (แก้ production code ให้ตรงกับที่เทสต์เดิมคาดหวังอยู่แล้ว) รวมยังคง **210 tests**
+- คาดผลรันครั้งถัดไป: **210 passed / 210** (ครั้งแรกที่ทุกเทสต์ผ่านหมดตั้งแต่เริ่มเจอบั๊กนี้)
+
+## ✅ 2026-07-11 (รอบ 6 — Cow) — ปุ่ม "ตรวจสอบสถานะ" + แก้บั๊ก 5-day filter + กันนิกเสนอซ้ำ
+
+**ที่มา:** MBBook ทักว่าระบบ manual 100% (รอบ 5) ไม่ตรงกับที่คุยกันตอนออกแบบ ("Cow แก้/reject แล้วนิกน่าจะ
+รู้เอง") ถามด้วยว่าถ้า reject แล้วนิกจะเสนอปัญหาเดิมซ้ำไหม (เพราะปัญหาที่มองยังไม่ถูกแก้จริง) — เสนอเพิ่ม
+ปุ่ม "ตรวจสอบสถานะ" ให้นิกเช็คเอง โดยมีเงื่อนไข**ห้ามเพิ่มต้นทุนระบบ**
+
+**ทำเสร็จ (ยังไม่ commit/push — รวมกับก้อนรอบ 4-5 ที่รอ push อยู่):**
+1. **`POST /nik/suggestions/{id}/check-status`** (`main.py`) — เช็คว่า pending suggestion ถูกแก้แล้ว
+   หรือยัง ด้วย **deterministic string match ล้วนๆ ไม่เรียก Claude เลย** (เทียบ FIND block ของ diff
+   กับ agents.py ปัจจุบันบน GitHub ตรงๆ — GitHub API ฟรีอยู่แล้ว + string compare ในเครื่อง = **ต้นทุน
+   เพิ่ม $0**) หายไปหมด (โดนแก้แล้ว) → `status=complete` + `applied_at` อัตโนมัติ ยังเจออย่างน้อย 1 จุด
+   → คง `pending`
+2. **`Orchestrator._nik_parse_diff_blocks()`** (`agents.py`, static method ใหม่) — parser แยก FIND
+   block จาก diff_text (รองรับหลาย `<<<DIFF>>>` block ในไฟล์เดียว)
+3. **ปุ่ม "ตรวจสอบสถานะ"** สีม่วง คู่กับปุ่มปฏิเสธในป๊อปอัพนิก (`App.jsx`) — โชว์เฉพาะ pending
+4. **แก้บั๊ก `filter()` ว่างเปล่า** ใน `nik_optimize_code()` — เดิมคำนวณ `since` (5 วัน) แต่ไม่เคยใช้กรอง
+   จริง ดึง WorkflowLog ทั้งหมดตั้งแต่วันแรกมาตลอด แก้เป็น `filter(WorkflowLog.timestamp >= since)` จริง
+5. **กันนิกเสนอเรื่องเดิมซ้ำ** — เพิ่ม step 1b ดึง summary ของ suggestion ที่เคย `rejected` (limit 10)
+   ยัดเข้า prompt นิก (`=== Previously rejected suggestions ===`) + เพิ่ม RULE ใน system prompt ห้าม
+   เสนอ SUMMARY ซ้ำ — ไม่เพิ่ม LLM call ใหม่ (query DB เพิ่มเฉยๆ)
+6. **Tests +17** (9 ใน `test_agents.py`: 3 สำหรับ nik prompt/filter + 6 สำหรับ `_nik_parse_diff_blocks`,
+   8 ใน `test_main.py` สำหรับ `/nik/suggestions/{id}/check-status`) รวม **210 tests**
+7. แก้ `test_db_save_fails_no_crash` เดิม (`test_agents.py`) — เพิ่ม mock db ตัวที่ 3 ใน `side_effect`
+   list กัน SessionLocal() call ใหม่ (step 1b) ไปกิน slot ของ db_save เดิม ทำให้เทสต์ไม่ได้ทดสอบตามชื่อจริง
+8. อัพเดต `Blueprint.md` หัวข้อ 3/9/10 — **แก้คำอธิบายเดิมที่บอกว่าระบบเป็น "manual 100%" ผิด** (รอบ 5
+   เขียนไว้ผิด ตอนนี้แก้ว่าเป็นกึ่งอัตโนมัติผ่านปุ่มตรวจสอบสถานะ)
+
+**สังเกตเพิ่ม (ไม่ใช่บั๊ก แต่น่าสนใจ):** suggestion #1 ที่ถูกปฏิเสธไปฝ่าฝืน RULE ที่มีอยู่แล้วในนิกเอง
+("Do NOT change model names") — Claude สร้าง suggestion ที่ขัดกับ system prompt ของตัวเอง อาจคุ้มค่า
+เพิ่ม guard กรอง diff block ที่แตะ `MODEL_SONNET`/`MODEL_HAIKU` ออกอัตโนมัติก่อนบันทึกลง DB (ยังไม่ทำ
+รอ MBBook ตัดสินใจว่าคุ้มไหม)
+
+⚠️ **ยังไม่ได้กดปุ่มไหนจริงในระบบ** — ต้องรอ push+deploy รอบนี้ก่อน
+
+## ✅ 2026-07-11 (รอบ 5 — Cow) — รีวิว suggestion #1 ของนิก + เพิ่มสถานะ "ปฏิเสธ" (rejected)
+
+**ที่มา:** MBBook ดาวน์โหลด `nik-suggestion-1.md` จากปุ่มที่เพิ่งสร้างรอบ 4 (ยืนยันปุ่มทำงานจริง) ส่งให้ Cow
+อ่าน — Cow ตรวจแล้วพบว่า suggestion นี้**ห้าม apply**: diff หลักเสนอเปลี่ยน
+`MODEL_HAIKU = "claude-haiku-4-5-20251001"` → `"claude-haiku-4-5"` โดยอ้างว่าชื่อเดิม "malformed" —
+**ผิด** ชื่อเดิมถูกต้องตามที่ Anthropic กำหนดจริง ถ้าแก้ตามนี้จะกลายเป็นชื่อโมเดลที่ไม่มีอยู่จริง
+API จะ reject ทันที (ตรงข้ามกับที่นิกอ้างว่าจะแก้ปัญหา rejection) นอกจากนี้ diff ยังมีบล็อกซ้ำ 2 ครั้ง
++ 1 บล็อกที่ FIND=REPLACE เหมือนกันทุกตัวอักษร (ไม่ทำอะไรเลย) — คุณภาพต่ำทั้งก้อน เกิดจาก prompt เก่า
+ก่อนอัพเดต (รอบ 3) **แนะนำ MBBook ไม่ apply** suggestion นี้
+
+MBBook ถามต่อว่าจะปิด pending ของ suggestion นี้ยังไงถ้าไม่ apply — ตอนนั้นยังไม่มีทาง (status enum เดิม
+มีแค่ pending/complete/failed ไม่มีคำที่แปลว่า "ตรวจแล้ว ไม่ apply")
+
+**ทำเสร็จ (ยังไม่ commit/push — รวมกับก้อนรอบ 4 ที่รอ push อยู่):**
+1. **status ใหม่ `rejected`** (`models.py::NikSuggestion.status` — ยังเป็น String เดิม ไม่ต้อง migrate
+   schema เพิ่ม)
+2. **`POST /nik/suggestions/{id}/reject`** (`main.py`) — เปลี่ยน pending → rejected เท่านั้น (ปฏิเสธซ้ำ/
+   ปฏิเสธ suggestion ที่ไม่ใช่ pending → 400, ไม่มี id → 404) dashboard auth ปกติ (ไม่อยู่ใน PUBLIC_ROUTES
+   เพราะเป็น write action ที่ทำจากเว็บที่ล็อกอินแล้ว ไม่ใช่ Cow เรียกเอง)
+3. **ปุ่ม "ปฏิเสธ"** ใน popup รายละเอียดนิก (`NikDetailContent`, `App.jsx`) — โชว์เฉพาะตอน
+   `status === 'pending'`, มี `window.confirm` กันกดพลาด (ไม่เพิ่ม useState/popup แยก กัน rule
+   Handoff ข้อ 2), เรียกสำเร็จแล้ว `fetchNikSuggestions()` + `closePopup()` + toast
+4. อัพเดต `NIK_STATUS_LABEL_TH`/`sColor` ให้รองรับ `rejected` (สีเทาจาง ต่างจาก pending สีทอง)
+5. **Tests +5** (`TestNikRejectEndpoint`) รวม **193 tests**
+6. อัพเดต `Blueprint.md` หัวข้อ 3/9/10
+
+⚠️ **ยังไม่ได้กดปฏิเสธ suggestion #1 จริงในระบบ** — ต้องรอ push+deploy รอบนี้ก่อน ถึงจะกดปุ่ม "ปฏิเสธ"
+บนเว็บได้จริง (ตอนนี้ endpoint ยังไม่อยู่บน production)
+
+## ✅ 2026-07-11 (รอบ 4 — Cow) — Cow ดึงรายงานนิกเองได้ (`/nik/export`) + ปุ่ม copy/download สำรอง
+
+**ที่มา:** ตรวจ deploy รอบ 3 พบว่านิก pending ค้าง (ปกติ — flow manual ตามออกแบบ) แต่ MBBook ทักว่า
+ตอนออกแบบระบบตั้งใจให้ Cow ดึงรายงานนิกมาอ่านเองได้เมื่อถาม ไม่ใช่ต้องรอ MBBook copy-paste ให้ทุกครั้ง
+— ไปเช็คแล้วพบว่า `/nik/suggestions` ต้อง dashboard auth (X-Auth-Token จาก PIN) ที่ Cow ไม่มีสิทธิ์ถือ
+เลยยังไม่เคยมีทางให้ Cow เข้าถึงได้จริง
+
+**ทำเสร็จ (ยังไม่ commit/push):**
+1. **`GET /nik/export?token=&limit=`** (`main.py`) — เหมือน `/nik/suggestions` ทุกอย่าง แต่ auth ด้วย
+   `COW_EXPORT_TOKEN` (query param, คนละตัวกับ `DASHBOARD_PASSWORD`) — Cow เรียกเองผ่าน web_fetch/Chrome
+   ได้ทันที ไม่ต้องรอ MBBook · อยู่ใน PUBLIC_ROUTES (ข้าม dashboard auth middleware, เช็ค token เอง) ·
+   ไม่ตั้ง `COW_EXPORT_TOKEN` = ปิดสนิท 403 · `limit` cap 20 กันดึงทั้งตาราง
+   - ทดสอบแล้วจริง (ไม่ใช่แค่ทฤษฎี): sandbox bash เรียก `api.render.com`/Neon DB ตรงไม่ได้ (proxy
+     allowlist บล็อก) แต่ **Chrome browser MCP เรียก `ai-stock-analyzer-msli.onrender.com` ได้ปกติ**
+     (ทดสอบกับ `/health` และ `/nik/suggestions` แบบไม่มี token → เจอ 401 ตามคาด) — ดังนั้น `/nik/export`
+     จะใช้งานได้จริงผ่านช่องทางนี้หลัง deploy
+2. **`COW_EXPORT_TOKEN`** — generate random token ใหม่ใส่ `.env` local แล้ว (`secrets.token_urlsafe(32)`)
+   + เพิ่ม placeholder ใน `.env.example` พร้อม comment วิธี generate
+3. **ปุ่ม "คัดลอกเป็น Markdown" + "ดาวน์โหลด .md"** ใน popup นิก (`NikDetailContent`, `App.jsx`) — ทางสำรอง
+   export summary/reasoning/diff/status ครบ ถ้า Cow ดึงผ่าน endpoint ไม่ได้ด้วยเหตุผลอะไรก็ตาม — ไม่ใช้
+   `useState` เก็บ "copied" state (กัน rule Handoff ข้อ 2) ใช้ DOM manipulation ตรงที่ปุ่มแทน
+4. **Tests +6** (`test_main.py::TestNikExportEndpoint` — no-token-env-403 / missing-token-401 /
+   wrong-token-401 / valid-200 / limit-cap-20 / bypass-dashboard-auth) รวม **188 tests**
+5. อัพเดต `Blueprint.md` หัวข้อ 3 (endpoints table), 9 (นิก flow), 10 (test coverage) ให้ตรงของจริง
+
+⚠️ **ต้อง push + ตั้ง env ที่ Render ก่อนใช้งานได้จริง**:
+- Push `main.py`/`frontend/src/App.jsx`/`.env.example`/`test_main.py` ขึ้น Render
+- **ตั้ง `COW_EXPORT_TOKEN` ใน Render Environment ด้วย** (ค่าเดียวกับใน `.env` local — เปิดไฟล์ `.env`
+  ดู ไม่ generate ใหม่ ไม่งั้นค่าไม่ตรงกัน) ไม่งั้น endpoint จะตอบ 403 ตลอด (ปิดสนิทตามที่ตั้งใจ)
+
+**จุดที่ยังไม่แก้ (พบระหว่างตรวจ ไม่เกี่ยวกับงานรอบนี้):**
+- `test_news_untranslated_falls_back_to_english` fail อยู่ก่อนรอบนี้แล้ว (`KeyError: 'sentiment'`) —
+  `/news` ไม่ set `sentiment`/`impact` เป็น `None` ตอนข่าวยังไม่ถูกแปล ดู Blueprint หัวข้อ 10
+
 ## ✅ 2026-07-11 (รอบ 3 — Cow) — News ไทยเต็ม 100% + รายงานนิกไทย + popup รายละเอียด
 
 **ที่มา:** MBBook ตรวจรายงานนิกแล้วขอแก้ 2 จุด — (1) หน้า News ยังมีคำอังกฤษหลุด (sentiment badge,

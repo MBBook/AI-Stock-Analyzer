@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, BackgroundTasks, UploadFile, File
+from fastapi import FastAPI, Depends, BackgroundTasks, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import os
@@ -116,6 +116,9 @@ PUBLIC_ROUTES = {
     ("POST", "/prefetch"),
     ("POST", "/workflow"), ("POST", "/workflow/resume"),
     ("GET", "/docs"), ("GET", "/openapi.json"),
+    # ✅ เพิ่ม 2026-07-11: /nik/export อยู่นอก dashboard auth ตั้งใจ — มี token ของตัวเอง
+    # (COW_EXPORT_TOKEN, คนละตัวกับ DASHBOARD_PASSWORD) เช็คในตัว endpoint เอง ดู comment ที่นั่น
+    ("GET", "/nik/export"),
 }
 
 
@@ -756,10 +759,18 @@ async def get_news(limit: int = 60, db: Session = Depends(get_db)):
                 a["translated"] = True
             else:
                 a["translated"] = False
+                # ✅ แก้ 2026-07-11 (รอบ 7): เดิมไม่ set sentiment/impact เลยตอนข่าวยังไม่ถูกแปล
+                # → key หายไปเลย ทำให้ frontend/เทสต์ที่คาดหวัง None (ไม่ใช่ key ไม่มี) พัง
+                # (KeyError ใน test_news_untranslated_falls_back_to_english) แก้ให้ explicit เป็น
+                # None แทนการไม่ set เลย
+                a["sentiment"] = None
+                a["impact"] = None
     except Exception as e:
         print(f"[NEWS] translation join failed: {e}")
         for a in articles:
             a.setdefault("translated", False)
+            a.setdefault("sentiment", None)
+            a.setdefault("impact", None)
 
     return {"count": len(articles), "articles": articles}
 
@@ -1069,6 +1080,119 @@ async def get_nik_suggestions(db: Session = Depends(get_db)):
             for i in items
         ]
     }
+
+
+# ✅ เพิ่ม 2026-07-11: MBBook ออกแบบระบบไว้ตั้งแต่แรกว่า "นิกรายงานปัญหาหน้า webapp ได้ แล้ว Cow
+# เข้าไปอ่านปัญหานิก หรือดึงรายงานนิกเข้ามาอ่านในนี้ได้" — แต่ /nik/suggestions ต้อง dashboard auth
+# (X-Auth-Token จาก PIN) ซึ่ง Cow ไม่มีสิทธิ์ถือรหัสผ่านนี้ (คนละเรื่องกับ credential ผู้ใช้ทั่วไปก็จริง
+# แต่ยังเป็น single-user shared secret เดียวกับที่ป้องกันข้อมูลพอร์ต ไม่อยากผูกรวมกัน) เลยเปิด endpoint
+# read-only แยกต่างหาก ป้องกันด้วย token คนละตัว (COW_EXPORT_TOKEN) ที่ scope แคบกว่า: อ่านได้แค่
+# nik_suggestions อย่างเดียว ไม่มีข้อมูลการเงิน/พอร์ตหลุดไปด้วย
+# - อยู่ใน PUBLIC_ROUTES (ข้าม dashboard auth middleware) เพราะเช็ค token เองในนี้แทน
+# - token ผ่าน query string (ไม่ใช่ header) เพราะเครื่องมือ fetch ฝั่ง Cow (web_fetch/browser
+#   navigate) ไม่รองรับการแนบ custom header — ผลคือ token จะไปโผล่ใน Render access log ได้
+#   (ยอมรับได้เพราะ endpoint นี้ read-only และไม่มีข้อมูลการเงิน — เทียบเท่าความเสี่ยงของ agents.py
+#   ที่ก็ public บน GitHub อยู่แล้ว)
+# - COW_EXPORT_TOKEN ไม่ตั้ง env → endpoint ปิดสนิท (403) ไม่ fallback เป็นเปิดเฉยๆ
+@app.get("/nik/export")
+async def export_nik_suggestions(token: str = "", limit: int = 10, db: Session = Depends(get_db)):
+    """เหมือน /nik/suggestions ทุกอย่าง แต่ auth ด้วย COW_EXPORT_TOKEN (query param) แทน
+    X-Auth-Token — ให้ Cow ดึงรายงานนิกเข้ามาอ่านได้เองเมื่อ MBBook ถาม โดยไม่ต้องแชร์รหัสผ่าน dashboard"""
+    expected = os.getenv("COW_EXPORT_TOKEN")
+    if not expected:
+        raise HTTPException(status_code=403, detail="export disabled — COW_EXPORT_TOKEN not set on server")
+    if not token or not _hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="invalid or missing token")
+
+    from models import NikSuggestion
+    from sqlalchemy import desc
+    safe_limit = max(1, min(limit, 20))  # กันดึงทั้งตาราง
+    items = db.query(NikSuggestion).order_by(desc(NikSuggestion.created_at)).limit(safe_limit).all()
+    return {
+        "count": len(items),
+        "pending_count": sum(1 for i in items if i.status == "pending"),
+        "suggestions": [
+            {
+                "id":            i.id,
+                "created_at":    i.created_at,
+                "summary":       i.summary,
+                "reasoning":     i.reasoning,
+                "diff_text":     i.diff_text,
+                "status":        i.status,
+                "error_message": i.error_message,
+                "applied_at":    i.applied_at,
+            }
+            for i in items
+        ]
+    }
+
+
+# ✅ เพิ่ม 2026-07-11 (รอบ 5): MBBook ถามว่า "ต้องบอกนิกยังไงให้ปิดสถานะ pending" — ก่อนหน้านี้ status
+# enum มีแค่ pending/complete/failed ไม่มีทางบอกว่า "ตรวจแล้ว ตัดสินใจไม่ apply" เลย ต้องค้าง pending
+# ตลอดไป หรือฝืนตั้งเป็น complete/failed ซึ่งความหมายผิด (ไม่ได้ apply สำเร็จ ไม่ได้ apply แล้ว fail)
+# เพิ่ม status ใหม่ "rejected" + endpoint นี้ให้ MBBook กดปฏิเสธจากหน้าเว็บได้เอง (ไม่ต้องรบกวน Cow
+# แก้ DB ตรงทุกครั้ง) — endpoint ธรรมดา ไม่อยู่ใน PUBLIC_ROUTES เพราะเป็น write action ต้องผ่าน
+# dashboard auth ปกติเหมือน POST /trade-update, DELETE /stocks/{ticker}
+@app.post("/nik/suggestions/{suggestion_id}/reject")
+async def reject_nik_suggestion(suggestion_id: int, db: Session = Depends(get_db)):
+    """ปฏิเสธ suggestion ที่ status=pending อยู่ — เปลี่ยนเป็น status=rejected (ไม่ apply)
+    กันแก้ suggestion ที่ผ่านการตัดสินใจไปแล้ว (complete/failed/rejected) ซ้ำ"""
+    from models import NikSuggestion
+    item = db.query(NikSuggestion).filter(NikSuggestion.id == suggestion_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    if item.status != "pending":
+        raise HTTPException(status_code=400, detail=f"cannot reject — current status is '{item.status}', not 'pending'")
+    item.status = "rejected"
+    db.commit()
+    db.refresh(item)
+    return {
+        "id":         item.id,
+        "status":     item.status,
+        "summary":    item.summary,
+    }
+
+
+# ✅ เพิ่ม 2026-07-11 (รอบ 6): MBBook ทักว่าระบบเดิมเป็น manual 100% ไม่ตรงกับที่คุยกันไว้แต่แรกว่า
+# "Cow แก้หรือ reject แล้วนิกน่าจะรู้เอง" — เสนอปุ่ม "ตรวจสอบสถานะ" ให้เช็คว่า suggestion ที่ pending
+# ถูกแก้ไปแล้วหรือยัง แต่มีเงื่อนไข "ห้ามเพิ่มต้นทุนระบบ" — endpoint นี้เลย**ไม่เรียก Claude เลย**
+# ใช้ deterministic string match (เทียบ FIND block กับ agents.py ปัจจุบันบน GitHub) ต้นทุนเพิ่ม = 0
+# (แค่ GitHub API call ที่ฟรีอยู่แล้ว + string compare ในเครื่อง) — ถ้า FIND block หายไปหมดจากโค้ด
+# ปัจจุบัน (โดนแก้ไปแล้วจริง) → status=complete อัตโนมัติ ถ้ายังเจออย่างน้อย 1 block → ยัง pending
+@app.post("/nik/suggestions/{suggestion_id}/check-status")
+async def check_nik_suggestion_status(suggestion_id: int, db: Session = Depends(get_db)):
+    """เช็ค pending suggestion ว่าโค้ดถูกแก้ไปแล้วหรือยัง (string match ล้วนๆ ไม่มี LLM call)
+    เจอ FIND block เหลืออยู่ในโค้ดปัจจุบัน = ยังไม่ได้แก้ (ยัง pending) / ไม่เจอเลย = แก้แล้ว (complete)"""
+    from models import NikSuggestion
+    item = db.query(NikSuggestion).filter(NikSuggestion.id == suggestion_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    if item.status != "pending":
+        raise HTTPException(status_code=400, detail=f"can only check status of pending suggestions, current status is '{item.status}'")
+
+    github_token = os.getenv("GITHUB_TOKEN")
+    if not github_token:
+        raise HTTPException(status_code=503, detail="GITHUB_TOKEN not set — cannot check current code on GitHub")
+
+    github_repo = os.getenv("GITHUB_REPO", "MBBook/ai-stock-analyzer")
+    current_code, _ = orchestrator._nik_get_current_agents_py(github_token, github_repo)
+    if not current_code:
+        raise HTTPException(status_code=503, detail="could not fetch current agents.py from GitHub")
+
+    find_blocks = orchestrator._nik_parse_diff_blocks(item.diff_text)
+    if not find_blocks:
+        raise HTTPException(status_code=422, detail="ไม่พบ FIND block ที่ parse ได้ใน diff นี้ — เช็คสถานะอัตโนมัติไม่ได้ ต้องปฏิเสธหรือคุยกับ Cow แทน")
+
+    still_present = sum(1 for f in find_blocks if f in current_code)
+
+    if still_present == 0:
+        item.status = "complete"
+        item.applied_at = datetime.utcnow()
+        db.commit()
+        db.refresh(item)
+        return {"id": item.id, "status": item.status, "checked_blocks": len(find_blocks), "still_pending_blocks": 0}
+
+    return {"id": item.id, "status": item.status, "checked_blocks": len(find_blocks), "still_pending_blocks": still_present}
 
 
 @app.get("/costs/summary")

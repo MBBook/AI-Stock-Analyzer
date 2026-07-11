@@ -1266,12 +1266,18 @@ class TestNikOptimizeCode(unittest.TestCase):
     @patch("agents.SessionLocal")
     @patch.object(AgentOrchestrator, "_nik_get_current_agents_py")
     def test_db_save_fails_no_crash(self, mock_get_code, mock_sl):
-        """DB save suggestion ล้มเหลว → นิกต้องไม่ crash"""
+        """DB save suggestion ล้มเหลว → นิกต้องไม่ crash
+        ✅ แก้ 2026-07-11 (รอบ 6): เพิ่ม SessionLocal() call ที่ 2 (อ่าน rejected suggestions,
+        step 1b ใหม่) — side_effect ต้องมี 3 รายการแล้ว (เดิม 2: read WorkflowLog / save)
+        ไม่งั้น call ที่ 3 (save จริง) จะกิน exhausted StopIteration ไปแทน ทำให้เทสต์นี้ผ่านโดยไม่ได้
+        ทดสอบ db_save.add ล้มเหลวตามชื่อเทสต์จริงๆ"""
         db_read = MagicMock()
         db_read.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+        db_rejected = MagicMock()
+        db_rejected.query.return_value.filter.return_value.order_by.return_value.limit.return_value.all.return_value = []
         db_save = MagicMock()
         db_save.add.side_effect = Exception("DB full")
-        mock_sl.side_effect = [db_read, db_save]
+        mock_sl.side_effect = [db_read, db_rejected, db_save]
         mock_get_code.return_value = (self.sample_code, "sha")
 
         fake_diff = "<<<DIFF>>>\nSUMMARY: t\nFILE: agents.py\nFIND:\nx\nREPLACE:\ny\n<<<END_DIFF>>>"
@@ -1282,6 +1288,113 @@ class TestNikOptimizeCode(unittest.TestCase):
                 self.orc.nik_optimize_code()
             except Exception as e:
                 self.fail(f"nik_optimize_code crashed on DB save failure: {e}")
+
+    @patch("agents.SessionLocal")
+    @patch.object(AgentOrchestrator, "_nik_get_current_agents_py")
+    def test_workflow_log_query_filtered_by_5_days(self, mock_get_code, mock_sl):
+        """✅ เพิ่ม 2026-07-11 (รอบ 6): filter() เดิมว่างเปล่า (ไม่มี argument) → ดึง WorkflowLog
+        ทั้งหมดตั้งแต่วันแรก ไม่ใช่แค่ 5 วันล่าสุด — เจอตอน MBBook ถามว่านิกจะเสนอปัญหาเดิมซ้ำไหม
+        แก้แล้วต้องมี argument จริง (WorkflowLog.timestamp >= since) ไม่ใช่ filter() เปล่าๆ
+        ⚠️ พังรอบแรกที่รัน (TypeError: '>=' not supported between MagicMock/datetime) เพราะไฟล์นี้
+        mock ทั้งโมดูล models เป็น MagicMock() เปล่าตั้งแต่บรรทัดบนสุด (`sys.modules['models'] =
+        MagicMock()`) — WorkflowLog.timestamp เลยเป็น MagicMock ที่ไม่รองรับ >= กับ datetime จริง
+        โดย default ต้อง config __ge__ เองก่อน"""
+        db_wf = MagicMock()
+        db_wf.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+        db_rej = MagicMock()
+        db_rej.query.return_value.filter.return_value.order_by.return_value.limit.return_value.all.return_value = []
+        mock_sl.side_effect = [db_wf, db_rej, MagicMock()]
+        mock_get_code.return_value = (self.sample_code, "sha")
+        self.orc.claude_call = MagicMock(return_value="ไม่มีอะไรต้องแก้")
+
+        mock_ts = MagicMock()
+        mock_ts.__ge__ = MagicMock(return_value="ts_filter_expr")
+        with patch.object(sys.modules["models"].WorkflowLog, "timestamp", mock_ts):
+            with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test"}):
+                self.orc.nik_optimize_code()
+
+        filter_call = db_wf.query.return_value.filter.call_args
+        self.assertIsNotNone(filter_call)
+        self.assertGreater(len(filter_call[0]), 0, "filter() ต้องมี argument กรองวันที่ ไม่ใช่ว่างเปล่า")
+
+    @patch("agents.SessionLocal")
+    @patch.object(AgentOrchestrator, "_nik_get_current_agents_py")
+    def test_rejected_suggestions_included_in_prompt(self, mock_get_code, mock_sl):
+        """✅ เพิ่ม 2026-07-11 (รอบ 6): suggestion ที่ MBBook เคยปฏิเสธไปแล้วต้องถูกส่งเข้า prompt
+        ให้ Claude เห็น กันเสนอเรื่องเดิมซ้ำ — ไม่เพิ่ม LLM call ใหม่ (query DB เพิ่มเฉยๆ)"""
+        db_wf = MagicMock()
+        db_wf.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+        rejected_item = MagicMock()
+        rejected_item.summary = "แก้ MODEL_HAIKU ชื่อโมเดลผิด (rejected — ชื่อเดิมถูกต้องอยู่แล้ว)"
+        db_rej = MagicMock()
+        db_rej.query.return_value.filter.return_value.order_by.return_value.limit.return_value.all.return_value = [rejected_item]
+        mock_sl.side_effect = [db_wf, db_rej, MagicMock()]
+        mock_get_code.return_value = (self.sample_code, "sha")
+        self.orc.claude_call = MagicMock(return_value="ไม่มีอะไรต้องแก้")
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test"}):
+            self.orc.nik_optimize_code()
+
+        call_args = self.orc.claude_call.call_args
+        user_message = call_args[0][1]  # claude_call(system_prompt, user_message, agent_name, ...)
+        self.assertIn("แก้ MODEL_HAIKU ชื่อโมเดลผิด (rejected — ชื่อเดิมถูกต้องอยู่แล้ว)", user_message)
+
+    @patch("agents.SessionLocal")
+    @patch.object(AgentOrchestrator, "_nik_get_current_agents_py")
+    def test_no_rejected_suggestions_shows_none_placeholder(self, mock_get_code, mock_sl):
+        """ไม่มี suggestion ที่ rejected เลย → prompt ต้องมีข้อความ 'ไม่มี' ไม่ใช่ list ว่างดิบๆ"""
+        db_wf = MagicMock()
+        db_wf.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+        db_rej = MagicMock()
+        db_rej.query.return_value.filter.return_value.order_by.return_value.limit.return_value.all.return_value = []
+        mock_sl.side_effect = [db_wf, db_rej, MagicMock()]
+        mock_get_code.return_value = (self.sample_code, "sha")
+        self.orc.claude_call = MagicMock(return_value="ไม่มีอะไรต้องแก้")
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test"}):
+            self.orc.nik_optimize_code()
+
+        user_message = self.orc.claude_call.call_args[0][1]
+        self.assertIn("ไม่มี", user_message)
+
+
+# ============================================================
+# SECTION 10b: _nik_parse_diff_blocks — deterministic FIND-block parser (ปุ่ม "ตรวจสอบสถานะ")
+# ============================================================
+class TestNikParseDiffBlocks(unittest.TestCase):
+    """✅ เพิ่ม 2026-07-11 (รอบ 6): parser ล้วนๆ ไม่มี LLM call — ใช้เทียบ FIND block กับโค้ดจริง
+    บน GitHub ตรงๆ เพื่อเช็คว่า suggestion ถูก apply ไปแล้วหรือยัง (ปุ่ม "ตรวจสอบสถานะ")"""
+
+    def test_single_block_extracts_find(self):
+        diff = "<<<DIFF>>>\nSUMMARY: x\nFILE: agents.py\nFIND:\n    a = 1\nREPLACE:\n    a = 2\n<<<END_DIFF>>>"
+        blocks = AgentOrchestrator._nik_parse_diff_blocks(diff)
+        self.assertEqual(blocks, ["    a = 1"])
+
+    def test_multiple_blocks(self):
+        diff = (
+            "<<<DIFF>>>\nSUMMARY: x\nFIND:\n    a = 1\nREPLACE:\n    a = 2\n<<<END_DIFF>>>\n"
+            "<<<DIFF>>>\nSUMMARY: y\nFIND:\n    b = 3\nREPLACE:\n    b = 4\n<<<END_DIFF>>>"
+        )
+        blocks = AgentOrchestrator._nik_parse_diff_blocks(diff)
+        self.assertEqual(blocks, ["    a = 1", "    b = 3"])
+
+    def test_noop_diff_find_equals_replace_still_extracted(self):
+        """find==replace (diff เปล่าที่ไม่ทำอะไร เจอจริงใน suggestion #1) ก็ยัง parse find ออกมาได้
+        ปกติ ไม่ special-case — เจตนา: ให้ check-status เห็นว่าโค้ดจุดนี้ "ไม่เปลี่ยน" เสมอ (ถูกต้อง
+        เพราะ diff นี้ไม่เคยตั้งใจเปลี่ยนอะไรอยู่แล้ว)"""
+        diff = "<<<DIFF>>>\nFIND:\n    x = 1\nREPLACE:\n    x = 1\n<<<END_DIFF>>>"
+        blocks = AgentOrchestrator._nik_parse_diff_blocks(diff)
+        self.assertEqual(blocks, ["    x = 1"])
+
+    def test_malformed_no_find_replace_returns_empty(self):
+        blocks = AgentOrchestrator._nik_parse_diff_blocks("just some text with no diff markers")
+        self.assertEqual(blocks, [])
+
+    def test_empty_string_returns_empty(self):
+        self.assertEqual(AgentOrchestrator._nik_parse_diff_blocks(""), [])
+
+    def test_none_input_returns_empty(self):
+        self.assertEqual(AgentOrchestrator._nik_parse_diff_blocks(None), [])
 
 
 # ============================================================

@@ -1,19 +1,13 @@
-stocks ก่อนล้าง: 0 แถว
-portfolio ก่อนล้าง: 0 แถว
+On branch main
+Your branch is up to date with 'origin/main'.
 
-stocks หลัง seed: 24 แถว (ต้องเป็น 24)
-portfolio หลัง seed: 13 แถว (ต้องเป็น 13)
-ต้นทุนรวม: $1,767.96 (เทียบ Dime ~$1,768 — มูลค่า $1,973.46 คือรวมกำไร +11.62%)
-  GOOGL   1.4463770 หุ้น @ $330.6261
-  NVDA    1.1307625 หุ้น @ $193.4182
-  WDC     0.4899218 หุ้น @ $412.4128
-  ASML    0.0914035 หุ้น @ $1,280.6952
-  AMZN    0.4350241 หุ้น @ $239.0902
-  NOW     1.0000000 หุ้น @ $103.0000
-  NBIS    0.4809524 หุ้น @ $210.0000
-  VRT     0.3242444 หุ้น @ $311.0000
-  TSM     0.3021887 หุ้น @ $330.1580
-  BRK.B   0.1760013 หุ้น @ $492.4397
-  OKLO    0.8713094 หุ้น @ $82.2096
-  CCJ     0.4524823 หุ้น @ $98.6337
-  SNDK    0.0448650 หุ้น @ $899.9780
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   1_Reports/Pending.md
+	modified:   agents.py
+	modified:   frontend/src/App.jsx
+	modified:   main.py
+	modified:   models.py
+
+no changes added to commit (use "git add" and/or "git commit -a")
