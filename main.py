@@ -472,6 +472,13 @@ async def startup():
             print("[MIGRATION] hourly_cache company_name/company_description columns ready")
         except Exception as e:
             print(f"[MIGRATION] {e}")
+        try:
+            # ✅ เพิ่ม 2026-07-11: MBBook ขอให้รายงานนิกมี popup อธิบายเหตุผล — เพิ่มคอลัมน์เก็บคำอธิบาย
+            conn.execute(text("ALTER TABLE nik_suggestions ADD COLUMN IF NOT EXISTS reasoning TEXT"))
+            conn.commit()
+            print("[MIGRATION] nik_suggestions reasoning column ready")
+        except Exception as e:
+            print(f"[MIGRATION] {e}")
 
     # ⛔ ปิด APScheduler แล้ว 2026-07-02 (Defect #14) — หยุดยิง prefetch เงียบๆ นาน 22+ ชม.
     # (รอบ 09:05-13:05 วันที่ 2 ก.ค. ขาดหมด) โดยไม่มี error/log ให้ debug เลย เพราะเป็น
@@ -1053,6 +1060,7 @@ async def get_nik_suggestions(db: Session = Depends(get_db)):
                 "id":            i.id,
                 "created_at":    i.created_at,
                 "summary":       i.summary,
+                "reasoning":     i.reasoning,
                 "diff_text":     i.diff_text,
                 "status":        i.status,
                 "error_message": i.error_message,

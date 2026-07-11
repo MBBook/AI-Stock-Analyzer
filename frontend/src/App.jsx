@@ -1117,6 +1117,11 @@ export default function DashboardV4() {
   };
 
   const NEWS_SENTIMENT_COLOR = { Positive: COLORS.green, Negative: COLORS.red, Neutral: COLORS.muted };
+  // ✅ 2026-07-11 (รอบ 3): MBBook ทักว่าหน้า News ยังมีคำอังกฤษหลุด — sentiment เก็บเป็น enum
+  // Positive/Negative/Neutral ใน DB ตั้งใจ (ใช้ map สี NEWS_SENTIMENT_COLOR ข้างบน) แต่ตอน "แสดงผล"
+  // ต้องแปลเป็นไทยเสมอ ไม่ใช่โชว์ enum ดิบ — เพิ่ม label map แยกต่างหาก ไม่แตะ enum เดิม (กันพัง
+  // ตัว color-lookup ที่ key เป็นภาษาอังกฤษอยู่)
+  const NEWS_SENTIMENT_LABEL_TH = { Positive: 'เชิงบวก', Negative: 'เชิงลบ', Neutral: 'เป็นกลาง' };
 
   // ✅ แก้ 2026-07-05 (รอบ 7): เพิ่มขนาด font popup รายละเอียดข่าว — Desktop เพิ่มเยอะ, Mobile
   // เพิ่มแค่ ~2 ขนาด (เดิม popup นี้ใช้ค่าคงที่เดียวกันทั้ง 2 ฝั่ง ไม่เคยแยก isMobile มาก่อน)
@@ -1133,14 +1138,14 @@ export default function DashboardV4() {
           ))}
           {article.sentiment && (
             <span style={{ marginLeft: 'auto', fontSize: badgeFs, fontWeight: 700, padding: '3px 10px', borderRadius: 999, backgroundColor: `${NEWS_SENTIMENT_COLOR[article.sentiment]}22`, color: NEWS_SENTIMENT_COLOR[article.sentiment] }}>
-              {article.sentiment}
+              {NEWS_SENTIMENT_LABEL_TH[article.sentiment] || article.sentiment}
             </span>
           )}
         </div>
         <h3 style={{ margin: 0, fontSize: isMobile ? 18 : 24, fontWeight: 700, color: COLORS.text, lineHeight: 1.5 }}>{article.headline}</h3>
         {article.impact && (
           <div style={styles.row(SP.xs)}>
-            <span style={{ fontSize: badgeFs, fontWeight: 700, padding: '3px 10px', borderRadius: 999, backgroundColor: 'rgba(245,196,107,0.16)', color: COLORS.gold }}>Impact: {article.impact}</span>
+            <span style={{ fontSize: badgeFs, fontWeight: 700, padding: '3px 10px', borderRadius: 999, backgroundColor: 'rgba(245,196,107,0.16)', color: COLORS.gold }}>ผลกระทบ: {article.impact}</span>
           </div>
         )}
         <p style={{ margin: 0, fontSize: isMobile ? 14.5 : 17, lineHeight: 1.8, color: COLORS.text }}>
@@ -1159,6 +1164,7 @@ export default function DashboardV4() {
     if (popup.type === 'confirmDelete') return 'ยืนยันการลบ';
     if (popup.type === 'stockDetail') return '';
     if (popup.type === 'newsDetail') return 'รายละเอียดข่าว';
+    if (popup.type === 'nikDetail') return 'รายละเอียดข้อเสนอจากนิก';
     return '';
   };
 
@@ -1170,7 +1176,7 @@ export default function DashboardV4() {
     // มากในรอบนี้ ความกว้างเดิมจะทำให้ headline ตัดบรรทัดถี่เกินไป
     const finalGeom = isMobile
       ? { top: '6vh', left: '4vw', width: '92vw', height: '88vh' }
-      : { top: '50%', left: '50%', width: type === 'newsDetail' ? 620 : 480, maxHeight: '85vh' };
+      : { top: '50%', left: '50%', width: (type === 'newsDetail' || type === 'nikDetail') ? 620 : 480, maxHeight: '85vh' };
 
     const panelStyle = phase === 'opening'
       ? { position: 'fixed', top: originRect.top, left: originRect.left, width: originRect.width, height: originRect.height, borderRadius: 14, opacity: 0.5, overflow: 'hidden', transform: 'scale(0.95)', transition: 'none' }
@@ -1208,6 +1214,7 @@ export default function DashboardV4() {
           {type === 'confirmDelete' && ConfirmDeleteContent({ ticker: data?.ticker })}
           {type === 'stockDetail' && StockDetailContent({ ticker: data?.ticker })}
           {type === 'newsDetail' && NewsDetailContent({ article: data?.article })}
+          {type === 'nikDetail' && NikDetailContent({ suggestion: data?.suggestion })}
         </div>
       </div>
     );
@@ -1753,7 +1760,7 @@ export default function DashboardV4() {
             <span key={t} style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, backgroundColor: 'rgba(255,255,255,0.07)', color: COLORS.muted }}>{t}</span>
           ))}
           {article.sentiment && (
-            <span style={{ marginLeft: 'auto', fontSize: 10.5, fontWeight: 700, padding: '2px 9px', borderRadius: 999, backgroundColor: `${NEWS_SENTIMENT_COLOR[article.sentiment]}22`, color: NEWS_SENTIMENT_COLOR[article.sentiment] }}>{article.sentiment}</span>
+            <span style={{ marginLeft: 'auto', fontSize: 10.5, fontWeight: 700, padding: '2px 9px', borderRadius: 999, backgroundColor: `${NEWS_SENTIMENT_COLOR[article.sentiment]}22`, color: NEWS_SENTIMENT_COLOR[article.sentiment] }}>{NEWS_SENTIMENT_LABEL_TH[article.sentiment] || article.sentiment}</span>
           )}
         </div>
         <p style={{ margin: '0 0 5px 0', fontSize: 14, fontWeight: isNew ? 700 : 500, color: COLORS.text, lineHeight: 1.45 }}>{article.headline}</p>
@@ -1763,10 +1770,10 @@ export default function DashboardV4() {
           {isNew ? (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 800, color: COLORS.goldDark }}>
               <span className="newdot-pulse" style={{ width: 6, height: 6, borderRadius: '50%', background: COLORS.goldGradient }} />
-              New
+              ใหม่
             </span>
           ) : (
-            article.impact && <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.gold }}>Impact: {article.impact}</span>
+            article.impact && <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.gold }}>ผลกระทบ: {article.impact}</span>
           )}
         </div>
       </div>
@@ -1949,11 +1956,48 @@ export default function DashboardV4() {
   };
 
   const NIK_TABLE_COLS = '2.4fr 1fr 0.8fr';
+  // ✅ 2026-07-11 (รอบ 3): MBBook ขอให้รายงานนิกเป็นไทยทั้งหมด + คลิกดูรายละเอียดได้ — status label
+  // เดิมเป็นอังกฤษ (Complete/Failed/Pending) แก้เป็น map ภาษาไทยแยกจาก key จริงใน DB (ไม่แตะ status
+  // enum เดิม กันพัง sColor lookup ที่ยังอิงค่าอังกฤษอยู่)
+  const NIK_STATUS_LABEL_TH = { complete: 'เสร็จแล้ว', failed: 'ล้มเหลว', pending: 'รอดำเนินการ' };
+
+  const NikDetailContent = ({ suggestion: s }) => {
+    if (!s) return null;
+    const sColor = s.status === 'complete' ? COLORS.green : s.status === 'failed' ? COLORS.red : COLORS.gold;
+    const sLabel = NIK_STATUS_LABEL_TH[s.status] || s.status;
+    const dateStr = new Date(s.created_at).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' });
+    return (
+      <div style={styles.stack(SP.md)}>
+        <div style={{ ...styles.row(SP.xs), flexWrap: 'wrap', justifyContent: 'space-between' }}>
+          <span style={{ fontSize: 13, color: COLORS.faint }}>{dateStr}</span>
+          <span style={{ fontSize: 13, fontWeight: 700, padding: '3px 10px', borderRadius: 999, backgroundColor: `${sColor}22`, color: sColor }}>{sLabel}</span>
+        </div>
+        <p style={{ margin: 0, fontSize: isMobile ? 15 : 17, fontWeight: 700, color: COLORS.text, lineHeight: 1.6 }}>{s.summary}</p>
+        <div>
+          <p style={{ margin: '0 0 6px 0', fontSize: 12.5, fontWeight: 600, color: COLORS.faint }}>เหตุผลจากนิก</p>
+          <p style={{ margin: 0, fontSize: isMobile ? 13.5 : 15, lineHeight: 1.8, color: COLORS.text }}>
+            {s.reasoning || 'ไม่มีรายละเอียดเพิ่มเติม (ข้อเสนอนี้สร้างก่อนอัพเดตระบบที่เพิ่มคำอธิบายเหตุผล)'}
+          </p>
+        </div>
+        {s.status === 'failed' && s.error_message && (
+          <div>
+            <p style={{ margin: '0 0 6px 0', fontSize: 12.5, fontWeight: 600, color: COLORS.red }}>สาเหตุที่ apply ไม่สำเร็จ</p>
+            <p style={{ margin: 0, fontSize: 13.5, color: COLORS.red, lineHeight: 1.7 }}>{s.error_message}</p>
+          </div>
+        )}
+        <div>
+          <p style={{ margin: '0 0 6px 0', fontSize: 12.5, fontWeight: 600, color: COLORS.faint }}>Diff ที่นิกเสนอ</p>
+          <pre style={{ margin: 0, fontSize: 12, lineHeight: 1.6, color: COLORS.muted, background: 'rgba(148,163,184,0.08)', borderRadius: 9, padding: SP.md, overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{s.diff_text}</pre>
+        </div>
+      </div>
+    );
+  };
+
   const NikSuggestionsCard = ({ desktop }) => (
     <div style={styles.card}>
       <div style={{ ...styles.row(SP.sm), justifyContent: 'space-between', marginBottom: SP.md }}>
         <p style={styles.sectionTitle}>รายงานจากนิก</p>
-        {nikSuggestions?.pending_count > 0 && <span style={{ backgroundColor: 'rgba(245,196,107,0.16)', color: COLORS.gold, fontSize: 13, padding: '3px 11px', borderRadius: 999 }}>{nikSuggestions.pending_count} pending</span>}
+        {nikSuggestions?.pending_count > 0 && <span style={{ backgroundColor: 'rgba(245,196,107,0.16)', color: COLORS.gold, fontSize: 13, padding: '3px 11px', borderRadius: 999 }}>{nikSuggestions.pending_count} รอดำเนินการ</span>}
       </div>
       {/* ✅ 2026-07-11: skeleton แทนข้อความ "กำลังโหลด..." */}
       {!nikSuggestions && (
@@ -1975,12 +2019,14 @@ export default function DashboardV4() {
 
       {nikSuggestions?.suggestions?.map(s => {
         const sColor = s.status === 'complete' ? COLORS.green : s.status === 'failed' ? COLORS.red : COLORS.gold;
-        const sLabel = s.status === 'complete' ? 'Complete' : s.status === 'failed' ? 'Failed' : 'Pending';
+        const sLabel = NIK_STATUS_LABEL_TH[s.status] || s.status;
         const dateStr = new Date(s.created_at).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'short', timeStyle: 'short' });
+        // ✅ 2026-07-11: คลิกแถว/การ์ดเพื่อเปิด popup ดูรายละเอียด (summary, reasoning, diff เต็ม)
+        const openDetail = (e) => openPopup('nikDetail', { suggestion: s }, e.currentTarget);
 
         if (desktop) {
           return (
-            <div key={s.id} style={{ display: 'grid', gridTemplateColumns: NIK_TABLE_COLS, gap: SP.sm, alignItems: 'center', padding: `${SP.sm}px 0`, borderBottom: `1px solid ${COLORS.cardBorder}` }}>
+            <div key={s.id} onClick={openDetail} className="glass-row" style={{ cursor: 'pointer', display: 'grid', gridTemplateColumns: NIK_TABLE_COLS, gap: SP.sm, alignItems: 'center', padding: `${SP.sm}px 0`, borderBottom: `1px solid ${COLORS.cardBorder}` }}>
               <span style={{ fontSize: 15, color: COLORS.text }}>{s.summary}</span>
               <span style={{ fontSize: 13.5, color: COLORS.muted, textAlign: 'right' }}>{dateStr}</span>
               <span style={{ fontSize: 13, fontWeight: 700, color: sColor, textAlign: 'right' }}>{sLabel}</span>
@@ -1988,7 +2034,7 @@ export default function DashboardV4() {
           );
         }
         return (
-          <div key={s.id} style={{ padding: SP.md, backgroundColor: 'rgba(148,163,184,0.08)', borderRadius: 9, marginBottom: SP.sm }}>
+          <div key={s.id} onClick={openDetail} style={{ cursor: 'pointer', padding: SP.md, backgroundColor: 'rgba(148,163,184,0.08)', borderRadius: 9, marginBottom: SP.sm }}>
             <div style={{ ...styles.row(SP.sm), justifyContent: 'space-between', alignItems: 'flex-start' }}>
               <p style={{ fontSize: 13, fontWeight: 600, margin: 0, flex: 1, color: COLORS.text }}>{s.summary}</p>
               <span style={{ color: sColor, fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap' }}>{sLabel}</span>

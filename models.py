@@ -167,3 +167,6 @@ class NikSuggestion(Base):
     status        = Column(String,  default="pending")  # pending / complete / failed
     error_message = Column(Text,    nullable=True)   # เหตุผลที่ fail (ถ้ามี)
     applied_at    = Column(DateTime, nullable=True)  # เวลาที่ apply สำเร็จ
+    # ✅ เพิ่ม 2026-07-11: MBBook ขอให้รายงานนิกอธิบายเหตุผล — เก็บคำอธิบายว่าทำไมถึงแก้ตรงนี้
+    # (nullable เพราะ suggestion เก่าก่อนอัพเดต prompt จะไม่มีค่านี้)
+    reasoning     = Column(Text,    nullable=True)   # เหตุผลที่นิกเสนอแก้ตรงนี้ (ภาษาไทย)

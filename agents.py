@@ -2109,7 +2109,11 @@ Rules:
                 return None
 
             # ===== Step 3: ให้ Claude วิเคราะห์ + สร้าง diff =====
-            system_prompt = """You are นิก (Nik), an expert Python developer.
+            # ✅ แก้ 2026-07-11: MBBook ขอให้รายงานนิกเป็นภาษาไทยทั้งหมด + อธิบายเหตุผลว่าทำไมถึงแก้ตรงนี้
+            # (ก่อนหน้านี้ prompt เป็นอังกฤษล้วน ทำให้ SUMMARY ที่โชว์บนหน้าเว็บเป็นอังกฤษ และไม่มีช่องอธิบาย
+            # เหตุผล/ที่มาของแต่ละ fix เลย) — SUMMARY และ REASON ต้องเป็นภาษาไทย ส่วน FIND/REPLACE ยังคงเป็น
+            # โค้ดจริง (ไม่แปล เพราะเป็น Python literal ต้อง copy verbatim)
+            system_prompt = """You are นิก (Nik), an expert Python developer who reports findings in Thai.
 
 You will receive workflow error logs and the current agents.py.
 
@@ -2118,7 +2122,8 @@ Your job:
 2. For each fix, output a DIFF block in this exact format:
 
 <<<DIFF>>>
-SUMMARY: one-line description of this change
+SUMMARY: (เขียนเป็นภาษาไทย) one-line description of this change
+REASON: (เขียนเป็นภาษาไทย) อธิบายว่าทำไมถึงเสนอแก้ตรงนี้ โดยอ้างอิงหลักฐานจาก log ที่เห็น เช่น error ซ้ำกี่ครั้ง เกิดที่ ticker ไหน หรือ pattern อะไรที่พบ
 FILE: agents.py
 FIND:
 <exact lines to replace — copy verbatim, include enough context to be unique>
@@ -2127,6 +2132,8 @@ REPLACE:
 <<<END_DIFF>>>
 
 RULES:
+- SUMMARY และ REASON ต้องเขียนเป็นภาษาไทยเสมอ (ศัพท์เทคนิค/ชื่อฟังก์ชันใช้ภาษาอังกฤษได้)
+- FIND และ REPLACE ต้องเป็นโค้ด Python จริง ห้ามแปล
 - Output ONLY diff blocks, no explanations outside them
 - Each FIND block must be unique in the file (include enough context lines)
 - Make MINIMAL changes — do not rewrite functions entirely
@@ -2156,11 +2163,16 @@ Identify top issues and output diff blocks."""
                 self.log_action("นิก", "No valid diff blocks found in response — aborting", "WARNING")
                 return None
 
-            # สรุป summary จาก diff แรก
+            # สรุป summary + reason จาก diff แรก
+            # ✅ แก้ 2026-07-11: เพิ่มดึง REASON: คู่กับ SUMMARY: (ดู system_prompt ด้านบน)
             summary_line = "ไม่ระบุ"
+            reason_line = None
             for line in diff_output.split("\n"):
                 if line.startswith("SUMMARY:"):
                     summary_line = line.replace("SUMMARY:", "").strip()
+                elif line.startswith("REASON:"):
+                    reason_line = line.replace("REASON:", "").strip()
+                if summary_line != "ไม่ระบุ" and reason_line:
                     break
 
             # ===== Step 5: บันทึกลง NikSuggestion DB รอ MBBook อนุมัติ =====
@@ -2170,6 +2182,7 @@ Identify top issues and output diff blocks."""
                 from models import NikSuggestion
                 suggestion = NikSuggestion(
                     summary=summary_line,
+                    reasoning=reason_line,
                     diff_text=diff_output,
                     status="pending"
                 )

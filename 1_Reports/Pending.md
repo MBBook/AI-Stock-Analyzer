@@ -1,5 +1,33 @@
 # Pending — AI Stock Analyzer V4
 
+## ✅ 2026-07-11 (รอบ 3 — Cow) — News ไทยเต็ม 100% + รายงานนิกไทย + popup รายละเอียด
+
+**ที่มา:** MBBook ตรวจรายงานนิกแล้วขอแก้ 2 จุด — (1) หน้า News ยังมีคำอังกฤษหลุด (sentiment badge,
+"New", "Impact:") ทั้งการ์ดและ popup (2) รายงานนิกเป็นอังกฤษล้วน (SUMMARY มาจาก system prompt
+ภาษาอังกฤษ) และไม่มีทางดูเหตุผลเบื้องหลังแต่ละข้อเสนอเลย
+
+**ทำเสร็จ (ยังไม่ commit/push):**
+1. **News ไทย 100%** — `App.jsx`: เพิ่ม `NEWS_SENTIMENT_LABEL_TH` map (Positive/Negative/Neutral →
+   เชิงบวก/เชิงลบ/เป็นกลาง) ใช้แทนที่ enum ดิบใน `NewsCard` + `NewsDetailContent` (popup) ·
+   "New" → "ใหม่" · "Impact: " → "ผลกระทบ: " ทั้งการ์ดและ popup — ไม่แตะ enum เดิมที่ใช้ map สี
+2. **รายงานนิกเป็นไทย + เพิ่มเหตุผล (reasoning)**:
+   - `models.py::NikSuggestion` เพิ่มคอลัมน์ `reasoning` (Text, nullable — รายการเก่าจะเป็น NULL)
+   - `main.py` เพิ่ม migration block `ALTER TABLE nik_suggestions ADD COLUMN IF NOT EXISTS reasoning`
+     + expose `reasoning` ใน response ของ `GET /nik/suggestions`
+   - `agents.py::nik_optimize_code()` แก้ system prompt: บังคับ `SUMMARY:`/`REASON:` เป็นภาษาไทย
+     (FIND/REPLACE ยังเป็นโค้ดจริง ไม่แปล) + เพิ่ม logic ดึง `REASON:` คู่กับ `SUMMARY:` เดิม เก็บลง
+     `reasoning` ตอนบันทึก `NikSuggestion`
+3. **Popup รายละเอียดรายงานนิก (ของใหม่ทั้งหมด)** — `App.jsx`: เพิ่ม `NikDetailContent` component
+   (โชว์วันที่/สถานะ/summary/reasoning — มี fallback ข้อความสำหรับรายการเก่าที่ยังไม่มี reasoning/
+   error_message ถ้า failed/diff_text เต็ม) + คลิกได้ทั้งแถว desktop table และการ์ด mobile
+   (`openPopup('nikDetail', ...)`) + เพิ่ม case `'nikDetail'` ใน `popupTitle()`/`PopupModal()` ·
+   แปล status label เดิม (Complete/Failed/Pending → เสร็จแล้ว/ล้มเหลว/รอดำเนินการ) เป็น
+   `NIK_STATUS_LABEL_TH` map + badge "X pending" → "X รอดำเนินการ"
+
+⚠️ **ต้อง push + redeploy ก่อนเห็นผลจริง**: reasoning จะว่างเปล่า (NULL) จนกว่านิกจะรันรอบใหม่ภายใต้
+prompt ที่แก้แล้ว (รอบถัดไปที่ optimization job ยิง) — ต้อง push `models.py`/`main.py`/`agents.py`
+ขึ้น Render ก่อน ไม่งั้น migration ไม่รัน คอลัมน์ยังไม่มีจริงใน DB
+
 ## ✅ 2026-07-11 (Fable) — UI Reskin Phase 2 ครบ 11 ข้อ + ต่อข่าวจริง (ปิด #51)
 
 **ทำเสร็จ (ยังไม่ commit — รอ MBBook verify ที่เครื่องจริงก่อน):**
