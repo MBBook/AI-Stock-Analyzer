@@ -140,6 +140,22 @@ class NewsCache(Base):
     news_count = Column(Integer,  default=0)
     fetched_at = Column(DateTime, default=datetime.utcnow, index=True)
 
+class NewsTranslation(Base):
+    """✅ เพิ่ม 2026-07-11 — คำแปลไทย + sentiment/impact ของข่าวแต่ละชิ้น (Haiku วิเคราะห์)
+    ตาม Language rule ใน UI_Redesign_Prompt_v3 (confirmed 2026-07-07): news content ต้องเป็นไทย
+    - id = md5(title.strip().lower()[:50])[:12] — คีย์เดียวกับ id ใน GET /news (main.py) และ
+      ตัวแปลใน agents.py::natty_translate_news ต้องตรงกันเสมอ 3 จุด
+    - ข่าวละแถวเดียวถาวร (แปลครั้งเดียว ไม่แปลซ้ำ) — ไม่ผูก FK กับ news_cache เพราะ cache
+      ถูกลบทุก 25 ชม. แต่คำแปลเก็บไว้ได้เลย เผื่อข่าวเดิมโผล่มาอีกจากหลาย ticker"""
+    __tablename__ = "news_translations"
+
+    id           = Column(String,   primary_key=True, index=True)  # md5 12 ตัว
+    headline_th  = Column(Text,     nullable=True)
+    summary_th   = Column(Text,     nullable=True)
+    sentiment    = Column(String,   nullable=True)   # Positive | Negative | Neutral
+    impact       = Column(String,   nullable=True)   # สูง | ปานกลาง | ต่ำ
+    created_at   = Column(DateTime, default=datetime.utcnow)
+
 class NikSuggestion(Base):
     """บันทึก suggestion ของนิก — รอ MBBook อนุมัติ แล้วให้ Cow apply"""
     __tablename__ = "nik_suggestions"

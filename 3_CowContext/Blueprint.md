@@ -18,7 +18,7 @@
 
 | Agent | ชื่อ | หน้าที่ | Model |
 |-------|------|---------|-------|
-| 1 | **นัตตี้** | ดึงราคา + news (3-tier: yfinance → Finnhub → Alpha Vantage) + pre-fetch รายชั่วโมงลง HourlyCache/NewsCache | — |
+| 1 | **นัตตี้** | ดึงราคา + news (3-tier: yfinance → Finnhub → Alpha Vantage) + pre-fetch รายชั่วโมงลง HourlyCache/NewsCache + ✅ 2026-07-11 แปลข่าวใหม่เป็นไทย+sentiment/impact ลง news_translations ท้าย prefetch ทุกรอบ (batch 20 ข่าว/call, cap 60/รอบ, ข่าวละครั้งเดียว ~$0.02-0.05/วัน) | Haiku (แปลข่าว) |
 | 2 | **หนุ่ม** | วิเคราะห์ fundamental + ให้ BUY/HOLD/SELL signal | Sonnet |
 | 3 | **มด** | Cross-validate ผล หนุ่ม — flag NEEDS_REVIEW ถ้าน่าสงสัย | Sonnet |
 | 4 | **แฮรี่** | ตรวจ portfolio alignment กับ signal | — |
@@ -44,7 +44,7 @@
 | POST | `/stocks` | เพิ่ม ticker |
 | GET | `/stocks` | ดูรายชื่อ + signal ทั้งหมด — ✅ แก้ 2026-07-05 เพิ่ม market_cap/pe_ratio/week52_high/low/beta/eps/peg_ratio/earnings_date_thai (join `hourly_cache` ล่าสุดต่อ ticker) + s1/s2/s3 (แนวรับไม้ 1-3 จาก `stocks` table เอง — หนุ่มคำนวณให้ทุกคืนอยู่แล้ว แค่ไม่เคยถูกส่งออกมาก่อน) + company_name/company_description (รอบ 5 — Finnhub profile2 + yfinance longBusinessSummary, carry-forward เหมือน earnings_date) · ✅ เพิ่ม 2026-07-09 `change_pct` ต่อ ticker (เทียบ 2 แถวล่าสุดจาก `signal_history`, `null` ถ้าข้อมูลไม่ถึง 2 คืน) — ดู Defect #17 เรื่อง outage ที่เกิดตอน deploy ฟีเจอร์นี้ |
 | DELETE | `/stocks/{ticker}` | ลบ ticker |
-| GET | `/news?limit=60` | ✅ เพิ่ม 2026-07-11 (ปิดงานค้าง #51) — ข่าวจริงจาก `news_cache` (แถวล่าสุดต่อ ticker, dedup ข้าม ticker ด้วย title 50 ตัวแรก, id = md5(title)[:12] คงที่เพื่อระบบ mark อ่านแล้วฝั่ง frontend, เรียงใหม่→เก่า) — ไม่มี sentiment/impact เพราะ yfinance/Finnhub ไม่ให้มา · หน้า News เลิกใช้ MOCK_NEWS แล้ว |
+| GET | `/news?limit=60` | ✅ เพิ่ม 2026-07-11 (ปิดงานค้าง #51) — ข่าวจริงจาก `news_cache` (แถวล่าสุดต่อ ticker, dedup ข้าม ticker ด้วย title 50 ตัวแรก, id = md5(title)[:12] คงที่เพื่อระบบ mark อ่านแล้วฝั่ง frontend, เรียงใหม่→เก่า) · หน้า News เลิกใช้ MOCK_NEWS แล้ว · ✅ รอบ 2 (2026-07-11): join คำแปลไทย + sentiment/impact จาก `news_translations` (**Language rule ใน UI_Redesign_Prompt_v3: news content ต้องเป็นไทย — เป็น backend requirement ถาวร**) ข่าวที่ยังไม่แปลโชว์อังกฤษ + `translated=false` |
 | POST | `/trade-update?ticker=&action=&shares=&price=` | บันทึก trade จริง + อัพเดต position (ถัวเฉลี่ยต้นทุนตอน BUY, ลด shares ตอน SELL) — ✅ แก้ 2026-07-03 เดิม endpoint นี้บันทึกแค่ log เฉยๆ ไม่เคยอัพเดต portfolio จริง |
 | POST | `/trade-parse-image` (multipart file) | ✅ เพิ่ม 2026-07-03 — โคลสัน (Haiku vision) อ่านรูปสลิปซื้อขาย (เช่น Dime app) → คืน JSON {ticker, action, shares, price} ให้ frontend pre-fill ฟอร์ม ไม่บันทึก DB ที่ endpoint นี้ (save จริงผ่าน `/trade-update`) |
 | GET | `/portfolio` | ดู portfolio holdings — ✅ แก้ 2026-07-05 current_price ดึงจาก `hourly_cache` ล่าสุดก่อน (fallback `Stock.current_price` → `avg_cost`) + เพิ่ม usd_thb_rate/total_value_thb/total_cost_thb/total_gain_thb/current_value_thb ต่อ holding (Frankfurter.app, cache 1 ชม.) |
@@ -73,6 +73,7 @@
 | `workflow_logs` | timestamp, status (COMPLETE/REJECTED), stocks_analyzed, buy/sell/hold signals, needs_review, summary, cost_usd | เอ |
 | `hourly_cache` | ticker, price, week52_high/low, pe_ratio, market_cap, beta, eps, peg_ratio (✅ แก้ 2026-07-09: Finnhub field เดิมเดาผิด null ทุกตัว — เปลี่ยนเป็น Alpha Vantage `OVERVIEW.PEGRatio` refresh เฉพาะ prefetch 09:05 Bangkok ≤20 ตัว/วัน carry-forward 48 ชม. ดู constants `PEG_*` ใน agents.py), earnings_date, earnings_hour (✅ เพิ่ม 2026-07-05), company_name/company_description (✅ 2026-07-09 deploy จริงแล้ว), source, at_new_high/low, fetched_at | นัตตี้ prefetch |
 | `news_cache` | ticker, news_json, news_count, fetched_at | นัตตี้ prefetch |
+| `news_translations` | id (md5(title.strip().lower()[:50])[:12] — **ต้องตรงกัน 3 จุด**: agents.news_key / main._news_key / ตารางนี้), headline_th, summary_th, sentiment, impact, created_at — ✅ เพิ่ม 2026-07-11 ข่าวละแถวถาวร (แปลครั้งเดียว ไม่ลบตาม news_cache) | นัตตี้ translate (Haiku) |
 | `nik_suggestions` | summary, diff_text, status (pending/complete/failed), error_message, applied_at | นิก |
 
 **Migration:** startup event ใน `main.py` รัน `ALTER TABLE / CREATE TABLE IF NOT EXISTS` อัตโนมัติ
@@ -193,12 +194,12 @@ webapp → GET /nik/suggestions → MBBook เห็น pending list
 
 ---
 
-## 10. Test Coverage (172 tests — ✅ อัพเดต 2026-07-09 รอบ 2)
+## 10. Test Coverage (182 tests — ✅ อัพเดต 2026-07-11)
 
 | ไฟล์ | จำนวน | ครอบคลุม |
 |------|-------|---------|
-| `test_agents.py` | 132 | _safe_float, นัตตี้ 3-tier, MarketAux, หนุ่ม, มด, นน, Workflow, โคลสัน, DB update, MarketCap, ATH/ATL, มด format, Cross-currency, แฮรี่, เอ, นิก, checkpoint, ROI/portfolio history, **PEG Alpha Vantage (9 tests — rotation/cap/carry-forward/rate-limit)** |
-| `test_main.py` | 40 | GET /health, POST /workflow, POST /workflow/resume, LINE notification resilience, background exception, GET /nik/suggestions, **Dashboard auth (10), login rate-limit/lockout (4)** |
+| `test_agents.py` | 137 | _safe_float, นัตตี้ 3-tier, MarketAux, หนุ่ม, มด, นน, Workflow, โคลสัน, DB update, MarketCap, ATH/ATL, มด format, Cross-currency, แฮรี่, เอ, นิก, checkpoint, ROI/portfolio history, PEG Alpha Vantage (9), **แปลข่าวไทย (5 — key determinism/save/skip-translated/bad-LLM/cap)** |
+| `test_main.py` | 45 | GET /health, POST /workflow, POST /workflow/resume, LINE notification resilience, background exception, GET /nik/suggestions, Dashboard auth (10), login rate-limit/lockout (4), **GET /news (5 — empty/dedup/broken-json/translation-join/untranslated-fallback)** |
 
 **รันทดสอบ:**
 ```powershell

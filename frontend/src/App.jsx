@@ -100,15 +100,17 @@ export default function DashboardV4() {
       return next;
     });
   };
-  // ✅ 2026-07-11: แปลงข่าวจริงจาก GET /news เป็น shape ที่ UI ใช้ — sentiment/impact เป็น null
-  // เสมอเพราะ yfinance/Finnhub ไม่มีข้อมูลนี้ (UI ซ่อนป้ายให้เอง ไม่แต่งค่าเอง ตามกติกา Handoff ข้อ 6)
+  // ✅ 2026-07-11: แปลงข่าวจริงจาก GET /news เป็น shape ที่ UI ใช้
+  // ✅ รอบ 2: backend ส่ง headline/summary เป็นไทยแล้ว (Haiku แปลตอน prefetch — Language rule v3)
+  // พร้อม sentiment/impact ที่วิเคราะห์จริง — ข่าวที่ยังไม่ถูกแปล (เพิ่งเข้า cache) มาเป็นอังกฤษ +
+  // sentiment/impact = null ซึ่ง UI ซ่อนป้ายให้อยู่แล้ว (ไม่แต่งค่าเอง ตามกติกา Handoff ข้อ 6)
   // id เป็น md5 string คงที่จาก backend → ระบบ mark อ่านแล้ว (localStorage) ทำงานข้าม reload ได้เหมือนเดิม
   const getAllNews = () => (newsData?.articles || []).map(a => {
     const ts = (a.published_at || 0) * 1000; // backend ส่ง unix seconds
     const d = ts ? new Date(ts) : null;
     return {
       id: a.id, tickers: a.tickers || [], headline: a.headline,
-      sentiment: null, impact: null, source: a.source || '', body: a.summary || '',
+      sentiment: a.sentiment || null, impact: a.impact || null, source: a.source || '', body: a.summary || '',
       timestamp: ts,
       date: d ? `${d.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })} · ${d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}` : '',
     };

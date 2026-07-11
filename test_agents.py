@@ -1784,3 +1784,112 @@ class TestPegAlphaVantage(unittest.TestCase):
         result = self.orc.natty_prefetch_prices(["AAPL"])  # ต้องไม่ raise
         self.assertIn("AAPL", result)                      # ราคาหลักยังมาครบ
         self.assertIsNone(result["AAPL"]["peg_ratio"])     # PEG ไม่มี — ยอมรับได้
+
+
+# ============================================================
+# ✅ 2026-07-11: natty_translate_news — แปลข่าวไทย + sentiment/impact (Language rule v3)
+# ============================================================
+class TestNewsTranslate(unittest.TestCase):
+    """แปลเฉพาะข่าวใหม่ (cache ถาวรใน news_translations) / LLM ตอบเพี้ยนห้ามล้ม / cap ต่อรอบ"""
+
+    def setUp(self):
+        self.orc = make_orchestrator()
+
+    def _make_db(self, news_rows, existing_ids):
+        """mock db: query ถูกเรียก 3 รอบ — subquery / news rows / existing translation ids"""
+        import json as _json
+        db = MagicMock()
+        subq = MagicMock()
+        newsq = MagicMock()
+        newsq.join.return_value.all.return_value = [
+            MagicMock(ticker=t, news_json=_json.dumps(items)) for t, items in news_rows
+        ]
+        existq = MagicMock()
+        existq.filter.return_value.all.return_value = [(i,) for i in existing_ids]
+        db.query.side_effect = [subq, newsq, existq]
+        return db
+
+    def test_news_key_deterministic_and_matches_formula(self):
+        """คีย์ต้องคงที่ + ตรงสูตร md5(title.strip().lower()[:50])[:12] (sync กับ main.py::_news_key)"""
+        import hashlib as _hashlib
+        title = "  NVIDIA Announces Quantum Partnership  "
+        expected = _hashlib.md5("nvidia announces quantum partnership".encode()).hexdigest()[:12]
+        self.assertEqual(self.orc.news_key(title), expected)
+        self.assertEqual(self.orc.news_key(title), self.orc.news_key(title))
+
+    @patch.object(AgentOrchestrator, "claude_call")
+    def test_translate_new_items_saved(self, mock_call):
+        """ข่าวใหม่ 2 ชิ้น → Haiku 1 call → บันทึก 2 แถว + คืนจำนวนที่แปล"""
+        import json as _json
+        items = [{"title": "News A about NVDA", "summary": "sa"},
+                 {"title": "News B about MU", "summary": "sb"}]
+        ida, idb = self.orc.news_key(items[0]["title"]), self.orc.news_key(items[1]["title"])
+        db = self._make_db([("NVDA", [items[0]]), ("MU", [items[1]])], existing_ids=[])
+        mock_call.return_value = _json.dumps([
+            {"id": ida, "headline_th": "ข่าว A", "summary_th": "สรุป A", "sentiment": "Positive", "impact": "สูง"},
+            {"id": idb, "headline_th": "ข่าว B", "summary_th": "สรุป B", "sentiment": "Neutral", "impact": "ต่ำ"},
+        ], ensure_ascii=False)
+
+        with patch("agents.SessionLocal", return_value=db):
+            result = self.orc.natty_translate_news()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(db.add.call_count, 2)
+        db.commit.assert_called()
+        # ต้องใช้ Haiku ไม่ใช่ Sonnet (คุม cost)
+        self.assertEqual(mock_call.call_args.kwargs.get("model"), self.orc.MODEL_HAIKU)
+
+    @patch.object(AgentOrchestrator, "claude_call")
+    def test_translate_skips_already_translated(self, mock_call):
+        """ข่าวถูกแปลแล้วทั้งหมด → ไม่เรียก LLM เลย (แปลข่าวละครั้งเดียว)"""
+        item = {"title": "Already translated news", "summary": "s"}
+        nid = self.orc.news_key(item["title"])
+        db = self._make_db([("WDC", [item])], existing_ids=[nid])
+
+        with patch("agents.SessionLocal", return_value=db):
+            result = self.orc.natty_translate_news()
+
+        self.assertEqual(result, 0)
+        mock_call.assert_not_called()
+        db.add.assert_not_called()
+
+    @patch.object(AgentOrchestrator, "claude_call")
+    def test_translate_bad_llm_response_does_not_crash(self, mock_call):
+        """Haiku ตอบไม่ใช่ JSON / id นอกชุด → ข้าม batch ไม่ raise ไม่บันทึกมั่ว"""
+        import json as _json
+        item = {"title": "Some fresh news", "summary": "s"}
+        db = self._make_db([("NVDA", [item])], existing_ids=[])
+        mock_call.return_value = "ขอโทษครับ แปลไม่ได้"  # ไม่มี JSON array
+
+        with patch("agents.SessionLocal", return_value=db):
+            result = self.orc.natty_translate_news()
+        self.assertEqual(result, 0)
+        db.add.assert_not_called()
+
+        # รอบ 2: JSON ถูก format แต่ id ไม่อยู่ในชุดที่ส่งไป → ทิ้ง ไม่บันทึก
+        db2 = self._make_db([("NVDA", [item])], existing_ids=[])
+        mock_call.return_value = _json.dumps([{"id": "fakeid999999", "headline_th": "x"}])
+        with patch("agents.SessionLocal", return_value=db2):
+            result2 = self.orc.natty_translate_news()
+        self.assertEqual(result2, 0)
+        db2.add.assert_not_called()
+
+    @patch.object(AgentOrchestrator, "claude_call")
+    def test_translate_respects_max_per_run_cap(self, mock_call):
+        """ข่าวค้างเยอะกว่า cap → แปลแค่ max_per_run กันรอบ backfill แรก cost บาน"""
+        import json as _json
+        items = [{"title": f"Unique news number {i} for cap test", "summary": ""} for i in range(5)]
+        db = self._make_db([("NVDA", items)], existing_ids=[])
+        # LLM echo กลับทุก id ที่ได้รับ
+        def echo(system, user, *a, **k):
+            batch = _json.loads(user)
+            return _json.dumps([{"id": b["id"], "headline_th": "แปลแล้ว", "summary_th": "",
+                                 "sentiment": "Neutral", "impact": "ต่ำ"} for b in batch])
+        mock_call.side_effect = echo
+
+        with patch("agents.SessionLocal", return_value=db):
+            result = self.orc.natty_translate_news(max_per_run=3, batch_size=2)
+
+        self.assertEqual(result, 3)          # โดน cap ที่ 3 จาก 5
+        self.assertEqual(db.add.call_count, 3)
+        self.assertEqual(mock_call.call_count, 2)  # batch 2+1

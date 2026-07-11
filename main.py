@@ -679,11 +679,18 @@ async def get_news(limit: int = 60, db: Session = Depends(get_db)):
       (key = title 50 ตัวแรก lower-case แบบเดียวกับ agents._dedup_news ที่ dedup ภายใน ticker)
     - id = md5(key) 12 ตัว — คงที่ข้ามรอบ prefetch เพื่อให้ระบบ mark อ่านแล้ว (localStorage
       ฝั่ง frontend) จำถูกตัวแม้ reload
-    - ไม่มี sentiment/impact — yfinance/Finnhub ไม่ให้ field นี้มา ไม่แต่งเพิ่มเอง (กติกา Handoff
-      ข้อ 6) frontend ซ่อนป้ายเหล่านั้นเมื่อไม่มีข้อมูล"""
+    - ✅ 2026-07-11 (รอบ 2): join คำแปลไทย + sentiment/impact จาก news_translations (Haiku แปล
+      ตอน prefetch — ดู agents.py::natty_translate_news) ตาม Language rule ใน UI_Redesign_Prompt_v3
+      ข่าวที่ยังไม่ถูกแปล (เพิ่งเข้า cache ก่อน prefetch รอบถัดไป) โชว์อังกฤษไปก่อน + translated=false"""
     import json as _json
     from sqlalchemy import func
-    from models import NewsCache
+    from models import NewsCache, NewsTranslation
+
+    # คีย์ประจำข่าว — ต้องตรงกับ agents.py::news_key เสมอ (จงใจ duplicate ไม่ import จาก agents
+    # เพราะ test_main.py mock โมดูล agents ทั้งก้อน — ดู comment หัวไฟล์ test_main.py)
+    def _news_key(title):
+        key = (title or "").strip().lower()[:50]
+        return hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
 
     latest_sq = (
         db.query(NewsCache.ticker, func.max(NewsCache.fetched_at).label("max_at"))
@@ -713,7 +720,7 @@ async def get_news(limit: int = 60, db: Session = Depends(get_db)):
                     by_key[key]["tickers"].append(row.ticker)
                 continue
             by_key[key] = {
-                "id": hashlib.md5(key.encode("utf-8")).hexdigest()[:12],
+                "id": _news_key(title),
                 "tickers": [row.ticker],
                 "headline": title,
                 "summary": item.get("summary") or "",
@@ -722,6 +729,31 @@ async def get_news(limit: int = 60, db: Session = Depends(get_db)):
             }
 
     articles = sorted(by_key.values(), key=lambda a: a["published_at"] or 0, reverse=True)[:limit]
+
+    # ✅ 2026-07-11 (รอบ 2): ทับด้วยคำแปลไทย + sentiment/impact ถ้ามี — ห่อ try/except กัน
+    # ตาราง news_translations ยังไม่ถูก migrate/query พังแล้วลากทั้ง endpoint ล่ม (ข่าวอังกฤษ
+    # ยังดีกว่าไม่มีข่าว)
+    try:
+        ids = [a["id"] for a in articles]
+        translations = {}
+        if ids:
+            translations = {t.id: t for t in db.query(NewsTranslation)
+                            .filter(NewsTranslation.id.in_(ids)).all()}
+        for a in articles:
+            t = translations.get(a["id"])
+            if t:
+                a["headline"] = t.headline_th or a["headline"]
+                a["summary"] = t.summary_th if t.summary_th is not None else a["summary"]
+                a["sentiment"] = t.sentiment
+                a["impact"] = t.impact
+                a["translated"] = True
+            else:
+                a["translated"] = False
+    except Exception as e:
+        print(f"[NEWS] translation join failed: {e}")
+        for a in articles:
+            a.setdefault("translated", False)
+
     return {"count": len(articles), "articles": articles}
 
 # Trade Updates

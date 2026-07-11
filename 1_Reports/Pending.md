@@ -26,8 +26,40 @@
 4. sandbox mount stale รอบที่ 4 (bash เห็น App.jsx สั้นกว่าจริง 2038 vs 2085 บรรทัด) — ตรวจทุกอย่าง
    ผ่าน Read/Grep ฝั่ง Windows แทน esbuild ใน sandbox ตามกฎ Handoff ข้อ 5 → MBBook ต้อง verify เอง
 
+## ✅ 2026-07-11 (รอบ 2 — Fable) — แปลข่าวเป็นไทย + sentiment/impact (Language rule v3)
+
+**ที่มา:** MBBook เปิด production แล้วเจอข่าวอังกฤษล้วน — requirement "news content ต้องเป็นไทย"
+มีอยู่จริงใน `UI_Redesign_Prompt_v3.txt` บรรทัด 20 (Language rule, confirmed 07-07) แต่ไม่เคยถูกยก
+ไปเป็น backend requirement ตอนสร้างงาน #51 → Cow ทำ /news รอบแรกส่งอังกฤษดิบออกไป
+**แก้แล้ว + ยก Language rule ขึ้น Blueprint ให้เป็น requirement ถาวรกันหลุดอีก**
+
+**สิ่งที่ทำ (ยังไม่ commit — รวมกับก้อน UI Phase 2 ที่รอ push อยู่):**
+1. `models.py` — ตาราง `news_translations` (id = md5(title)[:12] คีย์เดียวกับ /news, ข่าวละแถวถาวร)
+2. `agents.py` — `natty_translate_news()`: Haiku แปลข่าวใหม่ + วิเคราะห์ sentiment (Positive/Negative/
+   Neutral) + impact (สูง/กลาง/ต่ำ) ท้าย prefetch ทุกรอบ — batch 20 ข่าว/call, cap 60/รอบ,
+   แปลข่าวละครั้งเดียว, ล้มแล้วไม่กระทบ prefetch หลัก · ประมาณการ cost ~$0.02-0.05/วัน ($0.6-1.5/เดือน)
+3. `main.py` — /news join คำแปล (`translated` flag ต่อข่าว) — ข่าวที่ยังไม่แปลโชว์อังกฤษไปก่อน
+4. frontend — `getAllNews` รับ sentiment/impact จริง (ป้ายในการ์ด/popup กลับมาแสดงอัตโนมัติ)
+5. tests +7 (**รวม 182**: TestNewsTranslate 5 ใน test_agents + translation-join 2 ใน test_main)
+
+**📌 ตัดสินใจไว้ (MBBook ถามเรื่อง AI ฟรี):** เริ่มด้วย Haiku เพราะ infra (key rotation/cost tracking)
+มีครบ ไม่ต้องเพิ่ม dependency — **ทบทวนหลังใช้ 2 สัปดาห์**: ถ้า cost แปลข่าวเกิน ~$1/เดือนจริง
+ให้สลับไส้ `natty_translate_news` เป็น **Gemini Flash free tier** (แก้จุดเดียว ดีไซน์รองรับไว้แล้ว)
+
+**หลัง deploy:** ข่าวเก่าใน cache จะถูก backfill แปลใน prefetch รอบแรกหลัง deploy (สูงสุด 60 ข่าว/รอบ
+ที่เหลือรอบถัดไป) — ถ้าเปิดแอปแล้วบางข่าวยังอังกฤษ = ยังไม่ถึงคิวแปล รอชั่วโมงถัดไป
+
+---
+
+**⏳ Pending ระยะยาว (MBBook สั่งเอง 2026-07-11):**
+- **ตรวจกราฟ Portfolio เทียบ mockup อีกครั้งหลังระบบใช้งานจริง ~90 วัน (ครบกำหนด ~2026-10-09)**
+  — ตอนนี้ข้อมูล portfolio_history ยังไม่พอให้กราฟขึ้นรูปทรงจริง (Monthly ต้องมี snapshot ปิดเดือน
+  2-3 เดือน, Cumulative เริ่มเห็นเส้นชัดหลัง ~2 สัปดาห์) จุดที่ต้องเทียบตอนนั้น: แท่ง Monthly
+  gradient ม่วง + ค่ากำกับทอง, เส้น Cumulative วาดซ้าย→ขวา + จุดทอง + label ปลายเส้น,
+  สัดส่วน hero 70:30 ฝั่ง Desktop
+
 **MBBook ต้องทำ (ตามลำดับ):**
-1. `cd D:\AI_Project\Dashboard_Share` → `.\.venv\Scripts\python.exe -m pytest test_main.py test_agents.py -v > 1_Reports\Output.md 2>&1` (ต้อง 175 passed)
+1. `cd D:\AI_Project\Dashboard_Share` → `.\.venv\Scripts\python.exe -m pytest test_main.py test_agents.py -v > 1_Reports\Output.md 2>&1` (ต้อง **182** passed — อัพเดตหลังเพิ่มระบบแปลข่าว)
    ⚠️ ต้องใช้ python ใน `.venv` เท่านั้น — `python` เฉยๆ ชี้ไป Python 3.14 ของเครื่องที่ไม่มี pytest
    (เจอจริง 2026-07-11: Output.md ขึ้น "No module named pytest")
 2. `cd frontend` → `npm start` → เทียบ mockup (`3_CowContext/UI_Preview_v1.html`) ทีละแท็บ/view

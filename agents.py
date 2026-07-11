@@ -921,7 +921,125 @@ class AgentOrchestrator:
                     db.close()
 
         self.log_action("นัตตี้-prefetch", f"📰 News pre-fetch done: {len(fetched)}/{len(stocks)} tickers cached", "SUCCESS")
+
+        # ✅ 2026-07-11: แปลข่าวใหม่เป็นไทย + sentiment/impact (Language rule ใน UI_Redesign_Prompt_v3
+        # — MBBook เจอข่าวอังกฤษล้วนบน production) ห่อ try/except: แปลล้มยังไงห้ามกระทบ prefetch หลัก
+        try:
+            self.natty_translate_news()
+        except Exception as e:
+            self.log_action("นัตตี้-แปลข่าว", f"translate step failed: {str(e)} — ข่าวโชว์อังกฤษไปก่อน", "WARNING")
+
         return fetched
+
+    # ✅ 2026-07-11: คีย์ประจำข่าว — ต้องตรงกัน 3 จุดเสมอ: ที่นี่ / main.py::_news_key (GET /news) /
+    # models.NewsTranslation.id — สูตร: md5(title.strip().lower()[:50])[:12] (50 ตัวแรกแบบเดียวกับ
+    # _dedup_news ด้านบน เพื่อให้ข่าวเดียวกันจากหลายแหล่ง/หลาย ticker ได้คีย์เดียวกัน)
+    @staticmethod
+    def news_key(title):
+        import hashlib as _hashlib
+        key = (title or "").strip().lower()[:50]
+        return _hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
+
+    def natty_translate_news(self, max_per_run=60, batch_size=20):
+        """✅ เพิ่ม 2026-07-11 — แปลข่าวอังกฤษเป็นไทย + วิเคราะห์ sentiment/impact ด้วย Haiku
+        ตาม Language rule ใน UI_Redesign_Prompt_v3 (confirmed 07-07): news content ต้องเป็นไทย
+
+        หลักการคุม cost:
+        - แปลเฉพาะข่าวที่ยังไม่มีใน news_translations (ข่าวละครั้งเดียว เก็บถาวร ไม่แปลซ้ำ)
+        - cap max_per_run/รอบ — รอบแรก (backfill ทั้ง cache) ไม่บานปลาย ที่เหลือรอ prefetch ชั่วโมงถัดไป
+        - batch ละ batch_size ข่าวต่อ 1 Haiku call (JSON in/out) — ประมาณการ cost ~$0.02-0.05/วัน
+        - sentiment/impact วิเคราะห์จากเนื้อข่าวเท่านั้น enum ไม่ตรงสเปค → เก็บ None (ห้ามแต่งข้อมูล)
+        คืนจำนวนข่าวที่แปลสำเร็จ"""
+        from models import NewsCache, NewsTranslation
+        from sqlalchemy import func
+        import json as _json
+
+        db = SessionLocal()
+        try:
+            latest_sq = (
+                db.query(NewsCache.ticker, func.max(NewsCache.fetched_at).label("max_at"))
+                .group_by(NewsCache.ticker)
+                .subquery()
+            )
+            rows = (
+                db.query(NewsCache)
+                .join(latest_sq, (NewsCache.ticker == latest_sq.c.ticker) &
+                                 (NewsCache.fetched_at == latest_sq.c.max_at))
+                .all()
+            )
+
+            # รวมข่าว unique ทั้งหมดใน cache ปัจจุบัน (คีย์เดียวกับ GET /news)
+            pending = {}
+            for row in rows:
+                try:
+                    items = _json.loads(row.news_json) if row.news_json else []
+                except Exception:
+                    continue
+                for item in items:
+                    title = (item.get("title") or "").strip()
+                    if not title:
+                        continue
+                    nid = self.news_key(title)
+                    if nid not in pending:
+                        pending[nid] = {"id": nid, "title": title[:300],
+                                        "summary": (item.get("summary") or "")[:600]}
+            if not pending:
+                return 0
+
+            existing = {tid for (tid,) in db.query(NewsTranslation.id)
+                        .filter(NewsTranslation.id.in_(list(pending.keys()))).all()}
+            todo = [v for k, v in pending.items() if k not in existing][:max_per_run]
+            if not todo:
+                return 0
+
+            system_prompt = (
+                "คุณเป็นนักแปลข่าวการเงิน แปลข่าวหุ้นภาษาอังกฤษเป็นไทยแบบธรรมชาติ กระชับ "
+                "คงชื่อบริษัท/ticker/ตัวเลข/ศัพท์เทคนิคที่คนเทรดใช้กันไว้ตามเดิม "
+                "และประเมิน sentiment กับระดับผลกระทบต่อราคาหุ้นจากเนื้อข่าวที่ให้มาเท่านั้น ห้ามแต่งข้อมูลเพิ่ม\n"
+                "ตอบเป็น JSON array ล้วนๆ ไม่มี markdown ไม่มีคำอธิบายอื่น แต่ละ element:\n"
+                '{"id": "<id เดิมของข่าวนั้น>", "headline_th": "...", "summary_th": "...", '
+                '"sentiment": "Positive|Negative|Neutral", "impact": "สูง|ปานกลาง|ต่ำ"}\n'
+                "ถ้า summary ต้นฉบับว่าง ให้ summary_th เป็นสตริงว่าง"
+            )
+
+            translated = 0
+            for i in range(0, len(todo), batch_size):
+                batch = todo[i:i + batch_size]
+                try:
+                    resp = self.claude_call(system_prompt, _json.dumps(batch, ensure_ascii=False),
+                                            "นัตตี้-แปลข่าว", model=self.MODEL_HAIKU, max_tokens=8000)
+                    text = resp.strip()
+                    start, end = text.find("["), text.rfind("]")
+                    if start == -1 or end == -1:
+                        raise ValueError("no JSON array in response")
+                    results = _json.loads(text[start:end + 1])
+                except Exception as e:
+                    self.log_action("นัตตี้-แปลข่าว", f"batch {i // batch_size + 1} failed: {str(e)} — skip batch", "WARNING")
+                    continue
+
+                valid_ids = {item["id"] for item in batch}
+                for r in results:
+                    rid = r.get("id")
+                    if rid not in valid_ids or rid in existing:
+                        continue  # Haiku ตอบ id นอกชุด/ซ้ำ — ทิ้ง ไม่เดา
+                    db.add(NewsTranslation(
+                        id=rid,
+                        headline_th=(r.get("headline_th") or "").strip()[:500] or None,
+                        summary_th=(r.get("summary_th") or "").strip()[:1200] or None,
+                        sentiment=r.get("sentiment") if r.get("sentiment") in ("Positive", "Negative", "Neutral") else None,
+                        impact=r.get("impact") if r.get("impact") in ("สูง", "ปานกลาง", "ต่ำ") else None,
+                    ))
+                    existing.add(rid)
+                    translated += 1
+                db.commit()
+
+            if translated:
+                remaining = len(pending) - len(existing)
+                self.log_action("นัตตี้-แปลข่าว",
+                                f"✅ แปลข่าวใหม่ {translated} ชิ้น (ค้างรอรอบถัดไป {max(0, remaining)})", "SUCCESS")
+            return translated
+        finally:
+            db.close()
 
     def _load_news_cache(self, stocks, max_age_hours=2):
         """อ่าน NewsCache — คืน {ticker: [news_list]} ที่อายุไม่เกิน max_age_hours"""

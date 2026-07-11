@@ -718,6 +718,56 @@ class TestNewsEndpoint(unittest.TestCase):
         resp2 = self.client.get("/news")
         self.assertEqual(data["articles"][0]["id"], resp2.json()["articles"][0]["id"])
 
+    def test_news_translation_applied(self):
+        """✅ 2026-07-11 (รอบ 2): มีคำแปลใน news_translations → headline/summary เป็นไทย
+        + sentiment/impact จาก Haiku + translated=True (Language rule ใน UI_Redesign_Prompt_v3)"""
+        import json as _json
+        import hashlib as _hashlib
+        item = {"title": "WDC beats earnings estimates", "summary": "orig", "source": "CNBC",
+                "published_at": 1000, "from_source": "yfinance"}
+        nid = _hashlib.md5("wdc beats earnings estimates".encode()).hexdigest()[:12]
+        tr = MagicMock(id=nid, headline_th="WDC งบดีกว่าคาด", summary_th="สรุปไทย",
+                       sentiment="Positive", impact="สูง")
+
+        # /news เรียก db.query 3 ครั้งตามลำดับ: subquery / news rows / translations
+        subq = MagicMock()
+        newsq = MagicMock()
+        newsq.join.return_value.all.return_value = [MagicMock(ticker="WDC", news_json=_json.dumps([item]))]
+        trq = MagicMock()
+        trq.filter.return_value.all.return_value = [tr]
+        db = MagicMock()
+        db.query.side_effect = [subq, newsq, trq]
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        resp = self.client.get("/news")
+        self.assertEqual(resp.status_code, 200)
+        a = resp.json()["articles"][0]
+        self.assertEqual(a["headline"], "WDC งบดีกว่าคาด")
+        self.assertEqual(a["summary"], "สรุปไทย")
+        self.assertEqual(a["sentiment"], "Positive")
+        self.assertEqual(a["impact"], "สูง")
+        self.assertTrue(a["translated"])
+
+    def test_news_untranslated_falls_back_to_english(self):
+        """ข่าวยังไม่ถูกแปล (เพิ่งเข้า cache) → โชว์อังกฤษต้นฉบับ + translated=False ไม่ error"""
+        import json as _json
+        item = {"title": "Fresh news not yet translated", "summary": "orig", "source": "Reuters",
+                "published_at": 2000, "from_source": "finnhub"}
+        subq = MagicMock()
+        newsq = MagicMock()
+        newsq.join.return_value.all.return_value = [MagicMock(ticker="NVDA", news_json=_json.dumps([item]))]
+        trq = MagicMock()
+        trq.filter.return_value.all.return_value = []  # ยังไม่มีคำแปล
+        db = MagicMock()
+        db.query.side_effect = [subq, newsq, trq]
+        app_module.app.dependency_overrides[app_module.get_db] = lambda: (yield db)
+
+        resp = self.client.get("/news")
+        a = resp.json()["articles"][0]
+        self.assertEqual(a["headline"], "Fresh news not yet translated")
+        self.assertIsNone(a["sentiment"])
+        self.assertFalse(a["translated"])
+
     def test_news_broken_json_row_skipped_not_500(self):
         """news_json เสีย 1 แถว → ข้ามแถวนั้น ข่าวจาก ticker อื่นยังมาครบ (ห้าม 500)"""
         import json as _json
